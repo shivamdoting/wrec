@@ -1,0 +1,6 @@
+/target
+.DS_Store
+*.mov
+*.mp4
+*.log
+.env
