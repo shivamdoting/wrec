@@ -6,8 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-wrec-core = { path = "../wrec-core" }
-wrec-macos = { path = "../wrec-macos" }
+wrec-core = { path = "../core" }
+wrec-macos = { path = "../macos" }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

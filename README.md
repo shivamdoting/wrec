@@ -18,7 +18,7 @@ The recording path stays inside Apple's native media stack. Rust controls app st
 
 ## Backend
 
-`crates/wrec-macos/build.rs` compiles `crates/wrec-macos/native/wrec_helper.swift` with `swiftc` into Cargo's build output. At runtime, the Rust backend launches that compiled helper directly.
+`crates/macos/build.rs` compiles `crates/macos/native/wrec_helper.swift` with `swiftc` into Cargo's build output. At runtime, the Rust backend launches that compiled helper directly.
 
 The helper:
 
@@ -58,9 +58,9 @@ Recording-affecting controls are disabled while recording so the UI cannot diver
 
 ## Workspace
 
-- `crates/wrec-app` - GPUI app/window and UI state.
-- `crates/wrec-core` - shared recorder settings, session, metrics, and engine trait.
-- `crates/wrec-macos` - macOS backend and compiled native helper.
+- `crates/app` - GPUI app/window and UI state.
+- `crates/core` - shared recorder settings, session, metrics, and engine trait.
+- `crates/macos` - macOS backend and compiled native helper.
 
 ## Requirements
 

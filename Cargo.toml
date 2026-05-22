@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "crates/wrec-app",
-  "crates/wrec-core",
-  "crates/wrec-macos",
+  "crates/app",
+  "crates/core",
+  "crates/macos",
 ]
 resolver = "2"
 

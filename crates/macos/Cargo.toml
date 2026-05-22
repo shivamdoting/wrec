@@ -7,7 +7,7 @@ rust-version.workspace = true
 build = "build.rs"
 
 [dependencies]
-wrec-core = { path = "../wrec-core" }
+wrec-core = { path = "../core" }
 anyhow.workspace = true
 tracing.workspace = true
 

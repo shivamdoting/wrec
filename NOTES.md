@@ -2,7 +2,7 @@
 
 ## Current v0 backend
 
-Cargo compiles the tiny Swift helper from `crates/wrec-macos/native/wrec_helper.swift`
+Cargo compiles the tiny Swift helper from `crates/macos/native/wrec_helper.swift`
 into the build output, and the app starts that compiled helper at runtime.
 
 Why this route for v0:
