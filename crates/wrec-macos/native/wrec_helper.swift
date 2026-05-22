@@ -61,11 +61,6 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             droppedFrameCount += 1
             return
         }
-        guard input.isReadyForMoreMediaData else {
-            droppedFrameCount += 1
-            return
-        }
-
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard pts.isValid else {
             droppedFrameCount += 1
@@ -83,6 +78,11 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             didStart = true
             FileHandle.standardError.write(Data("wrec-helper: recording started\n".utf8))
             started.signal()
+        }
+
+        guard input.isReadyForMoreMediaData else {
+            droppedFrameCount += 1
+            return
         }
 
         if input.append(sampleBuffer) {
