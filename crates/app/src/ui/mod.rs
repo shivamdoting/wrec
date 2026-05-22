@@ -397,7 +397,6 @@ impl WrecApp {
                 muted_foreground,
                 metrics_label,
             ))
-            .child(metrics_panel(self.metrics.as_ref(), muted_foreground))
             .child(nerd_section_title("Events", muted_foreground, None))
             .child(
                 div()
@@ -511,7 +510,14 @@ impl Render for WrecApp {
         let controls_disabled = self.recorder_state.is_busy()
             || self.permission_busy
             || self.recorder_state.is_recording();
-        let metrics_label = self.metrics.as_ref().map(metrics_label);
+        let metrics_label = Some(if self.recorder_state.is_recording() {
+            self.metrics
+                .as_ref()
+                .map(metrics_label)
+                .unwrap_or_else(zero_metrics_label)
+        } else {
+            zero_metrics_label()
+        });
 
         div()
             .id("wrec-root")
@@ -570,52 +576,6 @@ impl Render for WrecApp {
             )
             .children(notification_layer)
     }
-}
-
-fn metrics_panel(metrics: Option<&RecorderMetrics>, muted_foreground: Hsla) -> Div {
-    let elapsed = metrics
-        .map(|metrics| format!("{}s", metrics.elapsed_secs))
-        .unwrap_or_else(|| "--".to_string());
-    let size = metrics
-        .map(|metrics| format!("{:.1} MB", metrics.output_bytes as f32 / 1_000_000.))
-        .unwrap_or_else(|| "--".to_string());
-    let bitrate = metrics
-        .map(|metrics| format!("{:.1} Mbps", metrics.estimated_bitrate_mbps))
-        .unwrap_or_else(|| "--".to_string());
-
-    div()
-        .flex()
-        .flex_col()
-        .p_3()
-        .rounded_lg()
-        .border_1()
-        .border_color(muted_foreground.opacity(0.24))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_6()
-                .child(metric_tile("Time", elapsed, muted_foreground))
-                .child(metric_tile("Size", size, muted_foreground))
-                .child(metric_tile("Rate", bitrate, muted_foreground)),
-        )
-}
-
-fn metric_tile(label: &'static str, value: String, muted_foreground: Hsla) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .flex_1()
-        .min_w(px(0.))
-        .child(div().text_xs().text_color(muted_foreground).child(label))
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .truncate()
-                .child(value),
-        )
 }
 
 fn nerd_section_title(title: &'static str, muted_foreground: Hsla, detail: Option<String>) -> Div {
@@ -843,4 +803,8 @@ fn metrics_label(metrics: &RecorderMetrics) -> String {
         metrics.output_bytes as f32 / 1_000_000.,
         metrics.estimated_bitrate_mbps
     )
+}
+
+fn zero_metrics_label() -> String {
+    "0s  0.0 MB  0.0 Mbps".to_string()
 }
