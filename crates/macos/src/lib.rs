@@ -3,10 +3,16 @@ use wrec_core::{
     RecorderSettings, RecordingSession, Result, ScreenRecordingPermissionStatus,
 };
 
-static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static LAST_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub enum RecorderEvent {
+    Starting {
+        session_id: u64,
+        target: CaptureTarget,
+        settings: RecorderSettings,
+        output_path: std::path::PathBuf,
+    },
     Log {
         session_id: Option<u64>,
         message: String,
@@ -72,12 +78,30 @@ impl RecorderEngine for MacosRecorder {
         target: CaptureTarget,
         settings: RecorderSettings,
     ) -> Result<RecordingSession> {
-        let session_id = NEXT_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.emit_log(
-            Some(session_id),
-            format!("starting capture: {} ({:?})", target.name, target.kind),
-        );
-        let session = platform::start_recording(session_id, target, settings, self.events.clone())?;
+        let session_id = next_session_id();
+        let output_path = recording_output_path(&settings);
+        self.emit(RecorderEvent::Starting {
+            session_id,
+            target: target.clone(),
+            settings: settings.clone(),
+            output_path: output_path.clone(),
+        });
+        let session = match platform::start_recording(
+            session_id,
+            target,
+            settings,
+            output_path,
+            self.events.clone(),
+        ) {
+            Ok(session) => session,
+            Err(err) => {
+                self.emit(RecorderEvent::Failed {
+                    session_id: Some(session_id),
+                    message: err.to_string(),
+                });
+                return Err(err);
+            }
+        };
         self.active = Some(session.clone());
         self.emit_log(
             Some(session.id),
@@ -100,6 +124,45 @@ impl Drop for MacosRecorder {
     fn drop(&mut self) {
         let _ = platform::stop_recording();
     }
+}
+
+fn next_session_id() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros().min(u64::MAX as u128) as u64)
+        .unwrap_or_default();
+
+    loop {
+        let current = LAST_SESSION_ID.load(std::sync::atomic::Ordering::Relaxed);
+        let next = now_micros.max(current.saturating_add(1));
+        if LAST_SESSION_ID
+            .compare_exchange(
+                current,
+                next,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn recording_output_path(settings: &RecorderSettings) -> std::path::PathBuf {
+    let filename = format!("wrec-{}.mov", chrono_like_timestamp());
+    settings.output_dir.join(filename)
+}
+
+fn chrono_like_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    secs.to_string()
 }
 
 #[cfg(target_os = "macos")]
@@ -183,6 +246,7 @@ mod platform {
         session_id: u64,
         target: CaptureTarget,
         settings: RecorderSettings,
+        output_path: std::path::PathBuf,
         events: Option<std::sync::mpsc::Sender<RecorderEvent>>,
     ) -> Result<RecordingSession> {
         use std::process::{Command, Stdio};
@@ -190,8 +254,6 @@ mod platform {
         std::fs::create_dir_all(&settings.output_dir)
             .map_err(|err| RecorderError::Backend(err.to_string()))?;
 
-        let filename = format!("wrec-{}.mov", chrono_like_timestamp());
-        let output_path = settings.output_dir.join(filename);
         let helper = helper_path();
         let child_slot = CHILD.get_or_init(|| Mutex::new(None));
         let mut active_child = child_slot.lock().unwrap();
@@ -217,6 +279,7 @@ mod platform {
             .arg(target.id.to_string())
             .arg(settings.codec.as_arg())
             .arg(settings.quality.as_arg())
+            .arg(settings.resolution.as_arg())
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
             .stderr(Stdio::piped())
@@ -531,15 +594,6 @@ mod platform {
     fn helper_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("WREC_HELPER_PATH"))
     }
-
-    fn chrono_like_timestamp() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_default();
-        secs.to_string()
-    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -562,6 +616,7 @@ mod platform {
         _session_id: u64,
         _target: CaptureTarget,
         _settings: RecorderSettings,
+        _output_path: std::path::PathBuf,
         _events: Option<std::sync::mpsc::Sender<RecorderEvent>>,
     ) -> Result<RecordingSession> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))

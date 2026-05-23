@@ -1,0 +1,30 @@
+---
+import { Font } from "astro:assets";
+import "../styles/global.css";
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/wrec.svg" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <Font cssVariable="--font-clash-grotesk" preload />
+    <title>wrec</title>
+  </head>
+  <body class="m-0 overflow-hidden bg-white text-neutral-950 select-none">
+    <main class="grid h-dvh place-items-center" aria-label="wrec">
+      <div
+        class="inline-flex items-baseline gap-0 font-[family-name:var(--font-clash-grotesk)] text-[5.25rem] leading-[0.9] font-black tracking-normal md:text-[10rem]"
+      >
+        <h1 class="m-0">wrec</h1>
+        <div
+          class="animate-recording-blink rounded-full text-[#c62828] h-4 w-4"
+          aria-hidden="true"
+        >
+          .
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

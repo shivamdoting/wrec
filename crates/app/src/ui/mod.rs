@@ -6,16 +6,15 @@ use gpui_component::{
     input::Input,
     label::Label,
     notification::Notification,
-    scroll::ScrollableElement,
     select::{Select, SelectItem, SelectState},
     switch::Switch,
     tab::{Tab, TabBar},
-    v_virtual_list, ActiveTheme as _, Disableable as _, Icon as UiIcon, Root, Sizable as _, Theme,
-    ThemeMode, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon as UiIcon, Root, Sizable as _, Theme, ThemeMode,
+    WindowExt as _,
 };
-use std::rc::Rc;
 use wrec_core::{
-    CaptureSourceKind, CaptureTarget, FrameRate, RecorderMetrics, ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, FrameRate, RecorderMetrics, Resolution,
+    ScreenRecordingPermissionStatus,
 };
 
 pub(crate) type ControlSelect = SelectState<Vec<&'static str>>;
@@ -29,12 +28,12 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
+pub(crate) const RESOLUTION_OPTIONS: [&str; 5] = ["Native", "4K", "2K", "1080p", "720p"];
 pub(crate) const FPS_OPTIONS: [&str; 2] = ["30 FPS", "60 FPS"];
 
 const TAB_HEIGHT: f32 = 32.;
 const FIELD_LABEL_WIDTH: f32 = 96.;
 const NOTIFICATION_WIDTH: f32 = 320.;
-const LOG_ROW_HEIGHT: f32 = 32.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppTab {
@@ -194,6 +193,14 @@ impl WrecApp {
                 .placeholder("Quality")
                 .disabled(controls_disabled),
         );
+        let resolution_row = labeled_select_row(
+            "Resolution",
+            muted_foreground,
+            Select::new(&self.resolution_select)
+                .h(px(CONTROL_HEIGHT))
+                .placeholder("Resolution")
+                .disabled(controls_disabled),
+        );
         let frame_rate_row = labeled_select_row(
             "Frame Rate",
             muted_foreground,
@@ -232,6 +239,7 @@ impl WrecApp {
                             .flex_col()
                             .gap_2()
                             .child(format_row)
+                            .child(resolution_row)
                             .child(quality_row)
                             .child(frame_rate_row)
                             .child(cursor_row),
@@ -378,14 +386,6 @@ impl WrecApp {
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let log_item_sizes = Rc::new(
-            self.logs
-                .iter()
-                .map(|_| size(px(0.), px(LOG_ROW_HEIGHT)))
-                .collect::<Vec<_>>(),
-        );
-
         div()
             .flex()
             .flex_col()
@@ -397,53 +397,26 @@ impl WrecApp {
                 muted_foreground,
                 metrics_label,
             ))
-            .child(nerd_section_title("Events", muted_foreground, None))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Logs"))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .relative()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .when(self.logs.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted_foreground)
-                                        .child("No events yet"),
-                                )
-                            })
-                            .when(!self.logs.is_empty(), |this| {
-                                this.child(
-                                    v_virtual_list(
-                                        cx.entity().clone(),
-                                        "nerd-event-log",
-                                        log_item_sizes,
-                                        move |app, visible_range, _, _| {
-                                            visible_range
-                                                .filter_map(|ix| {
-                                                    let ix = app.logs.len().checked_sub(ix + 1)?;
-                                                    app.logs.get(ix).cloned()
-                                                })
-                                                .map(|log| log_row(log, muted_foreground))
-                                                .collect()
-                                        },
-                                    )
-                                    .size_full()
-                                    .track_scroll(&self.nerd_log_scroll_handle),
-                                )
-                                .vertical_scrollbar(&self.nerd_log_scroll_handle)
-                            }),
+                        UiButton::new("open-recordings-data-dir")
+                            .outline()
+                            .compact()
+                            .h(px(CONTROL_HEIGHT))
+                            .icon(
+                                UiIcon::new(PhosphorIcon::FolderOpen).text_color(muted_foreground),
+                            )
+                            .label("Open")
+                            .tooltip("Open recordings data folder")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_recordings_data_dir(window, cx);
+                            })),
                     ),
             )
     }
@@ -631,16 +604,6 @@ fn permission_state_button(
     }
 }
 
-fn log_row(message: String, muted_foreground: Hsla) -> Div {
-    div()
-        .h(px(LOG_ROW_HEIGHT))
-        .py_0p5()
-        .text_sm()
-        .text_color(muted_foreground)
-        .line_clamp(2)
-        .child(message)
-}
-
 fn record_button(
     icon: PhosphorIcon,
     label: &'static str,
@@ -807,4 +770,14 @@ fn metrics_label(metrics: &RecorderMetrics) -> String {
 
 fn zero_metrics_label() -> String {
     "0s  0.0 MB  0.0 Mbps".to_string()
+}
+
+pub(crate) fn resolution_label(resolution: Resolution) -> &'static str {
+    match resolution {
+        Resolution::Native => "Native",
+        Resolution::R720p => "720p",
+        Resolution::R1080p => "1080p",
+        Resolution::R2k => "2K",
+        Resolution::R4k => "4K",
+    }
 }

@@ -54,6 +54,28 @@ impl Quality {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Resolution {
+    #[default]
+    Native,
+    R720p,
+    R1080p,
+    R2k,
+    R4k,
+}
+
+impl Resolution {
+    pub const fn as_arg(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::R720p => "720p",
+            Self::R1080p => "1080p",
+            Self::R2k => "2k",
+            Self::R4k => "4k",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenRecordingPermissionStatus {
     Unknown,
@@ -73,6 +95,8 @@ pub struct RecorderSettings {
     pub fps: FrameRate,
     pub codec: Codec,
     pub quality: Quality,
+    #[serde(default)]
+    pub resolution: Resolution,
     pub output_dir: PathBuf,
     pub include_cursor: bool,
 }
@@ -84,6 +108,7 @@ impl Default for RecorderSettings {
             fps: FrameRate::Fps30,
             codec: Codec::Hevc,
             quality: Quality::Balanced,
+            resolution: Resolution::Native,
             output_dir: dirs_output_dir(),
             include_cursor: true,
         }
@@ -159,6 +184,15 @@ mod tests {
     }
 
     #[test]
+    fn resolution_args_match_helper_contract() {
+        assert_eq!(Resolution::Native.as_arg(), "native");
+        assert_eq!(Resolution::R720p.as_arg(), "720p");
+        assert_eq!(Resolution::R1080p.as_arg(), "1080p");
+        assert_eq!(Resolution::R2k.as_arg(), "2k");
+        assert_eq!(Resolution::R4k.as_arg(), "4k");
+    }
+
+    #[test]
     fn default_settings_are_low_overhead() {
         let settings = RecorderSettings::default();
 
@@ -166,6 +200,7 @@ mod tests {
         assert_eq!(settings.fps, FrameRate::Fps30);
         assert_eq!(settings.codec, Codec::Hevc);
         assert_eq!(settings.quality, Quality::Balanced);
+        assert_eq!(settings.resolution, Resolution::Native);
         assert!(settings.include_cursor);
     }
 }

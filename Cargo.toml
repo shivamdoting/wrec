@@ -3,6 +3,7 @@ members = [
   "crates/app",
   "crates/core",
   "crates/macos",
+  "crates/store",
 ]
 resolver = "2"
 

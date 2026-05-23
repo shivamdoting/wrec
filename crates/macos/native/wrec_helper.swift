@@ -170,8 +170,8 @@ func run() async {
         return
     }
 
-    guard args.count >= 8 else {
-        fputs("usage: wrec_helper <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high>\n", stderr)
+    guard args.count >= 9 else {
+        fputs("usage: wrec_helper <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k>\n", stderr)
         Foundation.exit(64)
     }
 
@@ -182,6 +182,7 @@ func run() async {
     let targetId = UInt32(args[5]) ?? 0
     let codec = args[6]
     let quality = args[7]
+    let resolution = args[8]
 
     guard ensureScreenCapturePermission() else {
         fputs("wrec-helper: permission denied: Screen Recording access is required\n", stderr)
@@ -191,8 +192,8 @@ func run() async {
     do {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let filter: SCContentFilter
-        let width: Int
-        let height: Int
+        let fallbackWidth: Int
+        let fallbackHeight: Int
 
         if targetKind == "window" {
             guard let window = content.windows.first(where: { $0.windowID == targetId }) else {
@@ -200,8 +201,8 @@ func run() async {
                 Foundation.exit(5)
             }
             filter = SCContentFilter(desktopIndependentWindow: window)
-            width = Int(window.frame.width)
-            height = Int(window.frame.height)
+            fallbackWidth = Int(window.frame.width)
+            fallbackHeight = Int(window.frame.height)
         } else {
             let display = content.displays.first(where: { $0.displayID == targetId }) ?? content.displays.first
             guard let display else {
@@ -209,20 +210,27 @@ func run() async {
                 Foundation.exit(4)
             }
             filter = SCContentFilter(display: display, excludingWindows: [])
-            width = display.width
-            height = display.height
+            fallbackWidth = display.width
+            fallbackHeight = display.height
         }
 
-        let qualityScale = switch quality {
-        case "efficient": 0.75
-        default: 1.0
-        }
-        let captureWidth = evenDimension(Int(Double(width) * qualityScale))
-        let captureHeight = evenDimension(Int(Double(height) * qualityScale))
+        let nativeSize = nativeCaptureSize(
+            filter: filter,
+            fallbackWidth: fallbackWidth,
+            fallbackHeight: fallbackHeight
+        )
+        let captureSize = outputSize(
+            nativeWidth: nativeSize.width,
+            nativeHeight: nativeSize.height,
+            resolution: resolution
+        )
+        let captureWidth = captureSize.width
+        let captureHeight = captureSize.height
 
         let streamConfig = SCStreamConfiguration()
         streamConfig.width = captureWidth
         streamConfig.height = captureHeight
+        streamConfig.scalesToFit = true
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: fps)
         streamConfig.queueDepth = quality == "high" ? 4 : 2
         streamConfig.showsCursor = includeCursor
@@ -231,7 +239,7 @@ func run() async {
 
         FileHandle.standardError.write(
             Data(
-                "wrec-helper: target=\(targetKind) id=\(targetId) size=\(captureWidth)x\(captureHeight) fps=\(fps) cursor=\(includeCursor) codec=\(codec) quality=\(quality) pipeline=scstream-avassetwriter\n"
+                "wrec-helper: target=\(targetKind) id=\(targetId) native=\(nativeSize.width)x\(nativeSize.height) size=\(captureWidth)x\(captureHeight) fps=\(fps) cursor=\(includeCursor) codec=\(codec) quality=\(quality) resolution=\(resolution) pipeline=scstream-avassetwriter\n"
                     .utf8
             )
         )
@@ -278,6 +286,41 @@ func frameStatus(_ sampleBuffer: CMSampleBuffer) -> SCFrameStatus {
 
 func evenDimension(_ value: Int) -> Int {
     max(2, value - (value % 2))
+}
+
+func nativeCaptureSize(filter: SCContentFilter, fallbackWidth: Int, fallbackHeight: Int) -> (width: Int, height: Int) {
+    let scale = CGFloat(filter.pointPixelScale)
+    let width = evenDimension(Int((filter.contentRect.width * scale).rounded()))
+    let height = evenDimension(Int((filter.contentRect.height * scale).rounded()))
+
+    if width > 2 && height > 2 {
+        return (width, height)
+    }
+    return (evenDimension(fallbackWidth), evenDimension(fallbackHeight))
+}
+
+func outputSize(nativeWidth: Int, nativeHeight: Int, resolution: String) -> (width: Int, height: Int) {
+    let maxSize: (width: Int, height: Int)? = switch resolution {
+    case "720p": (1280, 720)
+    case "1080p": (1920, 1080)
+    case "2k": (2560, 1440)
+    case "4k": (3840, 2160)
+    default: nil
+    }
+
+    guard let maxSize else {
+        return (evenDimension(nativeWidth), evenDimension(nativeHeight))
+    }
+
+    let scale = min(
+        1.0,
+        Double(maxSize.width) / Double(nativeWidth),
+        Double(maxSize.height) / Double(nativeHeight)
+    )
+    return (
+        evenDimension(Int((Double(nativeWidth) * scale).rounded())),
+        evenDimension(Int((Double(nativeHeight) * scale).rounded()))
+    )
 }
 
 func ensureScreenCapturePermission() -> Bool {
