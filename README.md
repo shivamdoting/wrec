@@ -6,15 +6,28 @@ An M-series-first macOS screen recorder focused on a low-copy, hardware-accelera
 
 ```text
 Rust GPUI app
-  -> compiled Swift helper
+  -> macOS backend process supervisor
+  -> compiled Swift capture helper
   -> ScreenCaptureKit SCStream
-  -> SCStreamOutput CMSampleBuffer screen/audio
-  -> CVPixelBuffer / IOSurface, NV12 where possible
-  -> AVAssetWriter / VideoToolbox hardware encoder
-  -> .mov
+      -> .screen CMSampleBuffer
+          -> CVPixelBuffer / IOSurface, NV12 where possible
+          -> AVAssetWriter video input
+          -> VideoToolbox hardware HEVC/H.264
+      -> .audio CMSampleBuffer when system audio is enabled
+          -> AVAssetWriter audio input
+          -> AAC
+  -> single .mov file
 ```
 
-The recording path stays inside Apple's native media stack. Rust controls app state, target selection, settings, process lifecycle, and UI events; it does not receive, copy, or retain raw pixels.
+The recording path stays inside Apple's native media stack. Rust controls app
+state, target selection, settings, process lifecycle, and UI events; it does
+not receive, copy, or retain raw pixels or audio samples.
+
+Video owns the recording timeline. The helper starts the writer session at the
+first complete screen frame, then appends later system-audio buffers using
+their original ScreenCaptureKit timestamps. Any audio buffers that arrive before
+the first video frame are dropped instead of buffered, keeping startup memory
+bounded.
 
 ## Backend
 
@@ -31,8 +44,9 @@ The helper:
 - Requests NV12 capture buffers where possible.
 - Writes real-time video and AAC audio through `AVAssetWriter`.
 - Uses HEVC by default, with H.264 available from the UI.
+- Excludes Wrec's own process audio from system-audio capture.
 - Keeps ScreenCaptureKit queue depth small.
-- Drops frames when the writer is backpressured instead of accumulating memory.
+- Drops samples when the writer is backpressured instead of accumulating memory.
 - Finalizes the writer deterministically on stop.
 
 ## UI
@@ -46,6 +60,7 @@ Current controls:
 - FPS: 30 or 60.
 - Codec: HEVC or H.264.
 - Cursor capture toggle.
+- System audio capture toggle.
 - Quality: efficient, balanced, high.
 - Output folder picker.
 - Recording status and basic metrics.
@@ -73,6 +88,7 @@ Recording-affecting controls are disabled while recording so the UI cannot diver
 - Apple Silicon is the primary target.
 - Full Xcode selected with `xcode-select`.
 - Screen Recording permission granted for the app/terminal during development.
+- Audio Recording permission granted when system audio capture is enabled.
 
 ## Run
 
