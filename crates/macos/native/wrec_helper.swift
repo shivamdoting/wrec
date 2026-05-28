@@ -22,6 +22,10 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var audioSampleCount: Int64 = 0
     private var droppedAudioSampleCount: Int64 = 0
     private var firstPTS: CMTime?
+    private var isPaused = false
+    private var pauseStartedPTS: CMTime?
+    private var pendingResume = false
+    private var pauseOffset = CMTime.zero
     private var lastMetricTime = DispatchTime.now()
 
     init(outputURL: URL, width: Int, height: Int, fps: Int32, codec: String, quality: String, includeSystemAudio: Bool) throws {
@@ -98,6 +102,19 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             droppedFrameCount += 1
             return
         }
+        if isPaused {
+            if pauseStartedPTS == nil {
+                pauseStartedPTS = pts
+            }
+            droppedFrameCount += 1
+            return
+        }
+        applyPendingResume(at: pts)
+        guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseOffset) else {
+            droppedFrameCount += 1
+            return
+        }
+        let adjustedPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if !didStart {
             guard writer.startWriting() else {
@@ -105,8 +122,8 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 droppedFrameCount += 1
                 return
             }
-            writer.startSession(atSourceTime: pts)
-            firstPTS = pts
+            writer.startSession(atSourceTime: adjustedPTS)
+            firstPTS = adjustedPTS
             didStart = true
             FileHandle.standardError.write(Data("wrec-helper: recording started\n".utf8))
             started.signal()
@@ -119,7 +136,7 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
         if videoInput.append(sampleBuffer) {
             frameCount += 1
-            emitMetricsIfNeeded(currentPTS: pts)
+            emitMetricsIfNeeded(currentPTS: adjustedPTS)
         } else {
             droppedFrameCount += 1
             if let error = writer.error {
@@ -145,6 +162,14 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             droppedAudioSampleCount += 1
             return
         }
+        if isPaused || pendingResume {
+            droppedAudioSampleCount += 1
+            return
+        }
+        guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseOffset) else {
+            droppedAudioSampleCount += 1
+            return
+        }
         guard audioInput.isReadyForMoreMediaData else {
             droppedAudioSampleCount += 1
             return
@@ -158,6 +183,97 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 FileHandle.standardError.write(Data("wrec-helper: audio append failed: \(error)\n".utf8))
             }
         }
+    }
+
+    func pause() {
+        queue.async {
+            guard self.didStart, !self.didFinish, !self.isPaused else {
+                return
+            }
+
+            self.isPaused = true
+            self.pendingResume = false
+            self.pauseStartedPTS = nil
+            FileHandle.standardError.write(Data("wrec-helper: recording paused\n".utf8))
+        }
+    }
+
+    func resume() {
+        queue.async {
+            guard self.didStart, !self.didFinish, self.isPaused else {
+                return
+            }
+
+            self.isPaused = false
+            self.pendingResume = true
+            FileHandle.standardError.write(Data("wrec-helper: recording resumed\n".utf8))
+        }
+    }
+
+    private func applyPendingResume(at pts: CMTime) {
+        guard pendingResume else {
+            return
+        }
+
+        if let pauseStartedPTS, CMTimeCompare(pts, pauseStartedPTS) >= 0 {
+            pauseOffset = CMTimeAdd(pauseOffset, CMTimeSubtract(pts, pauseStartedPTS))
+        }
+        pendingResume = false
+        pauseStartedPTS = nil
+    }
+
+    private func retimedSampleBuffer(_ sampleBuffer: CMSampleBuffer, subtracting offset: CMTime) -> CMSampleBuffer? {
+        guard offset.isValid, CMTimeCompare(offset, .zero) > 0 else {
+            return sampleBuffer
+        }
+
+        var timingCount = 0
+        var status = CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        )
+        guard status == noErr, timingCount > 0 else {
+            return sampleBuffer
+        }
+
+        var timing = Array(repeating: CMSampleTimingInfo(), count: timingCount)
+        status = timing.withUnsafeMutableBufferPointer { buffer in
+            CMSampleBufferGetSampleTimingInfoArray(
+                sampleBuffer,
+                entryCount: timingCount,
+                arrayToFill: buffer.baseAddress,
+                entriesNeededOut: &timingCount
+            )
+        }
+        guard status == noErr else {
+            return nil
+        }
+
+        for index in timing.indices {
+            if timing[index].presentationTimeStamp.isValid {
+                timing[index].presentationTimeStamp = CMTimeSubtract(timing[index].presentationTimeStamp, offset)
+            }
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeSubtract(timing[index].decodeTimeStamp, offset)
+            }
+        }
+
+        var adjusted: CMSampleBuffer?
+        status = timing.withUnsafeBufferPointer { buffer in
+            CMSampleBufferCreateCopyWithNewTiming(
+                allocator: kCFAllocatorDefault,
+                sampleBuffer: sampleBuffer,
+                sampleTimingEntryCount: timingCount,
+                sampleTimingArray: buffer.baseAddress,
+                sampleBufferOut: &adjusted
+            )
+        }
+        guard status == noErr else {
+            return nil
+        }
+        return adjusted
     }
 
     func waitUntilStarted(timeout: DispatchTimeInterval) -> Bool {
@@ -331,8 +447,8 @@ func run() async {
         try await stream.startCapture()
         _ = recorder.waitUntilStarted(timeout: .seconds(3))
 
-        // Parent process writes a line to stdin to stop. EOF also stops.
-        await waitForStopSignal()
+        // Parent process writes commands to stdin. EOF also stops.
+        await waitForStopSignal(recorder: recorder)
 
         try await stream.stopCapture()
         guard recorder.finish(timeout: .seconds(15)) else {
@@ -408,9 +524,27 @@ func initializeGraphicsClient() {
     NSApplication.shared.setActivationPolicy(.prohibited)
 }
 
-func waitForStopSignal() async {
+func waitForStopSignal(recorder: SampleRecorder) async {
+    let stopped = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInitiated).async {
+        while let line = readLine() {
+            switch line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "pause":
+                recorder.pause()
+            case "resume":
+                recorder.resume()
+            case "stop":
+                stopped.signal()
+                return
+            default:
+                continue
+            }
+        }
+        stopped.signal()
+    }
+
     await Task.detached(priority: .userInitiated) {
-        _ = readLine()
+        stopped.wait()
     }.value
 }
 

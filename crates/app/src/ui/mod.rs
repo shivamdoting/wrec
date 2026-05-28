@@ -153,6 +153,11 @@ impl WrecApp {
         record_tip: &'static str,
         record_is_idle: bool,
         record_disabled: bool,
+        show_pause_button: bool,
+        pause_icon: PhosphorIcon,
+        pause_label: &'static str,
+        pause_tip: &'static str,
+        pause_disabled: bool,
         controls_disabled: bool,
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
@@ -261,7 +266,27 @@ impl WrecApp {
                             .child(audio_row),
                     ),
             )
-            .child(
+            .child(if show_pause_button {
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        pause_button(pause_icon, pause_label, pause_tip, pause_disabled, cx)
+                            .flex_1(),
+                    )
+                    .child(
+                        record_button(
+                            record_icon,
+                            record_label,
+                            record_tip,
+                            record_is_idle,
+                            record_disabled,
+                            cx,
+                        )
+                        .flex_1(),
+                    )
+                    .into_any_element()
+            } else {
                 record_button(
                     record_icon,
                     record_label,
@@ -270,8 +295,9 @@ impl WrecApp {
                     record_disabled,
                     cx,
                 )
-                .w_full(),
-            )
+                .w_full()
+                .into_any_element()
+            })
     }
 
     pub(crate) fn render_settings_tab(
@@ -487,19 +513,33 @@ impl Render for WrecApp {
         let border = cx.theme().border;
         let is_dark = cx.theme().mode.is_dark();
         let notification_layer = Root::render_notification_layer(window, cx);
-        let (record_icon, record_label, record_tip, record_is_idle) =
-            if self.recorder_state.is_recording() {
-                (PhosphorIcon::Stop, "Stop", "Stop recording", false)
-            } else {
-                (PhosphorIcon::Record, "Rec", "Start recording", true)
-            };
-        let record_disabled = self.recorder_state.is_busy()
-            || (!self.recorder_state.is_recording()
-                && (self.permission_busy || !self.permission_status.is_granted()));
-        let controls_disabled = self.recorder_state.is_busy()
-            || self.permission_busy
-            || self.recorder_state.is_recording();
-        let metrics_label = Some(if self.recorder_state.is_recording() {
+        let active_session = self.recorder_state.is_active_session();
+        let (record_icon, record_label, record_tip, record_is_idle) = if active_session {
+            (PhosphorIcon::Stop, "Stop", "Stop recording", false)
+        } else {
+            (PhosphorIcon::Record, "Rec", "Start recording", true)
+        };
+        let (pause_icon, pause_label, pause_tip) = if self.recorder_state.is_paused() {
+            (PhosphorIcon::Play, "Resume", "Resume recording")
+        } else {
+            (PhosphorIcon::Pause, "Pause", "Pause recording")
+        };
+        let record_disabled = matches!(
+            self.recorder_state,
+            crate::app::RecorderState::CountingDown
+                | crate::app::RecorderState::Starting
+                | crate::app::RecorderState::Pausing
+                | crate::app::RecorderState::Resuming
+                | crate::app::RecorderState::Stopping
+        ) || (!active_session
+            && (self.permission_busy || !self.permission_status.is_granted()));
+        let pause_disabled = matches!(
+            self.recorder_state,
+            crate::app::RecorderState::Pausing | crate::app::RecorderState::Resuming
+        );
+        let controls_disabled =
+            self.recorder_state.is_busy() || self.permission_busy || active_session;
+        let metrics_label = Some(if active_session || self.recorder_state.is_recording() {
             self.metrics
                 .as_ref()
                 .map(metrics_label)
@@ -536,6 +576,11 @@ impl Render for WrecApp {
                                         record_tip,
                                         record_is_idle,
                                         record_disabled,
+                                        active_session,
+                                        pause_icon,
+                                        pause_label,
+                                        pause_tip,
+                                        pause_disabled,
                                         controls_disabled,
                                         muted_foreground,
                                         cx,
@@ -649,6 +694,26 @@ fn record_button(
     } else {
         button.danger()
     }
+}
+
+fn pause_button(
+    icon: PhosphorIcon,
+    label: &'static str,
+    tooltip: &'static str,
+    disabled: bool,
+    cx: &mut Context<WrecApp>,
+) -> UiButton {
+    UiButton::new("pause-button")
+        .outline()
+        .h(px(CONTROL_HEIGHT))
+        .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
+        .label(label)
+        .tooltip(tooltip)
+        .disabled(disabled)
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.toggle_pause(window, cx);
+            cx.notify();
+        }))
 }
 
 fn tab_text(label: &'static str) -> Div {

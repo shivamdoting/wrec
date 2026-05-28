@@ -38,8 +38,12 @@ const MAX_LOGS: usize = 80;
 pub(crate) enum RecorderState {
     Idle,
     LoadingTargets,
+    CountingDown,
     Starting,
     Recording,
+    Pausing,
+    Paused,
+    Resuming,
     Stopping,
     Failed,
 }
@@ -49,8 +53,27 @@ impl RecorderState {
         matches!(self, Self::Recording)
     }
 
+    pub(crate) fn is_paused(&self) -> bool {
+        matches!(self, Self::Paused)
+    }
+
+    pub(crate) fn is_active_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Recording | Self::Pausing | Self::Paused | Self::Resuming | Self::Stopping
+        )
+    }
+
     pub(crate) fn is_busy(&self) -> bool {
-        matches!(self, Self::LoadingTargets | Self::Starting | Self::Stopping)
+        matches!(
+            self,
+            Self::LoadingTargets
+                | Self::CountingDown
+                | Self::Starting
+                | Self::Pausing
+                | Self::Resuming
+                | Self::Stopping
+        )
     }
 }
 
@@ -62,7 +85,11 @@ enum AppEvent {
     },
     PermissionRequested(std::result::Result<ScreenRecordingPermissionStatus, String>),
     TargetsLoaded(std::result::Result<Vec<CaptureTarget>, String>),
+    CountdownTick(u8),
+    CountdownFinished,
     Started(std::result::Result<RecordingSession, String>),
+    Paused(std::result::Result<(), String>),
+    Resumed(std::result::Result<(), String>),
     Stopped(std::result::Result<(), String>),
 }
 
@@ -79,6 +106,7 @@ pub(crate) struct WrecApp {
     pub(crate) permission_status: ScreenRecordingPermissionStatus,
     pub(crate) permission_busy: bool,
     pub(crate) metrics: Option<RecorderMetrics>,
+    pub(crate) countdown_remaining: Option<u8>,
     pub(crate) status: String,
     pub(crate) active_tab: AppTab,
     pub(crate) last_recording_dir: Option<PathBuf>,
@@ -222,6 +250,7 @@ impl WrecApp {
             permission_status: ScreenRecordingPermissionStatus::Unknown,
             permission_busy: false,
             metrics: None,
+            countdown_remaining: None,
             status: "Idle".to_string(),
             active_tab: AppTab::General,
             last_recording_dir: None,
@@ -606,14 +635,19 @@ impl WrecApp {
     }
 
     pub(crate) fn toggle_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recorder_state.is_busy() {
+        if self.recorder_state.is_busy() && !self.recorder_state.is_active_session() {
             self.push_log("recorder is busy");
             return;
         }
 
-        if self.recorder_state.is_recording() {
+        if self.recorder_state.is_active_session() {
+            if self.recorder_state.is_busy() {
+                self.push_log("recorder is busy");
+                return;
+            }
             self.recorder_state = RecorderState::Stopping;
             self.status = "Stopping".to_string();
+            self.countdown_remaining = None;
             self.push_log("stopping recording");
             let engine = self.engine.clone();
             let app_events = self.app_events.clone();
@@ -635,10 +669,76 @@ impl WrecApp {
             return;
         };
 
-        self.recorder_state = RecorderState::Starting;
-        self.status = format!("Starting {}", target.name);
+        self.recorder_state = RecorderState::CountingDown;
+        self.countdown_remaining = Some(3);
+        self.status = format!("Recording starts in 3: {}", target.name);
         self.metrics = None;
         self.push_log(format!("target: {}", target.name));
+        let app_events = self.app_events.clone();
+        std::thread::spawn(move || {
+            for remaining in (1..=2).rev() {
+                std::thread::sleep(Duration::from_secs(1));
+                let _ = app_events.send(AppEvent::CountdownTick(remaining));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = app_events.send(AppEvent::CountdownFinished);
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_pause(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.recorder_state {
+            RecorderState::Recording => {
+                self.recorder_state = RecorderState::Pausing;
+                self.status = "Pausing".to_string();
+                self.push_log("pausing recording");
+                let engine = self.engine.clone();
+                let app_events = self.app_events.clone();
+                std::thread::spawn(move || {
+                    let result = engine
+                        .lock()
+                        .unwrap()
+                        .pause()
+                        .map_err(|err| err.to_string());
+                    let _ = app_events.send(AppEvent::Paused(result));
+                });
+                cx.notify();
+            }
+            RecorderState::Paused => {
+                self.recorder_state = RecorderState::Resuming;
+                self.status = "Resuming".to_string();
+                self.push_log("resuming recording");
+                let engine = self.engine.clone();
+                let app_events = self.app_events.clone();
+                std::thread::spawn(move || {
+                    let result = engine
+                        .lock()
+                        .unwrap()
+                        .resume()
+                        .map_err(|err| err.to_string());
+                    let _ = app_events.send(AppEvent::Resumed(result));
+                });
+                cx.notify();
+            }
+            _ => self.show_error("Recording is not ready to pause or resume", window, cx),
+        }
+    }
+
+    fn start_after_countdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.recorder_state, RecorderState::CountingDown) {
+            return;
+        }
+
+        let Some(target) = self.selected_target() else {
+            self.show_error("No capture target selected", window, cx);
+            return;
+        };
+
+        self.recorder_state = RecorderState::Starting;
+        self.countdown_remaining = None;
+        self.status = format!("Starting {}", target.name);
+        self.push_log("hiding Wrec while recording");
+        cx.hide();
         let engine = self.engine.clone();
         let app_events = self.app_events.clone();
         let settings = self.settings.clone();
@@ -748,6 +848,19 @@ impl WrecApp {
                 }
                 self.show_error(message, window, cx);
             }
+            AppEvent::CountdownTick(remaining) => {
+                if !matches!(self.recorder_state, RecorderState::CountingDown) {
+                    cx.notify();
+                    return;
+                }
+                self.countdown_remaining = Some(remaining);
+                self.status = format!("Recording starts in {remaining}");
+                self.push_log(self.status.clone());
+                cx.notify();
+            }
+            AppEvent::CountdownFinished => {
+                self.start_after_countdown(window, cx);
+            }
             AppEvent::Started(Ok(session)) => {
                 if !matches!(self.recorder_state, RecorderState::Starting) {
                     self.push_log(format!(
@@ -782,7 +895,41 @@ impl WrecApp {
                 if is_permission_message(&message) {
                     self.permission_status = ScreenRecordingPermissionStatus::Missing;
                 }
+                cx.activate(true);
+                window.activate_window();
                 self.show_error_for(recording_id, message, window, cx);
+            }
+            AppEvent::Paused(Ok(())) => {
+                if !matches!(self.recorder_state, RecorderState::Pausing) {
+                    cx.notify();
+                    return;
+                }
+                self.recorder_state = RecorderState::Paused;
+                self.status = "Paused".to_string();
+                self.push_log("Paused");
+                cx.notify();
+            }
+            AppEvent::Paused(Err(message)) => {
+                if matches!(self.recorder_state, RecorderState::Pausing) {
+                    self.recorder_state = RecorderState::Recording;
+                }
+                self.show_error(message, window, cx);
+            }
+            AppEvent::Resumed(Ok(())) => {
+                if !matches!(self.recorder_state, RecorderState::Resuming) {
+                    cx.notify();
+                    return;
+                }
+                self.recorder_state = RecorderState::Recording;
+                self.status = "Recording".to_string();
+                self.push_log("Resumed");
+                cx.notify();
+            }
+            AppEvent::Resumed(Err(message)) => {
+                if matches!(self.recorder_state, RecorderState::Resuming) {
+                    self.recorder_state = RecorderState::Paused;
+                }
+                self.show_error(message, window, cx);
             }
             AppEvent::Stopped(Ok(())) => {
                 let recording_id = self.active_session_id;
@@ -793,8 +940,11 @@ impl WrecApp {
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Idle;
+                self.countdown_remaining = None;
                 self.status = "Stopped".to_string();
                 self.push_log_for(recording_id, EventSource::App, EventLevel::Info, "Stopped");
+                cx.activate(true);
+                window.activate_window();
                 if let Some(path) = self.last_recording_dir.clone() {
                     match open_path(&path) {
                         Ok(()) => self.push_log(format!("opened: {}", path.display())),
@@ -819,6 +969,9 @@ impl WrecApp {
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Failed;
+                self.countdown_remaining = None;
+                cx.activate(true);
+                window.activate_window();
                 self.show_error_for(recording_id, message, window, cx);
             }
         }
@@ -901,9 +1054,12 @@ impl WrecApp {
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Failed;
+                self.countdown_remaining = None;
                 if is_permission_message(&message) {
                     self.permission_status = ScreenRecordingPermissionStatus::Missing;
                 }
+                cx.activate(true);
+                window.activate_window();
                 self.show_error_for(recording_id, message, window, cx);
             }
             RecorderEvent::Exited {
@@ -919,11 +1075,14 @@ impl WrecApp {
                 }
                 self.active_session_id = None;
                 self.active_output_path = None;
+                self.countdown_remaining = None;
                 self.recorder_state = if success {
                     RecorderState::Idle
                 } else {
                     RecorderState::Failed
                 };
+                cx.activate(true);
+                window.activate_window();
                 if success {
                     self.push_log_for(
                         Some(session_id),

@@ -118,6 +118,22 @@ impl RecorderEngine for MacosRecorder {
         self.emit_log(session_id, "recording stopped");
         Ok(())
     }
+
+    fn pause(&mut self) -> Result<()> {
+        let session_id = self.active.as_ref().map(|session| session.id);
+        self.emit_log(session_id, "pausing recording");
+        platform::pause_recording()?;
+        self.emit_log(session_id, "recording pause requested");
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        let session_id = self.active.as_ref().map(|session| session.id);
+        self.emit_log(session_id, "resuming recording");
+        platform::resume_recording()?;
+        self.emit_log(session_id, "recording resume requested");
+        Ok(())
+    }
 }
 
 impl Drop for MacosRecorder {
@@ -395,6 +411,33 @@ mod platform {
             )));
         }
         Ok(())
+    }
+
+    pub fn pause_recording() -> Result<()> {
+        write_active_child_command("pause")
+    }
+
+    pub fn resume_recording() -> Result<()> {
+        write_active_child_command("resume")
+    }
+
+    fn write_active_child_command(command: &str) -> Result<()> {
+        use std::io::Write;
+
+        let child_slot = CHILD.get_or_init(|| Mutex::new(None));
+        let mut child = child_slot.lock().unwrap();
+        let Some(process) = child.as_mut() else {
+            return Err(RecorderError::Backend("no active recording".into()));
+        };
+        let Some(stdin) = process.child.stdin.as_mut() else {
+            return Err(RecorderError::Backend(
+                "recording helper stdin is unavailable".into(),
+            ));
+        };
+
+        stdin
+            .write_all(format!("{command}\n").as_bytes())
+            .map_err(|err| RecorderError::Backend(format!("failed to send {command}: {err}")))
     }
 
     fn forward_helper_stderr(
@@ -688,6 +731,14 @@ mod platform {
     }
 
     pub fn stop_recording() -> Result<()> {
+        Err(RecorderError::Backend("wrec only supports macOS".into()))
+    }
+
+    pub fn pause_recording() -> Result<()> {
+        Err(RecorderError::Backend("wrec only supports macOS".into()))
+    }
+
+    pub fn resume_recording() -> Result<()> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))
     }
 }

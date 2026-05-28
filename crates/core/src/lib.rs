@@ -187,6 +187,8 @@ pub trait RecorderEngine: Send {
         target: CaptureTarget,
         settings: RecorderSettings,
     ) -> Result<RecordingSession>;
+    fn pause(&mut self) -> Result<()>;
+    fn resume(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
 }
 
