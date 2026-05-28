@@ -1,4 +1,7 @@
-use crate::{app::WrecApp, assets::PhosphorIcon};
+use crate::{
+    app::WrecApp,
+    assets::{PhosphorIcon, GEIST_FONT_FAMILY, GEIST_MONO_FONT_FAMILY},
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
@@ -34,6 +37,8 @@ pub(crate) const FPS_OPTIONS: [&str; 2] = ["30 FPS", "60 FPS"];
 const TAB_HEIGHT: f32 = 32.;
 const FIELD_LABEL_WIDTH: f32 = 96.;
 const NOTIFICATION_WIDTH: f32 = 320.;
+const WREC_WHITE: u32 = 0xf8f8f8;
+const WREC_BLACK: u32 = 0x111111;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppTab {
@@ -330,7 +335,7 @@ impl WrecApp {
                         } else {
                             ThemeMode::Light
                         };
-                        Theme::change(mode, Some(window), cx);
+                        change_theme(mode, Some(window), cx);
                         cx.notify();
                     })),
             ))
@@ -760,6 +765,105 @@ pub(crate) fn configure_notifications(cx: &mut App) {
     notification.margins.right = px(8.);
     notification.margins.bottom = px(8.);
     notification.margins.left = px(8.);
+}
+
+pub(crate) fn change_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
+    match window {
+        Some(window) => {
+            Theme::change(mode, Some(&mut *window), cx);
+            apply_wrec_theme(cx);
+            window.refresh();
+        }
+        None => {
+            Theme::change(mode, None, cx);
+            apply_wrec_theme(cx);
+        }
+    }
+}
+
+fn apply_wrec_theme(cx: &mut App) {
+    let theme = Theme::global_mut(cx);
+    let white: Hsla = rgb(WREC_WHITE).into();
+    let black: Hsla = rgb(WREC_BLACK).into();
+
+    theme.font_family = GEIST_FONT_FAMILY.into();
+    theme.mono_font_family = GEIST_MONO_FONT_FAMILY.into();
+
+    if theme.mode.is_dark() {
+        theme.background = black;
+        theme.foreground = white.opacity(0.8);
+        theme.muted_foreground = white.opacity(0.56);
+        theme.popover = rgb(0x29333c).into();
+        theme.popover_foreground = theme.foreground;
+        theme.border = white.opacity(0.12);
+        theme.input = white.opacity(0.16);
+        theme.ring = theme.input;
+        theme.muted = white.opacity(0.08);
+        theme.accent = white.opacity(0.08);
+        theme.accent_foreground = theme.foreground;
+        theme.secondary = white.opacity(0.08);
+        theme.secondary_foreground = theme.foreground;
+        theme.primary = white;
+        theme.primary_hover = rgb(0xececec).into();
+        theme.primary_active = rgb(0xdedede).into();
+        theme.primary_foreground = black.opacity(0.8);
+        theme.button_primary = theme.primary;
+        theme.button_primary_hover = theme.primary_hover;
+        theme.button_primary_active = theme.primary_active;
+        theme.button_primary_foreground = theme.primary_foreground;
+        theme.link = theme.foreground;
+        theme.link_hover = white;
+        theme.link_active = white;
+        theme.tab_bar = black;
+        theme.tab_bar_segmented = white.opacity(0.08);
+        theme.tab_active = white.opacity(0.1);
+        theme.tab_active_foreground = theme.foreground;
+        theme.tab_foreground = theme.muted_foreground;
+        theme.title_bar = black;
+        theme.title_bar_border = theme.border;
+        theme.switch = white.opacity(0.18);
+        theme.switch_thumb = white;
+        theme.group_box = white.opacity(0.06);
+        theme.group_box_foreground = theme.foreground;
+        theme.caret = white;
+    } else {
+        theme.background = white;
+        theme.foreground = black.opacity(0.8);
+        theme.muted_foreground = black.opacity(0.56);
+        theme.popover = white;
+        theme.popover_foreground = theme.foreground;
+        theme.border = black.opacity(0.12);
+        theme.input = black.opacity(0.16);
+        theme.ring = theme.input;
+        theme.muted = black.opacity(0.06);
+        theme.accent = black.opacity(0.06);
+        theme.accent_foreground = theme.foreground;
+        theme.secondary = black.opacity(0.06);
+        theme.secondary_foreground = theme.foreground;
+        theme.primary = black;
+        theme.primary_hover = rgb(0x2b3640).into();
+        theme.primary_active = rgb(0x1b232a).into();
+        theme.primary_foreground = white.opacity(0.8);
+        theme.button_primary = theme.primary;
+        theme.button_primary_hover = theme.primary_hover;
+        theme.button_primary_active = theme.primary_active;
+        theme.button_primary_foreground = theme.primary_foreground;
+        theme.link = theme.foreground;
+        theme.link_hover = black;
+        theme.link_active = black;
+        theme.tab_bar = white;
+        theme.tab_bar_segmented = black.opacity(0.06);
+        theme.tab_active = black.opacity(0.08);
+        theme.tab_active_foreground = theme.foreground;
+        theme.tab_foreground = theme.muted_foreground;
+        theme.title_bar = white;
+        theme.title_bar_border = theme.border;
+        theme.switch = black.opacity(0.16);
+        theme.switch_thumb = white;
+        theme.group_box = black.opacity(0.04);
+        theme.group_box_foreground = theme.foreground;
+        theme.caret = black;
+    }
 }
 
 pub(crate) fn target_key(target: &CaptureTarget) -> String {

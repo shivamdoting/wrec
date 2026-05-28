@@ -1,6 +1,20 @@
-use gpui::{AssetSource, SharedString};
+use gpui::{App, AssetSource, SharedString};
 use gpui_component::IconNamed;
 use std::borrow::Cow;
+
+pub(crate) const GEIST_FONT_FAMILY: &str = "Geist";
+pub(crate) const GEIST_MONO_FONT_FAMILY: &str = "Geist Mono";
+
+pub(crate) fn register_fonts(cx: &mut App) {
+    let fonts: Vec<Cow<'static, [u8]>> = vec![
+        Cow::Borrowed(&include_bytes!("../assets/fonts/geist/Geist[wght].ttf")[..]),
+        Cow::Borrowed(&include_bytes!("../assets/fonts/geist/GeistMono[wght].ttf")[..]),
+    ];
+
+    if let Err(err) = cx.text_system().add_fonts(fonts) {
+        tracing::warn!("failed to register Geist fonts: {err}");
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum PhosphorIcon {

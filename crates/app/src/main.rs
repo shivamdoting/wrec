@@ -5,14 +5,15 @@ mod platform;
 mod ui;
 
 use app::WrecApp;
-use assets::WrecAssets;
+use assets::{register_fonts, WrecAssets};
 use config::log_path;
 use gpui::*;
-use gpui_component::{Root, Theme, ThemeMode};
+use gpui_component::Root;
 use gpui_platform::application;
 use std::{fs, path::Path};
 use ui::{
-    configure_notifications, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH,
+    change_theme, configure_notifications, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    WINDOW_WIDTH,
 };
 
 fn main() {
@@ -20,7 +21,8 @@ fn main() {
 
     application().with_assets(WrecAssets).run(|cx: &mut App| {
         gpui_component::init(cx);
-        Theme::change(ThemeMode::Light, None, cx);
+        register_fonts(cx);
+        change_theme(gpui_component::ThemeMode::Light, None, cx);
         configure_notifications(cx);
         cx.activate(true);
 
