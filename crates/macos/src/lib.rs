@@ -303,6 +303,7 @@ mod platform {
             } else {
                 "false"
             })
+            .arg(if settings.hide_wrec { "true" } else { "false" })
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
             .stderr(Stdio::piped())

@@ -438,6 +438,16 @@ impl WrecApp {
         cx.notify();
     }
 
+    pub(crate) fn set_hide_wrec(&mut self, hide_wrec: bool, cx: &mut Context<Self>) {
+        self.settings.hide_wrec = hide_wrec;
+        self.push_log(format!(
+            "hide wrec: {}",
+            if hide_wrec { "on" } else { "off" }
+        ));
+        self.save_config();
+        cx.notify();
+    }
+
     pub(crate) fn set_show_nerd_logs(&mut self, show_nerd_logs: bool, cx: &mut Context<Self>) {
         self.show_nerd_logs = show_nerd_logs;
         if show_nerd_logs {
@@ -737,8 +747,9 @@ impl WrecApp {
         self.recorder_state = RecorderState::Starting;
         self.countdown_remaining = None;
         self.status = format!("Starting {}", target.name);
-        self.push_log("hiding Wrec while recording");
-        cx.hide();
+        if self.settings.hide_wrec {
+            self.push_log("hiding Wrec from recording");
+        }
         let engine = self.engine.clone();
         let app_events = self.app_events.clone();
         let settings = self.settings.clone();

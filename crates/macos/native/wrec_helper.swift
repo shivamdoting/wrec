@@ -4,6 +4,7 @@ import ScreenCaptureKit
 import AVFoundation
 import AudioToolbox
 import CoreGraphics
+import Darwin
 import CoreMedia
 import CoreVideo
 
@@ -351,7 +352,7 @@ func run() async {
     }
 
     guard args.count >= 9 else {
-        fputs("usage: wrec_helper <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k> [include-system-audio]\n", stderr)
+        fputs("usage: wrec_helper <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k> [include-system-audio] [hide-wrec]\n", stderr)
         Foundation.exit(64)
     }
 
@@ -364,6 +365,7 @@ func run() async {
     let quality = args[7]
     let resolution = args[8]
     let includeSystemAudio = args.count >= 10 ? args[9] == "true" : false
+    let hideWrec = args.count >= 11 ? args[10] == "true" : true
 
     guard ensureScreenCapturePermission() else {
         fputs("wrec-helper: permission denied: Screen Recording access is required\n", stderr)
@@ -390,7 +392,13 @@ func run() async {
                 fputs("wrec-helper: no display found\n", stderr)
                 Foundation.exit(4)
             }
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            let excludedWindows = hideWrec ? wrecWindows(in: content) : []
+            if hideWrec {
+                FileHandle.standardError.write(
+                    Data("wrec-helper: excluding \(excludedWindows.count) Wrec window(s)\n".utf8)
+                )
+            }
+            filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
             fallbackWidth = display.width
             fallbackHeight = display.height
         }
@@ -518,6 +526,13 @@ func ensureScreenCapturePermission() -> Bool {
     return CGRequestScreenCaptureAccess()
 }
 
+func wrecWindows(in content: SCShareableContent) -> [SCWindow] {
+    let wrecProcessID = getppid()
+    return content.windows.filter { window in
+        window.owningApplication?.processID == wrecProcessID
+    }
+}
+
 @MainActor
 func initializeGraphicsClient() {
     _ = NSApplication.shared
@@ -567,6 +582,9 @@ func listTargets() async {
             print("display\t\(display.displayID)\tDisplay \(display.displayID)")
         }
         for window in content.windows {
+            if window.owningApplication?.processID == getppid() {
+                continue
+            }
             let appName = window.owningApplication?.applicationName ?? "App"
             let title = window.title ?? "Window"
             let name = "\(appName) — \(title)".replacingOccurrences(of: "\t", with: " ")

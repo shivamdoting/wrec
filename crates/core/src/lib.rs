@@ -101,6 +101,8 @@ pub struct RecorderSettings {
     pub include_cursor: bool,
     #[serde(default = "default_include_system_audio")]
     pub include_system_audio: bool,
+    #[serde(default = "default_hide_wrec")]
+    pub hide_wrec: bool,
 }
 
 impl Default for RecorderSettings {
@@ -114,11 +116,16 @@ impl Default for RecorderSettings {
             output_dir: dirs_output_dir(),
             include_cursor: true,
             include_system_audio: true,
+            hide_wrec: true,
         }
     }
 }
 
 fn default_include_system_audio() -> bool {
+    true
+}
+
+fn default_hide_wrec() -> bool {
     true
 }
 
@@ -229,5 +236,6 @@ mod tests {
         assert_eq!(settings.resolution, Resolution::Native);
         assert!(settings.include_cursor);
         assert!(settings.include_system_audio);
+        assert!(settings.hide_wrec);
     }
 }
