@@ -648,7 +648,9 @@ impl Render for WrecApp {
             && (self.permission_busy || !self.permission_status.is_granted()));
         let pause_disabled = matches!(
             self.recorder_state,
-            crate::app::RecorderState::Pausing | crate::app::RecorderState::Resuming
+            crate::app::RecorderState::Pausing
+                | crate::app::RecorderState::Resuming
+                | crate::app::RecorderState::Stopping
         );
         let controls_disabled =
             self.recorder_state.is_busy() || self.permission_busy || active_session;
