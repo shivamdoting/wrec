@@ -5,6 +5,7 @@ import AVFoundation
 import AudioToolbox
 import CoreImage
 import CoreGraphics
+import Darwin
 import CoreMedia
 import CoreVideo
 import ImageIO
@@ -13,7 +14,8 @@ import UniformTypeIdentifiers
 protocol CaptureRecorder: NSObjectProtocol, SCStreamOutput, SCStreamDelegate {
     var queue: DispatchQueue { get }
 
-    func waitUntilStarted(timeout: DispatchTimeInterval) -> Bool
+    func pause()
+    func resume()
     func finish(timeout: DispatchTimeInterval) -> Bool
 }
 
@@ -23,7 +25,6 @@ final class SampleRecorder: NSObject, CaptureRecorder {
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let audioInput: AVAssetWriterInput?
-    private let started = DispatchSemaphore(value: 0)
     private let finished = DispatchSemaphore(value: 0)
     private var didStart = false
     private var didFinish = false
@@ -32,6 +33,10 @@ final class SampleRecorder: NSObject, CaptureRecorder {
     private var audioSampleCount: Int64 = 0
     private var droppedAudioSampleCount: Int64 = 0
     private var firstPTS: CMTime?
+    private var isPaused = false
+    private var pauseStartedPTS: CMTime?
+    private var pendingResume = false
+    private var pauseOffset = CMTime.zero
     private var lastMetricTime = DispatchTime.now()
 
     init(outputURL: URL, width: Int, height: Int, fps: Int32, codec: String, quality: String, includeSystemAudio: Bool) throws {
@@ -108,6 +113,19 @@ final class SampleRecorder: NSObject, CaptureRecorder {
             droppedFrameCount += 1
             return
         }
+        if isPaused {
+            if pauseStartedPTS == nil {
+                pauseStartedPTS = pts
+            }
+            droppedFrameCount += 1
+            return
+        }
+        applyPendingResume(at: pts)
+        guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseOffset) else {
+            droppedFrameCount += 1
+            return
+        }
+        let adjustedPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if !didStart {
             guard writer.startWriting() else {
@@ -115,11 +133,10 @@ final class SampleRecorder: NSObject, CaptureRecorder {
                 droppedFrameCount += 1
                 return
             }
-            writer.startSession(atSourceTime: pts)
-            firstPTS = pts
+            writer.startSession(atSourceTime: adjustedPTS)
+            firstPTS = adjustedPTS
             didStart = true
             FileHandle.standardError.write(Data("wrec-helper: recording started\n".utf8))
-            started.signal()
         }
 
         guard videoInput.isReadyForMoreMediaData else {
@@ -129,7 +146,7 @@ final class SampleRecorder: NSObject, CaptureRecorder {
 
         if videoInput.append(sampleBuffer) {
             frameCount += 1
-            emitMetricsIfNeeded(currentPTS: pts)
+            emitMetricsIfNeeded(currentPTS: adjustedPTS)
         } else {
             droppedFrameCount += 1
             if let error = writer.error {
@@ -155,6 +172,14 @@ final class SampleRecorder: NSObject, CaptureRecorder {
             droppedAudioSampleCount += 1
             return
         }
+        if isPaused || pendingResume {
+            droppedAudioSampleCount += 1
+            return
+        }
+        guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseOffset) else {
+            droppedAudioSampleCount += 1
+            return
+        }
         guard audioInput.isReadyForMoreMediaData else {
             droppedAudioSampleCount += 1
             return
@@ -170,8 +195,95 @@ final class SampleRecorder: NSObject, CaptureRecorder {
         }
     }
 
-    func waitUntilStarted(timeout: DispatchTimeInterval) -> Bool {
-        started.wait(timeout: .now() + timeout) == .success
+    func pause() {
+        queue.async {
+            guard self.didStart, !self.didFinish, !self.isPaused else {
+                return
+            }
+
+            self.isPaused = true
+            self.pendingResume = false
+            self.pauseStartedPTS = nil
+            FileHandle.standardError.write(Data("wrec-helper: recording paused\n".utf8))
+        }
+    }
+
+    func resume() {
+        queue.async {
+            guard self.didStart, !self.didFinish, self.isPaused else {
+                return
+            }
+
+            self.isPaused = false
+            self.pendingResume = true
+            FileHandle.standardError.write(Data("wrec-helper: recording resumed\n".utf8))
+        }
+    }
+
+    private func applyPendingResume(at pts: CMTime) {
+        guard pendingResume else {
+            return
+        }
+
+        if let pauseStartedPTS, CMTimeCompare(pts, pauseStartedPTS) >= 0 {
+            pauseOffset = CMTimeAdd(pauseOffset, CMTimeSubtract(pts, pauseStartedPTS))
+        }
+        pendingResume = false
+        pauseStartedPTS = nil
+    }
+
+    private func retimedSampleBuffer(_ sampleBuffer: CMSampleBuffer, subtracting offset: CMTime) -> CMSampleBuffer? {
+        guard offset.isValid, CMTimeCompare(offset, .zero) > 0 else {
+            return sampleBuffer
+        }
+
+        var timingCount = 0
+        var status = CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        )
+        guard status == noErr, timingCount > 0 else {
+            return sampleBuffer
+        }
+
+        var timing = Array(repeating: CMSampleTimingInfo(), count: timingCount)
+        status = timing.withUnsafeMutableBufferPointer { buffer in
+            CMSampleBufferGetSampleTimingInfoArray(
+                sampleBuffer,
+                entryCount: timingCount,
+                arrayToFill: buffer.baseAddress,
+                entriesNeededOut: &timingCount
+            )
+        }
+        guard status == noErr else {
+            return nil
+        }
+
+        for index in timing.indices {
+            if timing[index].presentationTimeStamp.isValid {
+                timing[index].presentationTimeStamp = CMTimeSubtract(timing[index].presentationTimeStamp, offset)
+            }
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeSubtract(timing[index].decodeTimeStamp, offset)
+            }
+        }
+
+        var adjusted: CMSampleBuffer?
+        status = timing.withUnsafeBufferPointer { buffer in
+            CMSampleBufferCreateCopyWithNewTiming(
+                allocator: kCFAllocatorDefault,
+                sampleBuffer: sampleBuffer,
+                sampleTimingEntryCount: timingCount,
+                sampleTimingArray: buffer.baseAddress,
+                sampleBufferOut: &adjusted
+            )
+        }
+        guard status == noErr else {
+            return nil
+        }
+        return adjusted
     }
 
     func finish(timeout: DispatchTimeInterval) -> Bool {
@@ -223,7 +335,6 @@ final class GifRecorder: NSObject, CaptureRecorder {
     private let destination: CGImageDestination
     private let frameDelay: Double
     private let context = CIContext()
-    private let started = DispatchSemaphore(value: 0)
     private let finished = DispatchSemaphore(value: 0)
     private var didStart = false
     private var didFinish = false
@@ -290,7 +401,6 @@ final class GifRecorder: NSObject, CaptureRecorder {
             firstPTS = pts
             didStart = true
             FileHandle.standardError.write(Data("wrec-helper: recording started\n".utf8))
-            started.signal()
         }
 
         if let pendingImage, let pendingPTS {
@@ -302,8 +412,22 @@ final class GifRecorder: NSObject, CaptureRecorder {
         emitMetricsIfNeeded(currentPTS: pts)
     }
 
-    func waitUntilStarted(timeout: DispatchTimeInterval) -> Bool {
-        started.wait(timeout: .now() + timeout) == .success
+    func pause() {
+        queue.async {
+            guard self.didStart, !self.didFinish else {
+                return
+            }
+            FileHandle.standardError.write(Data("wrec-helper: recording paused\n".utf8))
+        }
+    }
+
+    func resume() {
+        queue.async {
+            guard self.didStart, !self.didFinish else {
+                return
+            }
+            FileHandle.standardError.write(Data("wrec-helper: recording resumed\n".utf8))
+        }
     }
 
     func finish(timeout: DispatchTimeInterval) -> Bool {
@@ -391,7 +515,7 @@ func run() async {
     }
 
     guard args.count >= 9 else {
-        fputs("usage: wrec_helper <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k> [include-system-audio] [mov|gif]\n", stderr)
+        fputs("usage: wrec_helper <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k> [include-system-audio] [hide-wrec] [mov|gif]\n", stderr)
         Foundation.exit(64)
     }
 
@@ -404,7 +528,8 @@ func run() async {
     let quality = args[7]
     let resolution = args[8]
     let includeSystemAudio = args.count >= 10 ? args[9] == "true" : false
-    let outputFormat = args.count >= 11 ? args[10] : "mov"
+    let hideWrec = args.count >= 11 ? args[10] == "true" : true
+    let outputFormat = args.count >= 12 ? args[11] : "mov"
     let recordsSystemAudio = includeSystemAudio && outputFormat == "mov"
 
     guard ensureScreenCapturePermission() else {
@@ -432,7 +557,13 @@ func run() async {
                 fputs("wrec-helper: no display found\n", stderr)
                 Foundation.exit(4)
             }
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            let excludedWindows = hideWrec ? wrecWindows(in: content) : []
+            if hideWrec {
+                FileHandle.standardError.write(
+                    Data("wrec-helper: excluding \(excludedWindows.count) Wrec window(s)\n".utf8)
+                )
+            }
+            filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
             fallbackWidth = display.width
             fallbackHeight = display.height
         }
@@ -510,10 +641,9 @@ func recordCapture(
     }
 
     try await stream.startCapture()
-    _ = recorder.waitUntilStarted(timeout: .seconds(3))
 
-    // Parent process writes a line to stdin to stop. EOF also stops.
-    await waitForStopSignal()
+    // Parent process writes commands to stdin. EOF also stops.
+    await waitForStopSignal(recorder: recorder)
 
     try await stream.stopCapture()
     guard recorder.finish(timeout: .seconds(15)) else {
@@ -579,15 +709,40 @@ func ensureScreenCapturePermission() -> Bool {
     return CGRequestScreenCaptureAccess()
 }
 
+func wrecWindows(in content: SCShareableContent) -> [SCWindow] {
+    let wrecProcessID = getppid()
+    return content.windows.filter { window in
+        window.owningApplication?.processID == wrecProcessID
+    }
+}
+
 @MainActor
 func initializeGraphicsClient() {
     _ = NSApplication.shared
     NSApplication.shared.setActivationPolicy(.prohibited)
 }
 
-func waitForStopSignal() async {
+func waitForStopSignal(recorder: any CaptureRecorder) async {
+    let stopped = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInitiated).async {
+        while let line = readLine() {
+            switch line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "pause":
+                recorder.pause()
+            case "resume":
+                recorder.resume()
+            case "stop":
+                stopped.signal()
+                return
+            default:
+                continue
+            }
+        }
+        stopped.signal()
+    }
+
     await Task.detached(priority: .userInitiated) {
-        _ = readLine()
+        stopped.wait()
     }.value
 }
 
@@ -610,6 +765,9 @@ func listTargets() async {
             print("display\t\(display.displayID)\tDisplay \(display.displayID)")
         }
         for window in content.windows {
+            if window.owningApplication?.processID == getppid() {
+                continue
+            }
             let appName = window.owningApplication?.applicationName ?? "App"
             let title = window.title ?? "Window"
             let name = "\(appName) — \(title)".replacingOccurrences(of: "\t", with: " ")

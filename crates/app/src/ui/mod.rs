@@ -12,8 +12,8 @@ use gpui_component::{
     select::{Select, SelectItem, SelectState},
     switch::Switch,
     tab::{Tab, TabBar},
-    ActiveTheme as _, Disableable as _, Icon as UiIcon, Root, Sizable as _, Theme, ThemeMode,
-    WindowExt as _,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon as UiIcon, Root, Sizable as _, Theme,
+    ThemeMode, WindowExt as _,
 };
 use wrec_core::{
     CaptureSourceKind, CaptureTarget, FrameRate, OutputFormat, RecorderMetrics, Resolution,
@@ -38,8 +38,109 @@ pub(crate) const FPS_OPTIONS: [&str; 2] = ["30 FPS", "60 FPS"];
 const TAB_HEIGHT: f32 = 32.;
 const FIELD_LABEL_WIDTH: f32 = 96.;
 const NOTIFICATION_WIDTH: f32 = 320.;
-const WREC_WHITE: u32 = 0xf8f8f8;
-const WREC_BLACK: u32 = 0x111111;
+
+#[derive(Clone, Copy)]
+struct ThemePalette {
+    background: u32,
+    foreground: u32,
+    card: u32,
+    card_foreground: u32,
+    popover: u32,
+    popover_foreground: u32,
+    primary: u32,
+    primary_foreground: u32,
+    secondary: u32,
+    secondary_foreground: u32,
+    muted: u32,
+    muted_foreground: u32,
+    accent: u32,
+    accent_foreground: u32,
+    destructive: u32,
+    destructive_foreground: u32,
+    border: u32,
+    input: u32,
+    ring: u32,
+    chart_1: u32,
+    chart_2: u32,
+    chart_3: u32,
+    chart_4: u32,
+    chart_5: u32,
+    sidebar: u32,
+    sidebar_foreground: u32,
+    sidebar_primary: u32,
+    sidebar_primary_foreground: u32,
+    sidebar_accent: u32,
+    sidebar_accent_foreground: u32,
+    sidebar_border: u32,
+}
+
+const LIGHT_PALETTE: ThemePalette = ThemePalette {
+    background: 0xf9f9f9,
+    foreground: 0x202020,
+    card: 0xfcfcfc,
+    card_foreground: 0x202020,
+    popover: 0xfcfcfc,
+    popover_foreground: 0x202020,
+    primary: 0x454956,
+    primary_foreground: 0xffffff,
+    secondary: 0xbab7e7,
+    secondary_foreground: 0x2a3046,
+    muted: 0xefefef,
+    muted_foreground: 0x646464,
+    accent: 0xe8e8e8,
+    accent_foreground: 0x202020,
+    destructive: 0x5272b3,
+    destructive_foreground: 0xffffff,
+    border: 0xd8d8d8,
+    input: 0xd8d8d8,
+    ring: 0x454956,
+    chart_1: 0x454956,
+    chart_2: 0xbab7e7,
+    chart_3: 0xe8e8e8,
+    chart_4: 0xc5c2eb,
+    chart_5: 0x444957,
+    sidebar: 0xfbfbfb,
+    sidebar_foreground: 0x252525,
+    sidebar_primary: 0x343434,
+    sidebar_primary_foreground: 0xfbfbfb,
+    sidebar_accent: 0xf7f7f7,
+    sidebar_accent_foreground: 0x343434,
+    sidebar_border: 0xebebeb,
+};
+
+const DARK_PALETTE: ThemePalette = ThemePalette {
+    background: 0x0e0e0e,
+    foreground: 0xeeeeee,
+    card: 0x1b1b1b,
+    card_foreground: 0xeeeeee,
+    popover: 0x191919,
+    popover_foreground: 0xeeeeee,
+    primary: 0xc0c1ea,
+    primary_foreground: 0x201a13,
+    secondary: 0x2a2a32,
+    secondary_foreground: 0xc0c1ea,
+    muted: 0x202020,
+    muted_foreground: 0xb4b4b4,
+    accent: 0x2a2a2a,
+    accent_foreground: 0xeeeeee,
+    destructive: 0xcf3a3a,
+    destructive_foreground: 0xffffff,
+    border: 0x1a191c,
+    input: 0x484848,
+    ring: 0xc0c1ea,
+    chart_1: 0xc0c1ea,
+    chart_2: 0x2a2a32,
+    chart_3: 0x2a2a2a,
+    chart_4: 0x30303a,
+    chart_5: 0xc0c0ea,
+    sidebar: 0x1f1f1f,
+    sidebar_foreground: 0xe8e9e8,
+    sidebar_primary: 0x8ca148,
+    sidebar_primary_foreground: 0xffffff,
+    sidebar_accent: 0x262726,
+    sidebar_accent_foreground: 0xe8e9e8,
+    sidebar_border: 0x262726,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppTab {
@@ -154,6 +255,11 @@ impl WrecApp {
         record_tip: &'static str,
         record_is_idle: bool,
         record_disabled: bool,
+        show_pause_button: bool,
+        pause_icon: PhosphorIcon,
+        pause_label: &'static str,
+        pause_tip: &'static str,
+        pause_disabled: bool,
         controls_disabled: bool,
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
@@ -276,7 +382,27 @@ impl WrecApp {
                             .child(audio_row),
                     ),
             )
-            .child(
+            .child(if show_pause_button {
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        pause_button(pause_icon, pause_label, pause_tip, pause_disabled, cx)
+                            .flex_1(),
+                    )
+                    .child(
+                        record_button(
+                            record_icon,
+                            record_label,
+                            record_tip,
+                            record_is_idle,
+                            record_disabled,
+                            cx,
+                        )
+                        .flex_1(),
+                    )
+                    .into_any_element()
+            } else {
                 record_button(
                     record_icon,
                     record_label,
@@ -285,8 +411,9 @@ impl WrecApp {
                     record_disabled,
                     cx,
                 )
-                .w_full(),
-            )
+                .w_full()
+                .into_any_element()
+            })
     }
 
     pub(crate) fn render_settings_tab(
@@ -352,6 +479,18 @@ impl WrecApp {
                         };
                         change_theme(mode, Some(window), cx);
                         cx.notify();
+                    })),
+            ))
+            .child(switch_row(
+                "Hide wrec",
+                if self.settings.hide_wrec { "On" } else { "Off" },
+                muted_foreground,
+                Switch::new("hide-window-switch")
+                    .checked(self.settings.hide_wrec)
+                    .tooltip("Hide wrec from recording")
+                    .disabled(controls_disabled)
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        this.set_hide_wrec(*checked, cx);
                     })),
             ))
             .child(switch_row(
@@ -502,19 +641,34 @@ impl Render for WrecApp {
         let border = cx.theme().border;
         let is_dark = cx.theme().mode.is_dark();
         let notification_layer = Root::render_notification_layer(window, cx);
-        let (record_icon, record_label, record_tip, record_is_idle) =
-            if self.recorder_state.is_recording() {
-                (PhosphorIcon::Stop, "Stop", "Stop recording", false)
-            } else {
-                (PhosphorIcon::Record, "Rec", "Start recording", true)
-            };
-        let record_disabled = self.recorder_state.is_busy()
-            || (!self.recorder_state.is_recording()
-                && (self.permission_busy || !self.permission_status.is_granted()));
-        let controls_disabled = self.recorder_state.is_busy()
-            || self.permission_busy
-            || self.recorder_state.is_recording();
-        let metrics_label = Some(if self.recorder_state.is_recording() {
+        let active_session = self.recorder_state.is_active_session();
+        let (record_icon, record_label, record_tip, record_is_idle) = if active_session {
+            (PhosphorIcon::Stop, "Stop", "Stop recording", false)
+        } else {
+            (PhosphorIcon::Record, "Rec", "Start recording", true)
+        };
+        let (pause_icon, pause_label, pause_tip) = if self.recorder_state.is_paused() {
+            (PhosphorIcon::Play, "Resume", "Resume recording")
+        } else {
+            (PhosphorIcon::Pause, "Pause", "Pause recording")
+        };
+        let record_disabled = matches!(
+            self.recorder_state,
+            crate::app::RecorderState::Starting
+                | crate::app::RecorderState::Pausing
+                | crate::app::RecorderState::Resuming
+                | crate::app::RecorderState::Stopping
+        ) || (!active_session
+            && (self.permission_busy || !self.permission_status.is_granted()));
+        let pause_disabled = matches!(
+            self.recorder_state,
+            crate::app::RecorderState::Pausing
+                | crate::app::RecorderState::Resuming
+                | crate::app::RecorderState::Stopping
+        );
+        let controls_disabled =
+            self.recorder_state.is_busy() || self.permission_busy || active_session;
+        let metrics_label = Some(if active_session || self.recorder_state.is_recording() {
             self.metrics
                 .as_ref()
                 .map(metrics_label)
@@ -551,6 +705,11 @@ impl Render for WrecApp {
                                         record_tip,
                                         record_is_idle,
                                         record_disabled,
+                                        active_session,
+                                        pause_icon,
+                                        pause_label,
+                                        pause_tip,
+                                        pause_disabled,
                                         controls_disabled,
                                         muted_foreground,
                                         cx,
@@ -664,6 +823,26 @@ fn record_button(
     } else {
         button.danger()
     }
+}
+
+fn pause_button(
+    icon: PhosphorIcon,
+    label: &'static str,
+    tooltip: &'static str,
+    disabled: bool,
+    cx: &mut Context<WrecApp>,
+) -> UiButton {
+    UiButton::new("pause-button")
+        .outline()
+        .h(px(CONTROL_HEIGHT))
+        .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
+        .label(label)
+        .tooltip(tooltip)
+        .disabled(disabled)
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.toggle_pause(window, cx);
+            cx.notify();
+        }))
 }
 
 fn tab_text(label: &'static str) -> Div {
@@ -805,87 +984,93 @@ pub(crate) fn change_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mu
 
 fn apply_wrec_theme(cx: &mut App) {
     let theme = Theme::global_mut(cx);
-    let white: Hsla = rgb(WREC_WHITE).into();
-    let black: Hsla = rgb(WREC_BLACK).into();
+    let palette = if theme.mode.is_dark() {
+        DARK_PALETTE
+    } else {
+        LIGHT_PALETTE
+    };
+    let color = |hex| Hsla::from(rgb(hex));
 
     theme.font_family = GEIST_FONT_FAMILY.into();
     theme.mono_font_family = GEIST_MONO_FONT_FAMILY.into();
+    theme.radius = px(8.);
+    theme.radius_lg = px(8.);
 
-    if theme.mode.is_dark() {
-        theme.background = black;
-        theme.foreground = white.opacity(0.8);
-        theme.muted_foreground = white.opacity(0.56);
-        theme.popover = rgb(0x29333c).into();
-        theme.popover_foreground = theme.foreground;
-        theme.border = white.opacity(0.12);
-        theme.input = white.opacity(0.16);
-        theme.ring = theme.input;
-        theme.muted = white.opacity(0.08);
-        theme.accent = white.opacity(0.08);
-        theme.accent_foreground = theme.foreground;
-        theme.secondary = white.opacity(0.08);
-        theme.secondary_foreground = theme.foreground;
-        theme.primary = white;
-        theme.primary_hover = rgb(0xececec).into();
-        theme.primary_active = rgb(0xdedede).into();
-        theme.primary_foreground = black.opacity(0.8);
-        theme.button_primary = theme.primary;
-        theme.button_primary_hover = theme.primary_hover;
-        theme.button_primary_active = theme.primary_active;
-        theme.button_primary_foreground = theme.primary_foreground;
-        theme.link = theme.foreground;
-        theme.link_hover = white;
-        theme.link_active = white;
-        theme.tab_bar = black;
-        theme.tab_bar_segmented = white.opacity(0.08);
-        theme.tab_active = white.opacity(0.1);
-        theme.tab_active_foreground = theme.foreground;
-        theme.tab_foreground = theme.muted_foreground;
-        theme.title_bar = black;
-        theme.title_bar_border = theme.border;
-        theme.switch = white.opacity(0.18);
-        theme.switch_thumb = white;
-        theme.group_box = white.opacity(0.06);
-        theme.group_box_foreground = theme.foreground;
-        theme.caret = white;
-    } else {
-        theme.background = white;
-        theme.foreground = black.opacity(0.8);
-        theme.muted_foreground = black.opacity(0.56);
-        theme.popover = white;
-        theme.popover_foreground = theme.foreground;
-        theme.border = black.opacity(0.12);
-        theme.input = black.opacity(0.16);
-        theme.ring = theme.input;
-        theme.muted = black.opacity(0.06);
-        theme.accent = black.opacity(0.06);
-        theme.accent_foreground = theme.foreground;
-        theme.secondary = black.opacity(0.06);
-        theme.secondary_foreground = theme.foreground;
-        theme.primary = black;
-        theme.primary_hover = rgb(0x2b3640).into();
-        theme.primary_active = rgb(0x1b232a).into();
-        theme.primary_foreground = white.opacity(0.8);
-        theme.button_primary = theme.primary;
-        theme.button_primary_hover = theme.primary_hover;
-        theme.button_primary_active = theme.primary_active;
-        theme.button_primary_foreground = theme.primary_foreground;
-        theme.link = theme.foreground;
-        theme.link_hover = black;
-        theme.link_active = black;
-        theme.tab_bar = white;
-        theme.tab_bar_segmented = black.opacity(0.06);
-        theme.tab_active = black.opacity(0.08);
-        theme.tab_active_foreground = theme.foreground;
-        theme.tab_foreground = theme.muted_foreground;
-        theme.title_bar = white;
-        theme.title_bar_border = theme.border;
-        theme.switch = black.opacity(0.16);
-        theme.switch_thumb = white;
-        theme.group_box = black.opacity(0.04);
-        theme.group_box_foreground = theme.foreground;
-        theme.caret = black;
-    }
+    theme.background = color(palette.background);
+    theme.foreground = color(palette.foreground);
+    theme.group_box = color(palette.card);
+    theme.group_box_foreground = color(palette.card_foreground);
+    theme.popover = color(palette.popover);
+    theme.popover_foreground = color(palette.popover_foreground);
+    theme.primary = color(palette.primary);
+    theme.primary_hover = theme.primary.mix(theme.foreground, 0.12);
+    theme.primary_active = theme.primary.mix(theme.foreground, 0.2);
+    theme.primary_foreground = color(palette.primary_foreground);
+    theme.secondary = color(palette.secondary);
+    theme.secondary_hover = theme.secondary.mix(theme.foreground, 0.08);
+    theme.secondary_active = theme.secondary.mix(theme.foreground, 0.14);
+    theme.secondary_foreground = color(palette.secondary_foreground);
+    theme.muted = color(palette.muted);
+    theme.muted_foreground = color(palette.muted_foreground);
+    theme.accent = color(palette.accent);
+    theme.accent_foreground = color(palette.accent_foreground);
+    theme.danger = color(palette.destructive);
+    theme.danger_hover = theme.danger.mix(theme.background, 0.14);
+    theme.danger_active = theme.danger.mix(theme.background, 0.24);
+    theme.danger_foreground = color(palette.destructive_foreground);
+    theme.border = color(palette.border);
+    theme.input = color(palette.input);
+    theme.ring = theme.input;
+    theme.caret = color(palette.ring);
+    theme.chart_1 = color(palette.chart_1);
+    theme.chart_2 = color(palette.chart_2);
+    theme.chart_3 = color(palette.chart_3);
+    theme.chart_4 = color(palette.chart_4);
+    theme.chart_5 = color(palette.chart_5);
+    theme.sidebar = color(palette.sidebar);
+    theme.sidebar_foreground = color(palette.sidebar_foreground);
+    theme.sidebar_primary = color(palette.sidebar_primary);
+    theme.sidebar_primary_foreground = color(palette.sidebar_primary_foreground);
+    theme.sidebar_accent = color(palette.sidebar_accent);
+    theme.sidebar_accent_foreground = color(palette.sidebar_accent_foreground);
+    theme.sidebar_border = color(palette.sidebar_border);
+    theme.button_primary = theme.primary;
+    theme.button_primary_hover = theme.primary_hover;
+    theme.button_primary_active = theme.primary_active;
+    theme.button_primary_foreground = theme.primary_foreground;
+    theme.colors.list = theme.popover;
+    theme.list_hover = theme.accent;
+    theme.list_active = theme.accent;
+    theme.list_active_border = theme.border;
+    theme.list_even = theme.popover;
+    theme.list_head = theme.muted;
+    theme.table = color(palette.card);
+    theme.table_head = theme.muted;
+    theme.table_head_foreground = theme.muted_foreground;
+    theme.table_hover = theme.accent;
+    theme.table_active = theme.accent;
+    theme.table_active_border = theme.border;
+    theme.table_even = color(palette.card);
+    theme.table_row_border = theme.border;
+    theme.tiles = color(palette.card);
+    theme.title_bar = theme.background;
+    theme.title_bar_border = theme.border;
+    theme.tab_bar = theme.background;
+    theme.tab_bar_segmented = theme.muted;
+    theme.tab = Hsla::transparent_black();
+    theme.tab_active = theme.accent;
+    theme.tab_active_foreground = theme.accent_foreground;
+    theme.tab_foreground = theme.muted_foreground;
+    theme.switch = theme.muted;
+    theme.switch_thumb = theme.popover;
+    theme.skeleton = theme.muted;
+    theme.slider_bar = theme.primary;
+    theme.slider_thumb = theme.primary_foreground;
+    theme.progress_bar = theme.primary;
+    theme.selection = color(palette.ring).opacity(0.24);
+    theme.link = theme.primary;
+    theme.link_hover = theme.primary_hover;
+    theme.link_active = theme.primary_active;
 }
 
 pub(crate) fn target_key(target: &CaptureTarget) -> String {
