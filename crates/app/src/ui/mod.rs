@@ -33,7 +33,7 @@ pub(crate) const FORMAT_OPTIONS: [&str; 2] = ["MOV", "GIF"];
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 pub(crate) const RESOLUTION_OPTIONS: [&str; 5] = ["Original", "4K", "2K", "1080p", "720p"];
-pub(crate) const FPS_OPTIONS: [&str; 2] = ["30 FPS", "60 FPS"];
+pub(crate) const FPS_OPTIONS: [&str; 3] = ["12 FPS", "30 FPS", "60 FPS"];
 
 const TAB_HEIGHT: f32 = 32.;
 const FIELD_LABEL_WIDTH: f32 = 96.;
@@ -312,7 +312,7 @@ impl WrecApp {
             Select::new(&self.quality_select)
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Quality")
-                .disabled(controls_disabled),
+                .disabled(controls_disabled || is_gif),
         );
         let resolution_row = labeled_select_row(
             "Resolution",
@@ -320,7 +320,7 @@ impl WrecApp {
             Select::new(&self.resolution_select)
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Resolution")
-                .disabled(controls_disabled),
+                .disabled(controls_disabled || is_gif),
         );
         let frame_rate_row = labeled_select_row(
             "Frame Rate",
@@ -328,7 +328,7 @@ impl WrecApp {
             Select::new(&self.fps_select)
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Frame Rate")
-                .disabled(controls_disabled),
+                .disabled(controls_disabled || is_gif),
         );
         let cursor_row = label_switch_row(
             "Cursor",
@@ -934,6 +934,7 @@ fn plain_info_row(label: &'static str, value: impl Into<SharedString>, value_col
 
 pub(crate) fn fps_label(fps: FrameRate) -> &'static str {
     match fps {
+        FrameRate::Fps12 => "12 FPS",
         FrameRate::Fps60 => "60 FPS",
         FrameRate::Fps30 => "30 FPS",
     }

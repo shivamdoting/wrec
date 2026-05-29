@@ -79,6 +79,7 @@ impl RecorderEngine for MacosRecorder {
         settings: RecorderSettings,
     ) -> Result<RecordingSession> {
         let session_id = next_session_id();
+        let settings = settings.effective_for_recording();
         let output_path = recording_output_path(&settings);
         self.emit(RecorderEvent::Starting {
             session_id,

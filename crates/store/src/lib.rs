@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -80,6 +80,7 @@ pub struct RecordingRecord {
     pub target_kind: String,
     pub target_id: u64,
     pub target_name: String,
+    pub output_format: String,
     pub codec: String,
     pub quality: String,
     pub resolution: String,
@@ -258,6 +259,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             target_kind TEXT NOT NULL,
             target_id INTEGER NOT NULL,
             target_name TEXT NOT NULL,
+            output_format TEXT NOT NULL DEFAULT 'mov',
             codec TEXT NOT NULL,
             quality TEXT NOT NULL,
             resolution TEXT NOT NULL,
@@ -309,6 +311,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    if version > 0 && version < 3 {
+        conn.execute(
+            "ALTER TABLE recordings ADD COLUMN output_format TEXT NOT NULL DEFAULT 'mov'",
+            [],
+        )?;
+    }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
 }
@@ -357,13 +365,14 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             target_kind,
             target_id,
             target_name,
+            output_format,
             codec,
             quality,
             resolution,
             fps,
             include_cursor,
             include_system_audio
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(id) DO UPDATE SET
             started_at_ms = excluded.started_at_ms,
             status = excluded.status,
@@ -371,6 +380,7 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             target_kind = excluded.target_kind,
             target_id = excluded.target_id,
             target_name = excluded.target_name,
+            output_format = excluded.output_format,
             codec = excluded.codec,
             quality = excluded.quality,
             resolution = excluded.resolution,
@@ -386,6 +396,7 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             recording.target_kind.as_str(),
             u64_to_i64(recording.target_id),
             recording.target_name.as_str(),
+            recording.output_format.as_str(),
             recording.codec.as_str(),
             recording.quality.as_str(),
             recording.resolution.as_str(),

@@ -22,6 +22,7 @@ pub enum OutputFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameRate {
+    Fps12,
     Fps30,
     Fps60,
 }
@@ -29,6 +30,7 @@ pub enum FrameRate {
 impl FrameRate {
     pub const fn as_u32(self) -> u32 {
         match self {
+            Self::Fps12 => 12,
             Self::Fps30 => 30,
             Self::Fps60 => 60,
         }
@@ -45,6 +47,10 @@ impl Codec {
 }
 
 impl OutputFormat {
+    pub const fn is_gif(self) -> bool {
+        matches!(self, Self::Gif)
+    }
+
     pub const fn as_arg(self) -> &'static str {
         match self {
             Self::Mov => "mov",
@@ -151,6 +157,19 @@ impl Default for RecorderSettings {
     }
 }
 
+impl RecorderSettings {
+    pub fn effective_for_recording(&self) -> Self {
+        let mut settings = self.clone();
+        if settings.output_format.is_gif() {
+            settings.fps = FrameRate::Fps12;
+            settings.quality = Quality::Efficient;
+            settings.resolution = Resolution::R720p;
+            settings.include_system_audio = false;
+        }
+        settings
+    }
+}
+
 fn default_include_system_audio() -> bool {
     true
 }
@@ -245,6 +264,8 @@ mod tests {
         assert_eq!(OutputFormat::Gif.as_arg(), "gif");
         assert_eq!(OutputFormat::Mov.file_extension(), "mov");
         assert_eq!(OutputFormat::Gif.file_extension(), "gif");
+        assert!(!OutputFormat::Mov.is_gif());
+        assert!(OutputFormat::Gif.is_gif());
         assert!(OutputFormat::Mov.supports_audio());
         assert!(!OutputFormat::Gif.supports_audio());
     }
@@ -278,5 +299,24 @@ mod tests {
         assert!(settings.include_cursor);
         assert!(settings.include_system_audio);
         assert!(settings.hide_wrec);
+    }
+
+    #[test]
+    fn gif_recordings_use_low_bandwidth_effective_settings() {
+        let settings = RecorderSettings {
+            output_format: OutputFormat::Gif,
+            fps: FrameRate::Fps60,
+            quality: Quality::High,
+            resolution: Resolution::R4k,
+            include_system_audio: true,
+            ..RecorderSettings::default()
+        }
+        .effective_for_recording();
+
+        assert_eq!(settings.output_format, OutputFormat::Gif);
+        assert_eq!(settings.fps, FrameRate::Fps12);
+        assert_eq!(settings.quality, Quality::Efficient);
+        assert_eq!(settings.resolution, Resolution::R720p);
+        assert!(!settings.include_system_audio);
     }
 }

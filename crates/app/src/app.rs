@@ -118,7 +118,10 @@ pub(crate) struct WrecApp {
 impl WrecApp {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = AppConfig::load();
-        let settings = config.settings;
+        let mut settings = config.settings;
+        if settings.output_format.is_gif() {
+            settings = settings.effective_for_recording();
+        }
         let store = match Store::open(store_path()) {
             Ok(store) => Some(store),
             Err(err) => {
@@ -322,7 +325,7 @@ impl WrecApp {
         &mut self,
         _: &Entity<ControlSelect>,
         event: &SelectEvent<Vec<&'static str>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let SelectEvent::Confirm(Some(value)) = event else {
@@ -332,6 +335,25 @@ impl WrecApp {
             "GIF" => OutputFormat::Gif,
             _ => OutputFormat::Mov,
         };
+        if self.settings.output_format.is_gif() {
+            self.settings.fps = FrameRate::Fps12;
+            self.settings.quality = Quality::Efficient;
+            self.settings.resolution = Resolution::R720p;
+            self.settings.include_system_audio = false;
+            self.fps_select.update(cx, |select, cx| {
+                select.set_selected_value(&fps_label(self.settings.fps).into(), window, cx);
+            });
+            self.quality_select.update(cx, |select, cx| {
+                select.set_selected_value(&quality_label(self.settings.quality).into(), window, cx);
+            });
+            self.resolution_select.update(cx, |select, cx| {
+                select.set_selected_value(
+                    &resolution_label(self.settings.resolution).into(),
+                    window,
+                    cx,
+                );
+            });
+        }
         self.push_log(format!("format: {value}"));
         self.save_config();
         cx.notify();
@@ -366,10 +388,14 @@ impl WrecApp {
         let SelectEvent::Confirm(Some(value)) = event else {
             return;
         };
-        self.settings.quality = match *value {
-            "Efficient" => Quality::Efficient,
-            "High" => Quality::High,
-            _ => Quality::Balanced,
+        self.settings.quality = if self.settings.output_format.is_gif() {
+            Quality::Efficient
+        } else {
+            match *value {
+                "Efficient" => Quality::Efficient,
+                "High" => Quality::High,
+                _ => Quality::Balanced,
+            }
         };
         self.push_log(format!("quality: {value}"));
         self.save_config();
@@ -386,12 +412,16 @@ impl WrecApp {
         let SelectEvent::Confirm(Some(value)) = event else {
             return;
         };
-        self.settings.resolution = match *value {
-            "720p" => Resolution::R720p,
-            "1080p" => Resolution::R1080p,
-            "2K" => Resolution::R2k,
-            "4K" => Resolution::R4k,
-            _ => Resolution::Native,
+        self.settings.resolution = if self.settings.output_format.is_gif() {
+            Resolution::R720p
+        } else {
+            match *value {
+                "720p" => Resolution::R720p,
+                "1080p" => Resolution::R1080p,
+                "2K" => Resolution::R2k,
+                "4K" => Resolution::R4k,
+                _ => Resolution::Native,
+            }
         };
         self.push_log(format!("resolution: {value}"));
         self.save_config();
@@ -408,9 +438,14 @@ impl WrecApp {
         let SelectEvent::Confirm(Some(value)) = event else {
             return;
         };
-        let fps = match *value {
-            "60 FPS" => FrameRate::Fps60,
-            _ => FrameRate::Fps30,
+        let fps = if self.settings.output_format.is_gif() {
+            FrameRate::Fps12
+        } else {
+            match *value {
+                "60 FPS" => FrameRate::Fps60,
+                "12 FPS" => FrameRate::Fps12,
+                _ => FrameRate::Fps30,
+            }
         };
         self.set_fps(fps, cx);
     }
@@ -1201,6 +1236,7 @@ impl WrecApp {
                 target_kind: capture_kind_arg(target.kind).to_string(),
                 target_id: target.id,
                 target_name: target.name.clone(),
+                output_format: settings.output_format.as_arg().to_string(),
                 codec: recording_codec(settings).to_string(),
                 quality: settings.quality.as_arg().to_string(),
                 resolution: settings.resolution.as_arg().to_string(),
