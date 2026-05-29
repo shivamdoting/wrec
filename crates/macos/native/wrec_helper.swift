@@ -9,7 +9,6 @@ import CoreMedia
 import CoreVideo
 import ImageIO
 import UniformTypeIdentifiers
-import VideoToolbox
 
 protocol CaptureRecorder: NSObjectProtocol, SCStreamOutput, SCStreamDelegate {
     var queue: DispatchQueue { get }
@@ -331,275 +330,6 @@ final class SampleRecorder: NSObject, CaptureRecorder {
     }
 }
 
-private struct FrameFingerprint {
-    let hash: UInt64
-}
-
-final class GifRecorder: NSObject, CaptureRecorder {
-    let queue = DispatchQueue(label: "wrec.capture.gif-writer", qos: .userInitiated)
-
-    private let destination: CGImageDestination
-    private let frameDelay: Double
-    private let duplicateHeartbeatSeconds = 1.0
-    private let finished = DispatchSemaphore(value: 0)
-    private var didStart = false
-    private var didFinish = false
-    private var finalizeSucceeded = false
-    private var frameCount: Int64 = 0
-    private var droppedFrameCount: Int64 = 0
-    private var skippedFrameCount: Int64 = 0
-    private var firstPTS: CMTime?
-    private var pendingImage: CGImage?
-    private var pendingPTS: CMTime?
-    private var latestPTS: CMTime?
-    private var lastFingerprint: FrameFingerprint?
-    private var isPaused = false
-    private var pauseStartedPTS: CMTime?
-    private var pendingResume = false
-    private var pauseOffset = CMTime.zero
-    private var lastMetricTime = DispatchTime.now()
-
-    init(outputURL: URL, fps: Int32) throws {
-        guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL, UTType.gif.identifier as CFString, 0, nil) else {
-            throw HelperError.writerInputRejected
-        }
-
-        self.destination = destination
-        frameDelay = max(1.0 / Double(max(fps, 1)), 0.02)
-        let gifProperties = [
-            kCGImagePropertyGIFDictionary as String: [
-                kCGImagePropertyGIFLoopCount as String: 0,
-            ],
-        ]
-        CGImageDestinationSetProperties(destination, gifProperties as CFDictionary)
-    }
-
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        FileHandle.standardError.write(Data("wrec-helper: stream stopped with error: \(error)\n".utf8))
-    }
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen else {
-            return
-        }
-        appendFrame(sampleBuffer)
-    }
-
-    private func appendFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard sampleBuffer.isValid else {
-            droppedFrameCount += 1
-            return
-        }
-        guard frameStatus(sampleBuffer) == .complete else {
-            droppedFrameCount += 1
-            return
-        }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        guard pts.isValid else {
-            droppedFrameCount += 1
-            return
-        }
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            droppedFrameCount += 1
-            return
-        }
-        if isPaused {
-            if pauseStartedPTS == nil {
-                pauseStartedPTS = pts
-            }
-            droppedFrameCount += 1
-            return
-        }
-        applyPendingResume(at: pts)
-        let adjustedPTS = CMTimeSubtract(pts, pauseOffset)
-        latestPTS = adjustedPTS
-
-        guard let fingerprint = frameFingerprint(pixelBuffer) else {
-            droppedFrameCount += 1
-            return
-        }
-        if let lastFingerprint, fingerprint.hash == lastFingerprint.hash, !shouldKeepDuplicate(at: adjustedPTS) {
-            skippedFrameCount += 1
-            emitMetricsIfNeeded(currentPTS: adjustedPTS)
-            return
-        }
-
-        guard let cgImage = createCGImage(from: pixelBuffer) else {
-            droppedFrameCount += 1
-            FileHandle.standardError.write(Data("wrec-helper: gif frame conversion failed\n".utf8))
-            return
-        }
-
-        if !didStart {
-            firstPTS = adjustedPTS
-            didStart = true
-            FileHandle.standardError.write(Data("wrec-helper: recording started\n".utf8))
-        }
-
-        if let pendingImage, let pendingPTS {
-            addFrame(pendingImage, delay: frameDelay(from: pendingPTS, to: adjustedPTS))
-        }
-        pendingImage = cgImage
-        pendingPTS = adjustedPTS
-        lastFingerprint = fingerprint
-        frameCount += 1
-        emitMetricsIfNeeded(currentPTS: adjustedPTS)
-    }
-
-    func pause() {
-        queue.async {
-            guard self.didStart, !self.didFinish, !self.isPaused else {
-                return
-            }
-
-            self.isPaused = true
-            self.pendingResume = false
-            self.pauseStartedPTS = nil
-            FileHandle.standardError.write(Data("wrec-helper: recording paused\n".utf8))
-        }
-    }
-
-    func resume() {
-        queue.async {
-            guard self.didStart, !self.didFinish, self.isPaused else {
-                return
-            }
-
-            self.isPaused = false
-            self.pendingResume = true
-            FileHandle.standardError.write(Data("wrec-helper: recording resumed\n".utf8))
-        }
-    }
-
-    private func applyPendingResume(at pts: CMTime) {
-        guard pendingResume else {
-            return
-        }
-
-        if let pauseStartedPTS, CMTimeCompare(pts, pauseStartedPTS) >= 0 {
-            pauseOffset = CMTimeAdd(pauseOffset, CMTimeSubtract(pts, pauseStartedPTS))
-        }
-        pendingResume = false
-        pauseStartedPTS = nil
-    }
-
-    func finish(timeout: DispatchTimeInterval) -> Bool {
-        queue.async {
-            guard !self.didFinish else {
-                self.finished.signal()
-                return
-            }
-
-            self.didFinish = true
-            if let pendingImage = self.pendingImage {
-                let delay = self.pendingPTS
-                    .flatMap { pendingPTS in
-                        self.latestPTS.map { self.frameDelay(from: pendingPTS, to: $0) }
-                    } ?? self.frameDelay
-                self.addFrame(pendingImage, delay: delay)
-                self.pendingImage = nil
-                self.pendingPTS = nil
-            }
-
-            self.finalizeSucceeded = CGImageDestinationFinalize(self.destination)
-            if self.finalizeSucceeded {
-                FileHandle.standardError.write(Data("wrec-helper: recording finished frames=\(self.frameCount) dropped=\(self.droppedFrameCount) skipped=\(self.skippedFrameCount) audio=0 audio_dropped=0\n".utf8))
-            } else {
-                FileHandle.standardError.write(Data("wrec-helper: recording failed: gif finalization failed\n".utf8))
-            }
-            self.finished.signal()
-        }
-
-        return finished.wait(timeout: .now() + timeout) == .success && finalizeSucceeded
-    }
-
-    private func addFrame(_ image: CGImage, delay: Double) {
-        let properties = [
-            kCGImagePropertyGIFDictionary as String: [
-                kCGImagePropertyGIFDelayTime as String: delay,
-            ],
-        ]
-        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
-    }
-
-    private func shouldKeepDuplicate(at pts: CMTime) -> Bool {
-        guard let pendingPTS else {
-            return false
-        }
-        let elapsed = CMTimeSubtract(pts, pendingPTS).seconds
-        return elapsed.isFinite && elapsed >= duplicateHeartbeatSeconds
-    }
-
-    private func createCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
-        var image: CGImage?
-        let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image)
-        guard status == noErr else {
-            return nil
-        }
-        return image
-    }
-
-    private func frameFingerprint(_ pixelBuffer: CVPixelBuffer) -> FrameFingerprint? {
-        guard CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly) == kCVReturnSuccess else {
-            return nil
-        }
-        defer {
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-        }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-            return nil
-        }
-
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        guard width > 0, height > 0, bytesPerRow >= width * 4 else {
-            return nil
-        }
-
-        let bytes = baseAddress.assumingMemoryBound(to: UInt8.self)
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        let sampleStride = 4
-
-        for y in stride(from: 0, to: height, by: sampleStride) {
-            for x in stride(from: 0, to: width, by: sampleStride) {
-                let offset = y * bytesPerRow + x * 4
-                let blue = Int(bytes[offset])
-                let green = Int(bytes[offset + 1])
-                let red = Int(bytes[offset + 2])
-                let luma = UInt64((red * 54 + green * 183 + blue * 19) >> 8)
-                hash ^= luma
-                hash = hash &* 1_099_511_628_211
-            }
-        }
-
-        return FrameFingerprint(hash: hash)
-    }
-
-    private func frameDelay(from previousPTS: CMTime, to currentPTS: CMTime) -> Double {
-        let elapsed = CMTimeSubtract(currentPTS, previousPTS).seconds
-        guard elapsed.isFinite, elapsed > 0 else {
-            return frameDelay
-        }
-        return max(elapsed, 0.02)
-    }
-
-    private func emitMetricsIfNeeded(currentPTS: CMTime) {
-        let now = DispatchTime.now()
-        guard now.uptimeNanoseconds - lastMetricTime.uptimeNanoseconds >= 1_000_000_000 else {
-            return
-        }
-        lastMetricTime = now
-
-        let elapsed = firstPTS.map { CMTimeSubtract(currentPTS, $0).seconds } ?? 0
-        let elapsedSeconds = max(0, Int64(elapsed.rounded()))
-        FileHandle.standardError.write(
-            Data("wrec-helper: metrics elapsed=\(elapsedSeconds) frames=\(frameCount) dropped=\(droppedFrameCount) skipped=\(skippedFrameCount)\n".utf8)
-        )
-    }
-}
-
 enum HelperError: Error {
     case writerInputRejected
     case gifConversionFailed(String)
@@ -745,7 +475,7 @@ func run() async {
                 includeSystemAudio: recordsSystemAudio
             )
         }
-        try await recordCapture(
+        let recordedDuration = try await recordCapture(
             filter: filter,
             streamConfig: streamConfig,
             recorder: recorder,
@@ -753,7 +483,12 @@ func run() async {
             maxDurationSeconds: outputFormat == "gif" ? 15 : nil
         )
         if outputFormat == "gif" {
-            try convertVideoToGif(inputURL: recordingURL, outputURL: outputURL, fps: fps)
+            try convertVideoToGif(
+                inputURL: recordingURL,
+                outputURL: outputURL,
+                fps: fps,
+                duration: recordedDuration
+            )
             try? FileManager.default.removeItem(at: recordingURL)
         }
     } catch {
@@ -768,7 +503,7 @@ func recordCapture(
     recorder: any CaptureRecorder,
     includeSystemAudio: Bool,
     maxDurationSeconds: Int? = nil
-) async throws {
+) async throws -> TimeInterval {
     let stream = SCStream(filter: filter, configuration: streamConfig, delegate: recorder)
     try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: recorder.queue)
     if includeSystemAudio {
@@ -776,23 +511,28 @@ func recordCapture(
     }
 
     try await stream.startCapture()
+    let startedAt = Date()
 
     // Parent process writes commands to stdin. EOF also stops.
     await waitForStopSignal(recorder: recorder, maxDurationSeconds: maxDurationSeconds)
+    let duration = Date().timeIntervalSince(startedAt)
 
     try await stream.stopCapture()
     guard recorder.finish(timeout: .seconds(15)) else {
         fputs("wrec-helper: timed out waiting for writer finalization\n", stderr)
         Foundation.exit(6)
     }
+
+    return duration
 }
 
-func convertVideoToGif(inputURL: URL, outputURL: URL, fps: Int32) throws {
+func convertVideoToGif(inputURL: URL, outputURL: URL, fps: Int32, duration: TimeInterval) throws {
     let asset = AVURLAsset(url: inputURL)
-    let duration = asset.duration.seconds
-    guard duration.isFinite, duration > 0 else {
+    let assetDuration = asset.duration.seconds
+    guard assetDuration.isFinite, assetDuration > 0 else {
         throw HelperError.gifConversionFailed("temporary video has no duration")
     }
+    let outputDuration = max(duration, assetDuration)
     guard asset.tracks(withMediaType: .video).first != nil else {
         throw HelperError.gifConversionFailed("temporary video has no video track")
     }
@@ -816,12 +556,12 @@ func convertVideoToGif(inputURL: URL, outputURL: URL, fps: Int32) throws {
     let halfFrame = CMTime(seconds: fallbackDelay / 2.0, preferredTimescale: 600)
     generator.requestedTimeToleranceBefore = halfFrame
     generator.requestedTimeToleranceAfter = halfFrame
-    let frameCount = max(2, Int((duration * Double(max(fps, 1))).rounded(.up)))
+    let frameCount = max(2, Int((outputDuration * Double(max(fps, 1))).rounded(.up)))
     var writtenFrameCount = 0
     var droppedFrameCount = 0
 
     for frameIndex in 0..<frameCount {
-        let seconds = min(max(0, duration - 0.001), Double(frameIndex) * fallbackDelay)
+        let seconds = min(max(0, assetDuration - 0.001), Double(frameIndex) * fallbackDelay)
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         do {
             let image = try generator.copyCGImage(at: time, actualTime: nil)
@@ -840,7 +580,7 @@ func convertVideoToGif(inputURL: URL, outputURL: URL, fps: Int32) throws {
     }
 
     FileHandle.standardError.write(
-        Data("wrec-helper: gif converted frames=\(writtenFrameCount) dropped=\(droppedFrameCount)\n".utf8)
+        Data("wrec-helper: gif converted frames=\(writtenFrameCount) dropped=\(droppedFrameCount) duration=\(String(format: "%.2f", outputDuration)) asset_duration=\(String(format: "%.2f", assetDuration))\n".utf8)
     )
 }
 
