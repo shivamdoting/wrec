@@ -789,22 +789,13 @@ func recordCapture(
 
 func convertVideoToGif(inputURL: URL, outputURL: URL, fps: Int32) throws {
     let asset = AVURLAsset(url: inputURL)
-    guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+    let duration = asset.duration.seconds
+    guard duration.isFinite, duration > 0 else {
+        throw HelperError.gifConversionFailed("temporary video has no duration")
+    }
+    guard asset.tracks(withMediaType: .video).first != nil else {
         throw HelperError.gifConversionFailed("temporary video has no video track")
     }
-
-    let reader = try AVAssetReader(asset: asset)
-    let output = AVAssetReaderTrackOutput(
-        track: videoTrack,
-        outputSettings: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-        ]
-    )
-    output.alwaysCopiesSampleData = false
-    guard reader.canAdd(output) else {
-        throw HelperError.gifConversionFailed("video reader rejected track output")
-    }
-    reader.add(output)
 
     try? FileManager.default.removeItem(at: outputURL)
     guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL, UTType.gif.identifier as CFString, 0, nil) else {
@@ -819,61 +810,38 @@ func convertVideoToGif(inputURL: URL, outputURL: URL, fps: Int32) throws {
         ] as CFDictionary
     )
 
-    guard reader.startReading() else {
-        throw HelperError.gifConversionFailed(reader.error?.localizedDescription ?? "video reader failed to start")
-    }
-
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
     let fallbackDelay = max(1.0 / Double(max(fps, 1)), 0.02)
-    var pendingImage: CGImage?
-    var pendingPTS: CMTime?
-    var frameCount = 0
+    let halfFrame = CMTime(seconds: fallbackDelay / 2.0, preferredTimescale: 600)
+    generator.requestedTimeToleranceBefore = halfFrame
+    generator.requestedTimeToleranceAfter = halfFrame
+    let frameCount = max(2, Int((duration * Double(max(fps, 1))).rounded(.up)))
+    var writtenFrameCount = 0
     var droppedFrameCount = 0
 
-    while let sampleBuffer = output.copyNextSampleBuffer() {
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        guard pts.isValid, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+    for frameIndex in 0..<frameCount {
+        let seconds = min(max(0, duration - 0.001), Double(frameIndex) * fallbackDelay)
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        do {
+            let image = try generator.copyCGImage(at: time, actualTime: nil)
+            addGifFrame(destination, image: image, delay: fallbackDelay)
+            writtenFrameCount += 1
+        } catch {
             droppedFrameCount += 1
-            continue
         }
-        guard let image = createCGImage(from: pixelBuffer) else {
-            droppedFrameCount += 1
-            continue
-        }
-
-        if let pendingImage, let pendingPTS {
-            addGifFrame(destination, image: pendingImage, delay: gifFrameDelay(from: pendingPTS, to: pts, fallback: fallbackDelay))
-        }
-        pendingImage = image
-        pendingPTS = pts
-        frameCount += 1
     }
 
-    if let pendingImage {
-        addGifFrame(destination, image: pendingImage, delay: fallbackDelay)
-    }
-
-    if reader.status == .failed || reader.status == .cancelled {
-        throw HelperError.gifConversionFailed(reader.error?.localizedDescription ?? "video reader did not finish")
-    }
-    guard frameCount > 0 else {
-        throw HelperError.gifConversionFailed("temporary video produced no frames")
+    guard writtenFrameCount >= 2 else {
+        throw HelperError.gifConversionFailed("could not sample temporary video frames")
     }
     guard CGImageDestinationFinalize(destination) else {
         throw HelperError.gifConversionFailed("GIF finalization failed")
     }
 
     FileHandle.standardError.write(
-        Data("wrec-helper: gif converted frames=\(frameCount) dropped=\(droppedFrameCount)\n".utf8)
+        Data("wrec-helper: gif converted frames=\(writtenFrameCount) dropped=\(droppedFrameCount)\n".utf8)
     )
-}
-
-func createCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
-    var image: CGImage?
-    let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image)
-    guard status == noErr else {
-        return nil
-    }
-    return image
 }
 
 func addGifFrame(_ destination: CGImageDestination, image: CGImage, delay: Double) {
