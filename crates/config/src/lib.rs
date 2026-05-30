@@ -5,6 +5,7 @@ use std::{
 };
 use wrec_core::RecorderSettings;
 
+// Keep app, CLI, and dev/release builds on one namespace so selected settings stay shared.
 const APP_DATA_DIR_NAME: &str = "Wrec";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

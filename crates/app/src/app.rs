@@ -931,6 +931,8 @@ impl WrecApp {
             return;
         }
 
+        // Manual stops finish through AppEvent::Stopped; the backend still persists terminal events.
+        let was_stopping = matches!(self.recorder_state, RecorderState::Stopping);
         match self.backend.handle_recorder_event(&event) {
             BackendEvent::Starting {
                 session_id,
@@ -965,6 +967,10 @@ impl WrecApp {
                 recording_id,
                 message,
             } => {
+                if was_stopping {
+                    return;
+                }
+
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Failed;
@@ -981,6 +987,10 @@ impl WrecApp {
                 status,
                 ..
             } => {
+                if was_stopping {
+                    return;
+                }
+
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = if success {
