@@ -1,0 +1,12 @@
+[package]
+name = "wrec-config"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wrec-core = { path = "../core" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tracing.workspace = true

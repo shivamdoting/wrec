@@ -17,30 +17,32 @@ pub struct ListArgs {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct RecordArgs {
-    pub source_kind: CaptureSourceKind,
+    pub source_kind: Option<CaptureSourceKind>,
     pub target_id: Option<u64>,
-    pub fps: FrameRate,
-    pub codec: Codec,
-    pub quality: Quality,
-    pub resolution: Resolution,
+    pub fps: Option<FrameRate>,
+    pub codec: Option<Codec>,
+    pub quality: Option<Quality>,
+    pub resolution: Option<Resolution>,
     pub output_dir: Option<PathBuf>,
-    pub include_cursor: bool,
-    pub include_system_audio: bool,
+    pub include_cursor: Option<bool>,
+    pub include_system_audio: Option<bool>,
+    pub hide_wrec: Option<bool>,
     pub json: bool,
 }
 
 impl Default for RecordArgs {
     fn default() -> Self {
         Self {
-            source_kind: CaptureSourceKind::Display,
+            source_kind: None,
             target_id: None,
-            fps: FrameRate::Fps30,
-            codec: Codec::Hevc,
-            quality: Quality::Balanced,
-            resolution: Resolution::Native,
+            fps: None,
+            codec: None,
+            quality: None,
+            resolution: None,
             output_dir: None,
-            include_cursor: true,
-            include_system_audio: true,
+            include_cursor: None,
+            include_system_audio: None,
+            hide_wrec: None,
             json: false,
         }
     }
@@ -54,7 +56,7 @@ pub fn usage() -> String {
      \n\
      Commands:\n\
      \u{20}\u{20}list                 List capture targets (displays and windows)\n\
-     \u{20}\u{20}record               Record the screen (foreground; control via stdin)\n\
+     \u{20}\u{20}record               Record with saved app settings (foreground; control via stdin)\n\
      \u{20}\u{20}help                 Show this help\n\
      \n\
      Global:\n\
@@ -65,15 +67,19 @@ pub fn usage() -> String {
      \u{20}\u{20}--json               Print targets as JSON\n\
      \n\
      record options:\n\
-     \u{20}\u{20}--display <id>        Capture a display by id (default: first display)\n\
-     \u{20}\u{20}--window <id>         Capture a window by id\n\
-     \u{20}\u{20}--fps <30|60>        Frame rate (default: 30)\n\
-     \u{20}\u{20}--codec <hevc|h264>  Video codec (default: hevc)\n\
-     \u{20}\u{20}--quality <efficient|balanced|high>     (default: balanced)\n\
-     \u{20}\u{20}--resolution <native|720p|1080p|2k|4k>  (default: native)\n\
-     \u{20}\u{20}--out <dir>          Output directory (default: ~/Movies/Wrec)\n\
-     \u{20}\u{20}--no-cursor          Do not capture the cursor\n\
-     \u{20}\u{20}--no-system-audio    Do not capture system audio\n\
+     \u{20}\u{20}--display <id>        Override saved source and capture a display by id\n\
+     \u{20}\u{20}--window <id>         Override saved source and capture a window by id\n\
+     \u{20}\u{20}--fps <30|60>        Override saved frame rate\n\
+     \u{20}\u{20}--codec <hevc|h264>  Override saved video codec\n\
+     \u{20}\u{20}--quality <efficient|balanced|high>     Override saved quality\n\
+     \u{20}\u{20}--resolution <native|720p|1080p|2k|4k>  Override saved resolution\n\
+     \u{20}\u{20}--out <dir>          Override saved output directory\n\
+     \u{20}\u{20}--cursor             Capture the cursor for this recording\n\
+     \u{20}\u{20}--no-cursor          Do not capture the cursor for this recording\n\
+     \u{20}\u{20}--system-audio       Capture system audio for this recording\n\
+     \u{20}\u{20}--no-system-audio    Do not capture system audio for this recording\n\
+     \u{20}\u{20}--hide-wrec          Hide Wrec windows for this recording\n\
+     \u{20}\u{20}--no-hide-wrec       Do not hide Wrec windows for this recording\n\
      \u{20}\u{20}--json               Emit recorder events as JSON lines\n\
      \n\
      While recording, type a command on stdin and press Enter:\n\
@@ -130,23 +136,27 @@ where
             "-h" | "--help" => return Ok(Command::Help),
             "--display" => {
                 set_source(&mut source_flag, "--display")?;
-                out.source_kind = CaptureSourceKind::Display;
+                out.source_kind = Some(CaptureSourceKind::Display);
                 out.target_id = Some(parse_u64(&value(&mut args, "--display")?, "--display")?);
             }
             "--window" => {
                 set_source(&mut source_flag, "--window")?;
-                out.source_kind = CaptureSourceKind::Window;
+                out.source_kind = Some(CaptureSourceKind::Window);
                 out.target_id = Some(parse_u64(&value(&mut args, "--window")?, "--window")?);
             }
-            "--fps" => out.fps = parse_fps(&value(&mut args, "--fps")?)?,
-            "--codec" => out.codec = parse_codec(&value(&mut args, "--codec")?)?,
-            "--quality" => out.quality = parse_quality(&value(&mut args, "--quality")?)?,
+            "--fps" => out.fps = Some(parse_fps(&value(&mut args, "--fps")?)?),
+            "--codec" => out.codec = Some(parse_codec(&value(&mut args, "--codec")?)?),
+            "--quality" => out.quality = Some(parse_quality(&value(&mut args, "--quality")?)?),
             "--resolution" => {
-                out.resolution = parse_resolution(&value(&mut args, "--resolution")?)?
+                out.resolution = Some(parse_resolution(&value(&mut args, "--resolution")?)?)
             }
             "--out" => out.output_dir = Some(PathBuf::from(value(&mut args, "--out")?)),
-            "--no-cursor" => out.include_cursor = false,
-            "--no-system-audio" => out.include_system_audio = false,
+            "--cursor" => out.include_cursor = Some(true),
+            "--no-cursor" => out.include_cursor = Some(false),
+            "--system-audio" => out.include_system_audio = Some(true),
+            "--no-system-audio" => out.include_system_audio = Some(false),
+            "--hide-wrec" => out.hide_wrec = Some(true),
+            "--no-hide-wrec" => out.hide_wrec = Some(false),
             "--json" => out.json = true,
             other => {
                 return Err(format!(
@@ -313,15 +323,16 @@ mod tests {
         assert_eq!(
             parsed,
             Command::Record(RecordArgs {
-                source_kind: CaptureSourceKind::Window,
+                source_kind: Some(CaptureSourceKind::Window),
                 target_id: Some(42),
-                fps: FrameRate::Fps60,
-                codec: Codec::H264,
-                quality: Quality::High,
-                resolution: Resolution::R4k,
+                fps: Some(FrameRate::Fps60),
+                codec: Some(Codec::H264),
+                quality: Some(Quality::High),
+                resolution: Some(Resolution::R4k),
                 output_dir: Some(PathBuf::from("/tmp/out")),
-                include_cursor: false,
-                include_system_audio: false,
+                include_cursor: Some(false),
+                include_system_audio: Some(false),
+                hide_wrec: None,
                 json: true,
             })
         );
@@ -333,9 +344,23 @@ mod tests {
         assert_eq!(
             parsed,
             Command::Record(RecordArgs {
-                source_kind: CaptureSourceKind::Display,
+                source_kind: Some(CaptureSourceKind::Display),
                 target_id: Some(1),
-                fps: FrameRate::Fps60,
+                fps: Some(FrameRate::Fps60),
+                ..RecordArgs::default()
+            })
+        );
+    }
+
+    #[test]
+    fn record_parses_positive_boolean_overrides() {
+        let parsed = parse_vec(&["record", "--cursor", "--system-audio", "--hide-wrec"]).unwrap();
+        assert_eq!(
+            parsed,
+            Command::Record(RecordArgs {
+                include_cursor: Some(true),
+                include_system_audio: Some(true),
+                hide_wrec: Some(true),
                 ..RecordArgs::default()
             })
         );

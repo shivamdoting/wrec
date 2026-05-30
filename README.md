@@ -119,6 +119,14 @@ Recording-affecting controls are disabled while recording so the UI cannot diver
 cargo run -p wrec-app
 ```
 
+The terminal client uses the same saved settings as the app, with flags acting
+as per-run overrides:
+
+```bash
+cargo run -p wrec-cli -- list
+cargo run -p wrec-cli -- record
+```
+
 If GPUI shader compilation fails, select full Xcode:
 
 ```bash
@@ -162,9 +170,13 @@ Release builds are explicit:
 This uses Cargo's release profile and creates `dist/release/Wrec.app`.
 Release packaging does not create a companion README.
 
-Both channels copy the Rust GPUI app as `wrec`, copy the compiled Swift
-`wrec-helper`, and sign both executables. Dev builds use the bundle identifier
-`app.wrec.wrec.dev`; release builds use `app.wrec.wrec`.
+Both channels copy the Rust GPUI app as `wrec`, copy the terminal client as
+`wrec-cli`, copy the compiled Swift `wrec-helper`, and sign each executable.
+Dev builds use the bundle identifier `app.wrec.wrec.dev`; release builds use
+`app.wrec.wrec`.
+
+After installation, the bundled CLI lives at
+`/Applications/Wrec.app/Contents/MacOS/wrec-cli`.
 
 Local packaging uses ad-hoc signing by default. Developer ID signing and
 notarization can be enabled for release builds with environment variables:

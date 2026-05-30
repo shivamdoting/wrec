@@ -1,5 +1,4 @@
 use crate::{
-    config::{save_config, store_path, wrec_dir, AppConfig},
     platform::{choose_output_dir, open_path},
     ui::{
         fps_label, push_app_notification, resolution_label, target_key, AppTab, ControlSelect,
@@ -20,6 +19,7 @@ use std::{
     sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
+use wrec_config::{save_config, store_path, wrec_dir, AppConfig};
 use wrec_core::{
     CaptureSourceKind, CaptureTarget, Codec, FrameRate, Quality, RecorderEngine, RecorderMetrics,
     RecorderSettings, RecordingSession, Resolution, ScreenRecordingPermissionStatus,

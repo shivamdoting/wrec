@@ -6,11 +6,11 @@ use std::{
 use wrec_core::RecorderSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AppConfig {
-    pub(crate) settings: RecorderSettings,
-    pub(crate) selected_target_key: Option<String>,
+pub struct AppConfig {
+    pub settings: RecorderSettings,
+    pub selected_target_key: Option<String>,
     #[serde(default)]
-    pub(crate) show_nerd_logs: bool,
+    pub show_nerd_logs: bool,
 }
 
 impl Default for AppConfig {
@@ -24,7 +24,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub(crate) fn load() -> Self {
+    pub fn load() -> Self {
         let path = config_path();
         match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|err| {
@@ -42,16 +42,26 @@ impl AppConfig {
     }
 }
 
-pub(crate) fn save_config(config: &AppConfig) -> std::io::Result<()> {
+pub fn save_config(config: &AppConfig) -> std::io::Result<()> {
     write_config(&config_path(), config)
 }
 
-pub(crate) fn store_path() -> PathBuf {
+pub fn store_path() -> PathBuf {
     wrec_dir().join("wrec.sqlite")
 }
 
-pub(crate) fn log_path() -> PathBuf {
+pub fn log_path() -> PathBuf {
     wrec_dir().join("wrec.log")
+}
+
+pub fn wrec_dir() -> PathBuf {
+    std::env::var_os("WREC_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_wrec_dir)
+}
+
+pub fn config_path() -> PathBuf {
+    wrec_dir().join("config.json")
 }
 
 fn load_legacy_config(path: &Path) -> Option<AppConfig> {
@@ -89,14 +99,6 @@ fn write_config(path: &Path, config: &AppConfig) -> std::io::Result<()> {
     fs::write(path, json)
 }
 
-pub(crate) fn wrec_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("WREC_DATA_DIR").map(PathBuf::from) {
-        return path;
-    }
-
-    default_wrec_dir()
-}
-
 #[cfg(target_os = "macos")]
 fn default_wrec_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -115,10 +117,6 @@ fn default_wrec_dir() -> PathBuf {
         .map(PathBuf::from)
         .map(|home| home.join(".wrec"))
         .unwrap_or_else(|| Path::new(".").join(".wrec"))
-}
-
-fn config_path() -> PathBuf {
-    wrec_dir().join("config.json")
 }
 
 fn legacy_config_paths() -> Vec<PathBuf> {

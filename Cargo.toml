@@ -2,6 +2,7 @@
 members = [
   "crates/app",
   "crates/cli",
+  "crates/config",
   "crates/core",
   "crates/macos",
   "crates/store",

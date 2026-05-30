@@ -7270,10 +7270,9 @@ dependencies = [
  "gpui-component",
  "gpui_platform",
  "phosphor-svgs",
- "serde",
- "serde_json",
  "tracing",
  "tracing-subscriber",
+ "wrec-config",
  "wrec-core",
  "wrec-macos",
  "wrec-store",
@@ -7285,8 +7284,20 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "serde_json",
+ "wrec-config",
  "wrec-core",
  "wrec-macos",
+ "wrec-store",
+]
+
+[[package]]
+name = "wrec-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "wrec-core",
 ]
 
 [[package]]

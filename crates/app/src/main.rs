@@ -1,12 +1,10 @@
 mod app;
 mod assets;
-mod config;
 mod platform;
 mod ui;
 
 use app::WrecApp;
 use assets::{register_fonts, WrecAssets};
-use config::log_path;
 use gpui::*;
 use gpui_component::Root;
 use gpui_platform::application;
@@ -55,7 +53,7 @@ fn init_tracing() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let path = log_path();
+    let path = wrec_config::log_path();
     if let Err(err) = create_parent_dir(&path) {
         eprintln!("failed to create log directory: {err}");
     }
