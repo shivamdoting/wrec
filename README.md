@@ -188,5 +188,5 @@ uploads the notarized `.dmg` to GitHub Releases.
 
 - Microphone capture is not implemented.
 - Output is `.mov`.
-- Compression is currently AVAssetWriter-managed. Moving to an explicit `VTCompressionSession` is the next step if we need lower-level bitrate, keyframe, timestamp, and encoder control.
+- Compression is AVAssetWriter-managed, without explicit low-level bitrate, keyframe, or timestamp control.
 - The Swift helper is still out-of-process. Packaged builds bundle and codesign it inside the `.app`; replacing it with an in-process native library remains the cleaner long-term shape.

@@ -62,6 +62,7 @@ pub fn record(args: RecordArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    install_signal_handler(engine.clone());
     spawn_stdin_controller(engine.clone());
 
     let mut code = ExitCode::SUCCESS;
@@ -130,6 +131,19 @@ pub fn record(args: RecordArgs) -> ExitCode {
     }
 
     code
+}
+
+/// Stop the recording cleanly on Ctrl+C / SIGTERM / SIGHUP so the helper
+/// finalizes the `.mov` instead of leaving a truncated file. After the stop
+/// the helper exits, the recorder emits `Exited`, and the main loop returns.
+fn install_signal_handler(engine: Arc<Mutex<MacosRecorder>>) {
+    let result = ctrlc::set_handler(move || {
+        eprintln!("\nstopping (signal received), finalizing recording...");
+        let _ = engine.lock().unwrap().stop();
+    });
+    if let Err(err) = result {
+        eprintln!("warning: could not install signal handler: {err}");
+    }
 }
 
 fn spawn_stdin_controller(engine: Arc<Mutex<MacosRecorder>>) {
