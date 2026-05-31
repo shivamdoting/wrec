@@ -1,5 +1,4 @@
 use crate::{
-    config::{save_config, store_path, wrec_dir, AppConfig},
     platform::{choose_output_dir, open_path},
     ui::{
         fps_label, push_app_notification, resolution_label, target_key, AppTab, ControlSelect,
@@ -20,15 +19,14 @@ use std::{
     sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
+use wrec_backend::{load_config, persist_config, BackendEvent, ClientEventLevel, WrecBackend};
+use wrec_config::{wrec_dir, AppConfig};
 use wrec_core::{
-    CaptureSourceKind, CaptureTarget, Codec, FrameRate, Quality, RecorderEngine, RecorderMetrics,
-    RecorderSettings, RecordingSession, Resolution, ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, Codec, FrameRate, Quality, RecorderEngine, RecorderEvent,
+    RecorderMetrics, RecorderSettings, RecordingSession, Resolution,
+    ScreenRecordingPermissionStatus,
 };
-use wrec_macos::{MacosRecorder, RecorderEvent};
-use wrec_store::{
-    now_ms, CaptureDimensions, EventLevel, EventRecord, EventSource, MetricRecord, RecordingRecord,
-    Store,
-};
+use wrec_macos::MacosRecorder;
 
 pub(crate) const GITHUB_URL: &str = "https://github.com/shivamhwp/wrec";
 
@@ -87,7 +85,7 @@ enum AppEvent {
 
 pub(crate) struct WrecApp {
     engine: Arc<Mutex<MacosRecorder>>,
-    store: Option<Store>,
+    backend: WrecBackend,
     app_events: mpsc::Sender<AppEvent>,
     pub(crate) settings: RecorderSettings,
     targets: Vec<CaptureTarget>,
@@ -115,15 +113,9 @@ pub(crate) struct WrecApp {
 
 impl WrecApp {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let config = AppConfig::load();
+        let config = load_config();
         let settings = config.settings;
-        let store = match Store::open(store_path()) {
-            Ok(store) => Some(store),
-            Err(err) => {
-                tracing::warn!("failed to open wrec store: {err}");
-                None
-            }
-        };
+        let backend = WrecBackend::open();
 
         let (events, receiver) = mpsc::channel();
         let (app_events, app_receiver) = mpsc::channel();
@@ -230,7 +222,7 @@ impl WrecApp {
 
         let mut app = Self {
             engine: Arc::new(Mutex::new(MacosRecorder::new(events))),
-            store,
+            backend,
             app_events,
             settings,
             targets: Vec::new(),
@@ -837,7 +829,6 @@ impl WrecApp {
                 }
                 self.active_session_id = Some(session.id);
                 self.active_output_path = Some(session.output_path.clone());
-                self.mark_recording_started(session.id);
                 self.last_recording_dir = session.output_path.parent().map(Path::to_path_buf);
                 self.status = format!("Recording to {}", session.output_path.display());
                 self.recorder_state = RecorderState::Recording;
@@ -851,9 +842,6 @@ impl WrecApp {
                     return;
                 }
                 let recording_id = self.active_session_id;
-                if let Some(recording_id) = recording_id {
-                    self.mark_recording_failed(recording_id, &message);
-                }
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Failed;
@@ -898,15 +886,11 @@ impl WrecApp {
             }
             AppEvent::Stopped(Ok(())) => {
                 let recording_id = self.active_session_id;
-                let output_path = self.active_output_path.clone();
-                if let Some(recording_id) = recording_id {
-                    self.mark_recording_completed(recording_id, output_path.as_deref());
-                }
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Idle;
                 self.status = "Stopped".to_string();
-                self.push_log_for(recording_id, EventSource::App, EventLevel::Info, "Stopped");
+                self.push_log_for(recording_id, ClientEventLevel::Info, "Stopped");
                 cx.activate(true);
                 window.activate_window();
                 if let Some(path) = self.last_recording_dir.clone() {
@@ -927,9 +911,6 @@ impl WrecApp {
             }
             AppEvent::Stopped(Err(message)) => {
                 let recording_id = self.active_session_id;
-                if let Some(recording_id) = recording_id {
-                    self.mark_recording_failed(recording_id, &message);
-                }
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Failed;
@@ -946,74 +927,50 @@ impl WrecApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match event {
-            RecorderEvent::Starting {
+        if !self.should_accept_recorder_event(recorder_event_session_id(&event)) {
+            return;
+        }
+
+        // Manual stops finish through AppEvent::Stopped; the backend still persists terminal events.
+        let was_stopping = matches!(self.recorder_state, RecorderState::Stopping);
+        match self.backend.handle_recorder_event(&event) {
+            BackendEvent::Starting {
                 session_id,
                 target,
-                settings,
                 output_path,
+                ..
             } => {
-                if !self.should_accept_recorder_event(Some(session_id)) {
-                    return;
-                }
                 self.active_session_id = Some(session_id);
                 self.active_output_path = Some(output_path.clone());
                 self.last_recording_dir = output_path.parent().map(Path::to_path_buf);
-                self.upsert_recording(session_id, &target, &settings, output_path);
-                self.push_log_for(
-                    Some(session_id),
-                    EventSource::Backend,
-                    EventLevel::Info,
-                    format!("starting capture: {} ({:?})", target.name, target.kind),
-                );
+                self.push_log_entry(format!(
+                    "starting capture: {} ({:?})",
+                    target.name, target.kind
+                ));
             }
-            RecorderEvent::Log {
+            BackendEvent::Log {
                 session_id,
                 message,
+                marked_started,
             } => {
-                if !self.should_accept_recorder_event(session_id) {
-                    return;
-                }
-                if message.contains("recording started") {
+                if marked_started {
                     self.status = "Recording".to_string();
-                    if let Some(session_id) = session_id {
-                        self.mark_recording_started(session_id);
-                    }
                 }
-                if let (Some(session_id), Some(dimensions)) =
-                    (session_id, parse_capture_dimensions(&message))
-                {
-                    self.update_recording_dimensions(session_id, dimensions);
-                }
-                self.push_log_for(
-                    session_id,
-                    recorder_event_source(&message),
-                    EventLevel::Info,
-                    message,
-                );
+                let _ = session_id;
+                self.push_log_entry(message);
             }
-            RecorderEvent::Metrics {
-                session_id,
-                metrics,
-            } => {
-                if !self.should_accept_recorder_event(Some(session_id)) {
-                    return;
-                }
-                self.append_metric(session_id, &metrics);
+            BackendEvent::Metrics { metrics, .. } => {
                 self.metrics = Some(metrics);
                 cx.notify();
             }
-            RecorderEvent::Failed {
-                session_id,
+            BackendEvent::Failed {
+                recording_id,
                 message,
             } => {
-                if !self.should_accept_recorder_event(session_id) {
+                if was_stopping {
                     return;
                 }
-                let recording_id = session_id.or(self.active_session_id);
-                if let Some(recording_id) = recording_id {
-                    self.mark_recording_failed(recording_id, &message);
-                }
+
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = RecorderState::Failed;
@@ -1022,19 +979,18 @@ impl WrecApp {
                 }
                 cx.activate(true);
                 window.activate_window();
-                self.show_error_for(recording_id, message, window, cx);
+                self.show_backend_error_for(recording_id, message, window, cx);
             }
-            RecorderEvent::Exited {
+            BackendEvent::Exited {
                 session_id,
                 success,
                 status,
+                ..
             } => {
-                if !self.should_accept_recorder_event(Some(session_id)) {
+                if was_stopping {
                     return;
                 }
-                if !success {
-                    self.mark_recording_failed(session_id, &status);
-                }
+
                 self.active_session_id = None;
                 self.active_output_path = None;
                 self.recorder_state = if success {
@@ -1045,14 +1001,9 @@ impl WrecApp {
                 cx.activate(true);
                 window.activate_window();
                 if success {
-                    self.push_log_for(
-                        Some(session_id),
-                        EventSource::Backend,
-                        EventLevel::Info,
-                        format!("helper exited: {status}"),
-                    );
+                    self.push_log_entry(format!("helper exited: {status}"));
                 } else {
-                    self.show_error_for(
+                    self.show_backend_error_for(
                         Some(session_id),
                         format!("helper exited: {status}"),
                         window,
@@ -1064,7 +1015,8 @@ impl WrecApp {
     }
 
     fn should_accept_recorder_event(&self, session_id: Option<u64>) -> bool {
-        match (session_id, self.active_session_id) {
+        let active_session_id = self.active_session_id.or(self.backend.active_session_id());
+        match (session_id, active_session_id) {
             (None, _) => true,
             (Some(event_session), Some(active_session)) => event_session == active_session,
             (Some(_), None) => matches!(self.recorder_state, RecorderState::Starting),
@@ -1091,8 +1043,7 @@ impl WrecApp {
         self.status = message.clone();
         self.push_log_for(
             recording_id,
-            EventSource::App,
-            EventLevel::Error,
+            ClientEventLevel::Error,
             format!("error: {message}"),
         );
         tracing::error!("{message}");
@@ -1103,35 +1054,46 @@ impl WrecApp {
         );
     }
 
-    pub(crate) fn push_log(&mut self, message: impl Into<String>) {
-        self.push_log_for(
-            self.active_session_id,
-            EventSource::App,
-            EventLevel::Info,
-            message,
+    fn show_backend_error_for(
+        &mut self,
+        _recording_id: Option<u64>,
+        message: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        self.status = message.clone();
+        self.push_log_entry(format!("error: {message}"));
+        tracing::error!("{message}");
+        push_app_notification(
+            window,
+            Notification::new().message(message).autohide(false),
+            cx,
         );
+    }
+
+    pub(crate) fn push_log(&mut self, message: impl Into<String>) {
+        self.push_log_for(self.active_session_id, ClientEventLevel::Info, message);
     }
 
     fn push_log_for(
         &mut self,
         recording_id: Option<u64>,
-        source: EventSource,
-        level: EventLevel,
+        level: ClientEventLevel,
         message: impl Into<String>,
     ) {
+        let message = message.into();
+        self.push_log_entry(message.clone());
+        self.backend.append_app_event(recording_id, level, message);
+    }
+
+    fn push_log_entry(&mut self, message: impl Into<String>) {
         let message = message.into();
         tracing::info!("{message}");
         self.logs.push_back(message);
         while self.logs.len() > MAX_LOGS {
             self.logs.pop_front();
         }
-        self.append_event(
-            recording_id,
-            source,
-            level,
-            None,
-            self.logs.back().unwrap().clone(),
-        );
     }
 
     fn save_config(&mut self) {
@@ -1141,95 +1103,9 @@ impl WrecApp {
             show_nerd_logs: self.show_nerd_logs,
         };
 
-        if let Err(err) = save_config(&config) {
+        if let Err(err) = persist_config(&config) {
             self.push_log(format!("config save failed: {err}"));
             tracing::warn!("failed to save config: {err}");
-        }
-    }
-
-    fn upsert_recording(
-        &self,
-        session_id: u64,
-        target: &CaptureTarget,
-        settings: &RecorderSettings,
-        output_path: PathBuf,
-    ) {
-        if let Some(store) = &self.store {
-            store.upsert_recording(RecordingRecord {
-                id: session_id,
-                started_at_ms: now_ms(),
-                output_path,
-                target_kind: capture_kind_arg(target.kind).to_string(),
-                target_id: target.id,
-                target_name: target.name.clone(),
-                codec: settings.codec.as_arg().to_string(),
-                quality: settings.quality.as_arg().to_string(),
-                resolution: settings.resolution.as_arg().to_string(),
-                fps: settings.fps.as_u32(),
-                include_cursor: settings.include_cursor,
-                include_system_audio: settings.include_system_audio,
-            });
-        }
-    }
-
-    fn mark_recording_started(&self, session_id: u64) {
-        if let Some(store) = &self.store {
-            store.mark_recording_started(session_id);
-        }
-    }
-
-    fn mark_recording_completed(&self, session_id: u64, output_path: Option<&Path>) {
-        if let Some(store) = &self.store {
-            let file_size = output_path
-                .and_then(|path| std::fs::metadata(path).ok())
-                .map(|metadata| metadata.len());
-            store.mark_recording_completed(session_id, now_ms(), file_size);
-        }
-    }
-
-    fn mark_recording_failed(&self, session_id: u64, message: &str) {
-        if let Some(store) = &self.store {
-            store.mark_recording_failed(session_id, now_ms(), message.to_string());
-        }
-    }
-
-    fn update_recording_dimensions(&self, session_id: u64, dimensions: CaptureDimensions) {
-        if let Some(store) = &self.store {
-            store.update_dimensions(session_id, dimensions);
-        }
-    }
-
-    fn append_event(
-        &self,
-        recording_id: Option<u64>,
-        source: EventSource,
-        level: EventLevel,
-        fields_json: Option<String>,
-        message: String,
-    ) {
-        if let Some(store) = &self.store {
-            store.append_event(EventRecord {
-                recording_id,
-                timestamp_ms: now_ms(),
-                level,
-                source,
-                message,
-                fields_json,
-            });
-        }
-    }
-
-    fn append_metric(&self, session_id: u64, metrics: &RecorderMetrics) {
-        if let Some(store) = &self.store {
-            store.append_metric(MetricRecord {
-                recording_id: session_id,
-                timestamp_ms: now_ms(),
-                elapsed_secs: metrics.elapsed_secs,
-                output_bytes: metrics.output_bytes,
-                bitrate_mbps: metrics.estimated_bitrate_mbps,
-                frames: None,
-                dropped_frames: None,
-            });
         }
     }
 }
@@ -1260,34 +1136,13 @@ fn is_permission_message(message: &str) -> bool {
     message.contains("Screen Recording") || message.contains("screen recording permission")
 }
 
-fn capture_kind_arg(kind: CaptureSourceKind) -> &'static str {
-    match kind {
-        CaptureSourceKind::Display => "display",
-        CaptureSourceKind::Window => "window",
+fn recorder_event_session_id(event: &RecorderEvent) -> Option<u64> {
+    match event {
+        RecorderEvent::Starting { session_id, .. }
+        | RecorderEvent::Metrics { session_id, .. }
+        | RecorderEvent::Exited { session_id, .. } => Some(*session_id),
+        RecorderEvent::Log { session_id, .. } | RecorderEvent::Failed { session_id, .. } => {
+            *session_id
+        }
     }
-}
-
-fn recorder_event_source(message: &str) -> EventSource {
-    if message.starts_with("wrec-helper:") {
-        EventSource::Helper
-    } else {
-        EventSource::Backend
-    }
-}
-
-fn parse_capture_dimensions(message: &str) -> Option<CaptureDimensions> {
-    let (native_width, native_height) = parse_size_after(message, "native=")?;
-    let (output_width, output_height) = parse_size_after(message, "size=")?;
-    Some(CaptureDimensions {
-        native_width,
-        native_height,
-        output_width,
-        output_height,
-    })
-}
-
-fn parse_size_after(message: &str, key: &str) -> Option<(i64, i64)> {
-    let token = message.split_once(key)?.1.split_whitespace().next()?;
-    let (width, height) = token.split_once('x')?;
-    Some((width.parse().ok()?, height.parse().ok()?))
 }

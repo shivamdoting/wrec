@@ -1,36 +1,9 @@
 use wrec_core::{
-    CaptureSourceKind, CaptureTarget, RecorderEngine, RecorderError, RecorderMetrics,
-    RecorderSettings, RecordingSession, Result, ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, RecorderEngine, RecorderError, RecorderEvent,
+    RecorderMetrics, RecorderSettings, RecordingSession, Result, ScreenRecordingPermissionStatus,
 };
 
 static LAST_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-#[derive(Debug, Clone)]
-pub enum RecorderEvent {
-    Starting {
-        session_id: u64,
-        target: CaptureTarget,
-        settings: RecorderSettings,
-        output_path: std::path::PathBuf,
-    },
-    Log {
-        session_id: Option<u64>,
-        message: String,
-    },
-    Metrics {
-        session_id: u64,
-        metrics: RecorderMetrics,
-    },
-    Failed {
-        session_id: Option<u64>,
-        message: String,
-    },
-    Exited {
-        session_id: u64,
-        success: bool,
-        status: String,
-    },
-}
 
 #[derive(Default)]
 pub struct MacosRecorder {
@@ -198,6 +171,8 @@ mod platform {
 
     struct RecordingProcess {
         child: std::process::Child,
+        session_id: u64,
+        events: Option<mpsc::Sender<RecorderEvent>>,
         metrics_running: Arc<AtomicBool>,
     }
 
@@ -317,6 +292,8 @@ mod platform {
 
         *active_child = Some(RecordingProcess {
             child,
+            session_id,
+            events: events.clone(),
             metrics_running: metrics_running.clone(),
         });
         drop(active_child);
@@ -383,29 +360,44 @@ mod platform {
         }
 
         let started_waiting = Instant::now();
-        let status =
-            loop {
-                if let Some(status) = process.child.try_wait().map_err(|err| {
-                    RecorderError::Backend(format!("failed polling helper: {err}"))
-                })? {
-                    break status;
-                }
-
-                if started_waiting.elapsed() >= STOP_TIMEOUT {
-                    let _ = process.child.kill();
-                    let status = process.child.wait().map_err(|err| {
-                        RecorderError::Backend(format!("failed killing stuck helper: {err}"))
-                    })?;
+        let status = loop {
+            let stopped = match process.child.try_wait() {
+                Ok(stopped) => stopped,
+                Err(err) => {
                     process.metrics_running.store(false, Ordering::Relaxed);
-                    return Err(RecorderError::Backend(format!(
-                        "recording helper did not stop within {}s and was killed with {status}",
-                        STOP_TIMEOUT.as_secs()
-                    )));
+                    let message = format!("failed polling helper: {err}");
+                    emit_failed(&process.events, Some(process.session_id), message.clone());
+                    return Err(RecorderError::Backend(message));
                 }
-
-                std::thread::sleep(STOP_POLL_INTERVAL);
             };
+
+            if let Some(status) = stopped {
+                break status;
+            }
+
+            if started_waiting.elapsed() >= STOP_TIMEOUT {
+                let _ = process.child.kill();
+                let status = match process.child.wait() {
+                    Ok(status) => status,
+                    Err(err) => {
+                        process.metrics_running.store(false, Ordering::Relaxed);
+                        let message = format!("failed killing stuck helper: {err}");
+                        emit_failed(&process.events, Some(process.session_id), message.clone());
+                        return Err(RecorderError::Backend(message));
+                    }
+                };
+                process.metrics_running.store(false, Ordering::Relaxed);
+                emit_exited(&process.events, process.session_id, &status);
+                return Err(RecorderError::Backend(format!(
+                    "recording helper did not stop within {}s and was killed with {status}",
+                    STOP_TIMEOUT.as_secs()
+                )));
+            }
+
+            std::thread::sleep(STOP_POLL_INTERVAL);
+        };
         process.metrics_running.store(false, Ordering::Relaxed);
+        emit_exited(&process.events, process.session_id, &status);
         if !status.success() {
             return Err(RecorderError::Backend(format!(
                 "recording helper exited with {status}"
@@ -523,14 +515,7 @@ mod platform {
             return;
         }
 
-        emit(
-            &events,
-            RecorderEvent::Exited {
-                session_id,
-                success: status.success(),
-                status: status.to_string(),
-            },
-        );
+        emit_exited(&events, session_id, &status);
     }
 
     fn signal_startup(startup: &mut Option<mpsc::Sender<StartupSignal>>, signal: StartupSignal) {
@@ -557,6 +542,35 @@ mod platform {
         if let Some(events) = events {
             let _ = events.send(event);
         }
+    }
+
+    fn emit_failed(
+        events: &Option<mpsc::Sender<RecorderEvent>>,
+        session_id: Option<u64>,
+        message: String,
+    ) {
+        emit(
+            events,
+            RecorderEvent::Failed {
+                session_id,
+                message,
+            },
+        );
+    }
+
+    fn emit_exited(
+        events: &Option<mpsc::Sender<RecorderEvent>>,
+        session_id: u64,
+        status: &std::process::ExitStatus,
+    ) {
+        emit(
+            events,
+            RecorderEvent::Exited {
+                session_id,
+                success: status.success(),
+                status: status.to_string(),
+            },
+        );
     }
 
     fn spawn_metrics_thread(

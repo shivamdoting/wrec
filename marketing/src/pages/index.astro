@@ -19,16 +19,24 @@ import "../styles/global.css";
   </head>
   <body class="m-0 overflow-hidden bg-white text-neutral-950 select-none">
     <main class="grid h-dvh place-items-center" aria-label="wrec">
-      <div
-        class="inline-flex items-baseline gap-0 font-[family-name:var(--font-clash-grotesk)] text-[5.25rem] leading-[0.9] font-black tracking-normal md:text-[10rem]"
-      >
-        <h1 class="m-0">wrec</h1>
+      <div class="relative flex flex-col items-start">
         <div
-          class="animate-recording-blink rounded-full text-[#c62828] h-4 w-4"
-          aria-hidden="true"
+          class="inline-flex items-baseline gap-0 font-[family-name:var(--font-clash-grotesk)] text-[4.75rem] leading-[0.9] font-black tracking-normal md:text-[9rem]"
         >
-          .
+          <h1 class="m-0">wrec</h1>
+          <div
+            class="animate-recording-blink h-4 w-4 rounded-full text-[#c62828]"
+            aria-hidden="true"
+          >
+            .
+          </div>
         </div>
+        <a
+          href="/docs"
+          class="mt-1 ml-1 font-[family-name:var(--font-clash-grotesk)] text-2xl leading-none font-normal tracking-normal text-black no-underline md:mt-2 md:text-3xl"
+        >
+          docs
+        </a>
       </div>
     </main>
   </body>

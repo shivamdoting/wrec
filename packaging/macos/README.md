@@ -8,12 +8,13 @@ Wrec*.app/
     Info.plist
     MacOS/
       wrec
+      wrec-cli
       wrec-helper
     Resources/
 ```
 
-The packaged app resolves `wrec-helper` beside the `wrec` executable at runtime.
-Cargo development still falls back to the helper path emitted by
+The packaged app and CLI resolve `wrec-helper` beside their executable at
+runtime. Cargo development still falls back to the helper path emitted by
 `crates/macos/build.rs`.
 
 For contributor/dev packaging:
@@ -27,6 +28,12 @@ signing, bundle id `app.wrec.wrec.dev`, app data in
 `~/Library/Application Support/Wrec Dev`, and recordings in `~/Movies/Wrec Dev`.
 It also writes `dist/dev/README.md` on every run with the local commands and
 build details for that generated app.
+
+The dev CLI is bundled at:
+
+```bash
+dist/dev/Wrec\ Dev.app/Contents/MacOS/wrec-cli
+```
 
 For release packaging:
 

@@ -1,6 +1,9 @@
 [workspace]
 members = [
   "crates/app",
+  "crates/backend",
+  "crates/cli",
+  "crates/config",
   "crates/core",
   "crates/macos",
   "crates/store",

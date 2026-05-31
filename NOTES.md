@@ -31,19 +31,6 @@ system audio setting, codec, and quality mode from the GPUI app. The helper
 keeps ScreenCaptureKit queue depth low and drops samples when the writer is
 backpressured rather than allowing memory to grow.
 
-The next backend improvement is to replace AVAssetWriter-managed compression
-with an explicit `VTCompressionSession`:
-
-```text
-SCStreamOutput
-  -> CMSampleBuffer
-  -> CVPixelBuffer / IOSurface
-  -> VTCompressionSession HEVC
-  -> AVAssetWriter
-```
-
-That will provide tighter bitrate/codec/timestamp control.
-
 ## Requirements
 
 - Apple Silicon Mac

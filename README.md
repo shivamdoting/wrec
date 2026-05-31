@@ -97,8 +97,7 @@ Recording-affecting controls are disabled while recording so the UI cannot diver
 
 ## Data
 
-- App config and SQLite data live in
-  `~/Library/Application Support/<app name>`.
+- App config and SQLite data live in `~/Library/Application Support/Wrec`.
 - Recordings default to `~/Movies/<app name>`.
 - Recording events and metrics are stored separately from the media file so the
   UI can show history and debugging information without inspecting `.mov`
@@ -118,6 +117,20 @@ Recording-affecting controls are disabled while recording so the UI cannot diver
 ```bash
 cargo run -p wrec-app
 ```
+
+The terminal client is intended to be automation-first. It uses the same saved
+settings as the app, with flags acting as per-run overrides:
+
+```bash
+cargo run -p wrec-cli -- targets --json
+cargo run -p wrec-cli -- record start --target display:1 --duration 30s
+cargo run -p wrec-cli -- record start --app Safari --duration 5m --json
+```
+
+`list` remains an alias for `targets`, and `record` remains an alias for
+`record start`. Foreground recordings can still be controlled from stdin with
+`pause`, `resume`, and `stop`; recordings started with `--duration` keep running
+even if stdin is closed.
 
 If GPUI shader compilation fails, select full Xcode:
 
@@ -162,9 +175,13 @@ Release builds are explicit:
 This uses Cargo's release profile and creates `dist/release/Wrec.app`.
 Release packaging does not create a companion README.
 
-Both channels copy the Rust GPUI app as `wrec`, copy the compiled Swift
-`wrec-helper`, and sign both executables. Dev builds use the bundle identifier
-`app.wrec.wrec.dev`; release builds use `app.wrec.wrec`.
+Both channels copy the Rust GPUI app as `wrec`, copy the terminal client as
+`wrec-cli`, copy the compiled Swift `wrec-helper`, and sign each executable.
+Dev builds use the bundle identifier `app.wrec.wrec.dev`; release builds use
+`app.wrec.wrec`.
+
+After installation, the bundled CLI lives at
+`/Applications/Wrec.app/Contents/MacOS/wrec-cli`.
 
 Local packaging uses ad-hoc signing by default. Developer ID signing and
 notarization can be enabled for release builds with environment variables:
@@ -178,7 +195,7 @@ NOTARIZE=1 \
 ./scripts/package-macos.sh release
 ```
 
-Runtime app data lives in `~/Library/Application Support/<app name>`.
+Runtime app data lives in `~/Library/Application Support/Wrec`.
 Recordings default to `~/Movies/<app name>`.
 
 Pushing a `v*` tag whose commit is on `main` runs the release workflow and
@@ -188,5 +205,5 @@ uploads the notarized `.dmg` to GitHub Releases.
 
 - Microphone capture is not implemented.
 - Output is `.mov`.
-- Compression is currently AVAssetWriter-managed. Moving to an explicit `VTCompressionSession` is the next step if we need lower-level bitrate, keyframe, timestamp, and encoder control.
+- Compression is AVAssetWriter-managed, without explicit low-level bitrate, keyframe, or timestamp control.
 - The Swift helper is still out-of-process. Packaged builds bundle and codesign it inside the `.app`; replacing it with an in-process native library remains the cleaner long-term shape.

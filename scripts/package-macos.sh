@@ -42,8 +42,14 @@ From the repository root:
 \`\`\`
 
 That command rebuilds the debug-profile app, recreates this app bundle from
-scratch, copies the current \`wrec\` and \`wrec-helper\` binaries, signs them
-ad-hoc, and verifies the app signature.
+scratch, copies the current \`wrec\`, \`wrec-cli\`, and \`wrec-helper\`
+binaries, signs them ad-hoc, and verifies the app signature.
+
+## Run the bundled CLI
+
+\`\`\`bash
+"$APP_NAME.app/Contents/MacOS/wrec-cli" help
+\`\`\`
 
 ## Release packaging
 
@@ -116,6 +122,7 @@ esac
 
 APP_NAME="${APP_NAME:-$DEFAULT_APP_NAME}"
 BIN_NAME="${BIN_NAME:-wrec}"
+CLI_BIN_NAME="${CLI_BIN_NAME:-wrec-cli}"
 BUNDLE_ID="${BUNDLE_ID:-$DEFAULT_BUNDLE_ID}"
 PROFILE="${PROFILE:-$DEFAULT_PROFILE}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
@@ -169,6 +176,8 @@ log "Notarization enabled: $NOTARIZE"
 
 log "Building Rust app and Swift helper"
 run cargo "${cargo_args[@]}" -p wrec-app --bin "$BIN_NAME"
+log "Building Rust CLI"
+run cargo "${cargo_args[@]}" -p wrec-cli --bin "$CLI_BIN_NAME"
 
 HELPER=""
 if [[ -d "$TARGET_DIR/$PROFILE_DIR/build" ]]; then
@@ -180,6 +189,9 @@ fi
 
 if [[ ! -f "$TARGET_DIR/$PROFILE_DIR/$BIN_NAME" ]]; then
   die "Could not find compiled app binary at $TARGET_DIR/$PROFILE_DIR/$BIN_NAME"
+fi
+if [[ ! -f "$TARGET_DIR/$PROFILE_DIR/$CLI_BIN_NAME" ]]; then
+  die "Could not find compiled CLI binary at $TARGET_DIR/$PROFILE_DIR/$CLI_BIN_NAME"
 fi
 
 log "Using helper: $HELPER"
@@ -194,6 +206,7 @@ run mkdir -p "$MACOS" "$RESOURCES"
 
 log "Copying executables and metadata"
 run cp "$TARGET_DIR/$PROFILE_DIR/$BIN_NAME" "$MACOS/$BIN_NAME"
+run cp "$TARGET_DIR/$PROFILE_DIR/$CLI_BIN_NAME" "$MACOS/$CLI_BIN_NAME"
 run cp "$HELPER" "$MACOS/wrec-helper"
 run cp "$ROOT/packaging/macos/Info.plist" "$INFO_PLIST"
 
@@ -218,8 +231,9 @@ if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
   sign_args+=(--timestamp)
 fi
 
-log "Signing helper and app"
+log "Signing helper, CLI, and app"
 run codesign "${sign_args[@]}" "$MACOS/wrec-helper"
+run codesign "${sign_args[@]}" "$MACOS/$CLI_BIN_NAME"
 run codesign "${sign_args[@]}" --entitlements "$ENTITLEMENTS" "$APP"
 log "Verifying app signature"
 run codesign --verify --deep --strict --verbose=2 "$APP"

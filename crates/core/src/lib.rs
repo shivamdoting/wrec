@@ -173,6 +173,33 @@ pub struct RecorderMetrics {
     pub estimated_bitrate_mbps: f32,
 }
 
+#[derive(Debug, Clone)]
+pub enum RecorderEvent {
+    Starting {
+        session_id: u64,
+        target: CaptureTarget,
+        settings: RecorderSettings,
+        output_path: PathBuf,
+    },
+    Log {
+        session_id: Option<u64>,
+        message: String,
+    },
+    Metrics {
+        session_id: u64,
+        metrics: RecorderMetrics,
+    },
+    Failed {
+        session_id: Option<u64>,
+        message: String,
+    },
+    Exited {
+        session_id: u64,
+        success: bool,
+        status: String,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecorderError {
     #[error("screen recording permission is not granted")]

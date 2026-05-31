@@ -1,0 +1,350 @@
+---
+import { Font } from "astro:assets";
+import "../styles/global.css";
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/wrec.svg" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <Font cssVariable="--font-clash-grotesk" preload />
+    <Font cssVariable="--font-geist" preload />
+    <Font cssVariable="--font-geist-mono" preload />
+    <script>
+      import { configure } from "onedollarstats";
+
+      configure();
+    </script>
+    <script is:inline>
+      (() => {
+        const copy = async (button, text) => {
+          await navigator.clipboard.writeText(text.trim());
+          button.dataset.copied = "true";
+          button.setAttribute("aria-label", "Copied");
+          window.setTimeout(() => {
+            delete button.dataset.copied;
+            button.setAttribute("aria-label", button.dataset.label || "Copy");
+          }, 1200);
+        };
+
+        window.addEventListener("DOMContentLoaded", () => {
+          document.querySelectorAll("[data-copy-button]").forEach((button) => {
+            button.addEventListener("click", () => {
+              const target = button.closest("[data-copy-block]");
+              const text = target?.querySelector("code")?.textContent ?? "";
+              copy(button, text);
+            });
+          });
+
+          document
+            .querySelector("[data-copy-page]")
+            ?.addEventListener("click", (event) => {
+              const button = event.currentTarget;
+              const content = document
+                .querySelector("[data-docs-content]")
+                ?.cloneNode(true);
+              content
+                ?.querySelectorAll("[data-copy-button]")
+                .forEach((node) => node.remove());
+              copy(button, content?.textContent ?? "");
+            });
+        });
+      })();
+    </script>
+    <title>wrec docs</title>
+  </head>
+  <body class="docs-page">
+    <main>
+      <nav class="docs-actions" aria-label="Primary">
+        <a href="/" class="docs-brand" aria-label="wrec home">
+          <span>wrec</span>
+          <span
+            class="animate-recording-blink docs-brand-dot"
+            aria-hidden="true">.</span
+          >
+        </a>
+        <button
+          type="button"
+          class="copy-button copy-page-button"
+          data-copy-page
+          data-label="Copy page"
+          aria-label="Copy page"
+          title="Copy page"
+        >
+          <svg
+            class="copy-default"
+            viewBox="0 0 256 256"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="18"
+          >
+            <path d="M168 168h48V40H88v48"></path>
+            <rect x="40" y="88" width="128" height="128" rx="8"></rect>
+          </svg>
+          <svg
+            class="copy-success"
+            viewBox="0 0 256 256"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="20"
+          >
+            <path d="M40 144l56 56L216 72"></path>
+          </svg>
+          <span>copy page</span>
+        </button>
+      </nav>
+
+      <article data-docs-content>
+        <h2>List targets</h2>
+        <p>
+          Use JSON output when an agent needs to choose a display or window.
+        </p>
+        <div class="code-block" data-copy-block>
+          <button
+            type="button"
+            class="copy-button"
+            data-copy-button
+            data-label="Copy command"
+            aria-label="Copy command"
+            title="Copy command"
+          >
+            <svg
+              class="copy-default"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="18"
+            >
+              <path d="M168 168h48V40H88v48"></path>
+              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
+            </svg>
+            <svg
+              class="copy-success"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="20"
+            >
+              <path d="M40 144l56 56L216 72"></path>
+            </svg>
+          </button>
+          <pre><code>wrec-cli targets --json</code></pre>
+        </div>
+
+        <p>
+          Targets include a stable kind for the current run, an id, and a
+          readable name.
+        </p>
+        <div class="code-block" data-copy-block>
+          <button
+            type="button"
+            class="copy-button"
+            data-copy-button
+            data-label="Copy command"
+            aria-label="Copy command"
+            title="Copy command"
+          >
+            <svg
+              class="copy-default"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="18"
+            >
+              <path d="M168 168h48V40H88v48"></path>
+              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
+            </svg>
+            <svg
+              class="copy-success"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="20"
+            >
+              <path d="M40 144l56 56L216 72"></path>
+            </svg>
+          </button>
+          <pre><code>[&#123;"id":1,"kind":"display","name":"Display 1"&#125;]</code></pre>
+        </div>
+
+        <h2>Record</h2>
+        <p>
+          Start a recording with saved app settings, then override only what the
+          automation needs for that run.
+        </p>
+        <div class="code-block" data-copy-block>
+          <button
+            type="button"
+            class="copy-button"
+            data-copy-button
+            data-label="Copy command"
+            aria-label="Copy command"
+            title="Copy command"
+          >
+            <svg
+              class="copy-default"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="18"
+            >
+              <path d="M168 168h48V40H88v48"></path>
+              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
+            </svg>
+            <svg
+              class="copy-success"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="20"
+            >
+              <path d="M40 144l56 56L216 72"></path>
+            </svg>
+          </button>
+          <pre><code>wrec-cli record start --target display:1 --duration 30s --json</code></pre>
+        </div>
+
+        <p>
+          Duration recordings keep running even if stdin is closed, which is
+          useful for non-interactive agent jobs.
+        </p>
+        <div class="code-block" data-copy-block>
+          <button
+            type="button"
+            class="copy-button"
+            data-copy-button
+            data-label="Copy command"
+            aria-label="Copy command"
+            title="Copy command"
+          >
+            <svg
+              class="copy-default"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="18"
+            >
+              <path d="M168 168h48V40H88v48"></path>
+              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
+            </svg>
+            <svg
+              class="copy-success"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="20"
+            >
+              <path d="M40 144l56 56L216 72"></path>
+            </svg>
+          </button>
+          <pre><code>wrec-cli record start --target window:438 --duration 30s --json &lt;/dev/null</code></pre>
+        </div>
+
+        <h2>Target selectors</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Selector</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--target display:1</code></td>
+              <td>Record an exact display.</td>
+            </tr>
+            <tr>
+              <td><code>--target window:438</code></td>
+              <td>Record an exact window.</td>
+            </tr>
+            <tr>
+              <td><code>--app Safari</code></td>
+              <td>Record a visible window owned by an app.</td>
+            </tr>
+            <tr>
+              <td><code>--window-name README</code></td>
+              <td>Record the matching visible window.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Foreground control</h2>
+        <p>
+          Without <code>--duration</code>, the CLI stays in the foreground. Type
+          a command and press Enter.
+        </p>
+        <div class="code-block" data-copy-block>
+          <button
+            type="button"
+            class="copy-button"
+            data-copy-button
+            data-label="Copy command"
+            aria-label="Copy command"
+            title="Copy command"
+          >
+            <svg
+              class="copy-default"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="18"
+            >
+              <path d="M168 168h48V40H88v48"></path>
+              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
+            </svg>
+            <svg
+              class="copy-success"
+              viewBox="0 0 256 256"
+              aria-hidden="true"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="20"
+            >
+              <path d="M40 144l56 56L216 72"></path>
+            </svg>
+          </button>
+          <pre><code>pause
+resume
+stop</code></pre>
+        </div>
+      </article>
+    </main>
+  </body>
+</html>

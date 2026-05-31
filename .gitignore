@@ -5,3 +5,4 @@
 *.mp4
 *.log
 .env
+.vercel

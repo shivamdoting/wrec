@@ -1,5 +1,180 @@
 @import "tailwindcss";
 
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  overscroll-behavior: none;
+}
+
+.docs-page {
+  margin: 0;
+  background: white;
+  color: #000;
+  font-family: var(--font-geist), sans-serif;
+  font-size: 14px;
+  overflow-x: hidden;
+}
+
+.docs-page main {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+  overflow-x: hidden;
+}
+
+.docs-page a {
+  color: #0645ad;
+  text-decoration: underline;
+}
+
+.docs-page h1,
+.docs-page h2 {
+  font-weight: 400;
+}
+
+.docs-page h1 {
+  margin: 28px 0 12px;
+  font-size: 1.45rem;
+  line-height: 1.15;
+}
+
+.docs-page h2 {
+  margin: 28px 0 10px;
+  font-size: 1.05rem;
+  line-height: 1.2;
+}
+
+.docs-page p {
+  margin: 0 0 12px;
+  line-height: 1.55;
+}
+
+.docs-page table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.docs-page th,
+.docs-page td {
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid #ddd;
+  text-align: left;
+  vertical-align: top;
+}
+
+.docs-page th {
+  font-weight: 500;
+}
+
+.docs-page code,
+.docs-page pre,
+.docs-page .font-mono {
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.docs-page pre {
+  position: relative;
+  margin: 0 0 14px;
+  padding: 12px 44px 12px 12px;
+  overflow-x: hidden;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #f6f8fa;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.docs-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.docs-page .docs-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
+  font-family: var(--font-clash-grotesk), sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #000;
+  text-decoration: none;
+}
+
+.docs-page .docs-brand:hover {
+  color: #000;
+  text-decoration: none;
+}
+
+.docs-page .docs-brand-dot {
+  color: #c62828;
+}
+
+.copy-button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  background: white;
+  color: #555;
+}
+
+.copy-button:hover {
+  color: #111;
+}
+
+.copy-button svg {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+}
+
+.copy-page-button {
+  width: auto;
+  min-width: 28px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.copy-button[data-copied="true"] {
+  color: #111;
+}
+
+.copy-button .copy-success {
+  display: none;
+}
+
+.copy-button[data-copied="true"] .copy-default {
+  display: none;
+}
+
+.copy-button[data-copied="true"] .copy-success {
+  display: block;
+}
+
+.code-block {
+  position: relative;
+}
+
+.code-block .copy-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
 @theme {
   --animate-recording-blink: recording-blink 2s steps(1, end) infinite;
 
