@@ -1,5 +1,5 @@
 ---
-import HeadFonts from "../components/HeadFonts.astro";
+import { Font } from "astro:assets";
 import "../styles/global.css";
 ---
 
@@ -9,7 +9,7 @@ import "../styles/global.css";
     <link rel="icon" type="image/svg+xml" href="/wrec.svg" />
     <meta name="viewport" content="width=device-width" />
     <meta name="generator" content={Astro.generator} />
-    <HeadFonts />
+    <Font cssVariable="--font-clash-grotesk" preload />
     <script>
       import { configure } from "onedollarstats";
 
