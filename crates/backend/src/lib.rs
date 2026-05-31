@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use wrec_config::{save_config, store_path, AppConfig};
 use wrec_core::{
@@ -63,6 +66,7 @@ pub struct WrecBackend {
     store: Option<Store>,
     active_session_id: Option<u64>,
     active_output_path: Option<PathBuf>,
+    failed_session_ids: HashSet<u64>,
 }
 
 impl WrecBackend {
@@ -79,6 +83,7 @@ impl WrecBackend {
             store,
             active_session_id: None,
             active_output_path: None,
+            failed_session_ids: HashSet::new(),
         }
     }
 
@@ -100,6 +105,7 @@ impl WrecBackend {
             } => {
                 self.active_session_id = Some(*session_id);
                 self.active_output_path = Some(output_path.clone());
+                self.failed_session_ids.remove(session_id);
                 self.upsert_recording(*session_id, target, settings, output_path.clone());
                 self.append_event(
                     Some(*session_id),
@@ -158,6 +164,7 @@ impl WrecBackend {
             } => {
                 let recording_id = session_id.or(self.active_session_id);
                 if let Some(recording_id) = recording_id {
+                    self.failed_session_ids.insert(recording_id);
                     self.mark_recording_failed(recording_id, message);
                 }
                 self.append_event(
@@ -181,15 +188,18 @@ impl WrecBackend {
                 status,
             } => {
                 let output_path = self.active_output_path.clone();
-                if *success {
+                let failed_before_exit = self.failed_session_ids.remove(session_id);
+                let success = *success && !failed_before_exit;
+
+                if success {
                     self.mark_recording_completed(*session_id, output_path.as_deref());
-                } else {
+                } else if !failed_before_exit {
                     self.mark_recording_failed(*session_id, status);
                 }
                 self.append_event(
                     Some(*session_id),
                     EventSource::Backend,
-                    if *success {
+                    if success {
                         EventLevel::Info
                     } else {
                         EventLevel::Error
@@ -202,7 +212,7 @@ impl WrecBackend {
 
                 BackendEvent::Exited {
                     session_id: *session_id,
-                    success: *success,
+                    success,
                     status: status.clone(),
                     output_path,
                 }
@@ -485,5 +495,39 @@ mod tests {
         assert_eq!(dimensions.native_height, 1964);
         assert_eq!(dimensions.output_width, 1512);
         assert_eq!(dimensions.output_height, 982);
+    }
+
+    #[test]
+    fn prior_failure_keeps_successful_exit_failed() {
+        let target = CaptureTarget {
+            id: 1,
+            name: "Display".into(),
+            kind: CaptureSourceKind::Display,
+        };
+        let mut backend = WrecBackend {
+            store: None,
+            active_session_id: None,
+            active_output_path: None,
+            failed_session_ids: HashSet::new(),
+        };
+
+        backend.handle_recorder_event(&RecorderEvent::Starting {
+            session_id: 7,
+            target,
+            settings: RecorderSettings::default(),
+            output_path: PathBuf::from("/tmp/wrec.mov"),
+        });
+        backend.handle_recorder_event(&RecorderEvent::Failed {
+            session_id: Some(7),
+            message: "writer failed".into(),
+        });
+
+        let event = backend.handle_recorder_event(&RecorderEvent::Exited {
+            session_id: 7,
+            success: true,
+            status: "exit status: 0".into(),
+        });
+
+        assert!(matches!(event, BackendEvent::Exited { success: false, .. }));
     }
 }

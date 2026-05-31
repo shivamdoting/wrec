@@ -369,7 +369,8 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
         ));
     }
 
-    Ok(Duration::from_secs_f64(amount * scale))
+    Duration::try_from_secs_f64(amount * scale)
+        .map_err(|_| format!("invalid --duration `{value}` (duration is too large)"))
 }
 
 fn duration_parts(value: &str) -> Option<(&str, f64)> {
@@ -577,6 +578,8 @@ mod tests {
         assert!(parse_vec(&["record", "--display", "abc"]).is_err());
         assert!(parse_vec(&["record", "--target", "space:1"]).is_err());
         assert!(parse_vec(&["record", "--duration", "0s"]).is_err());
+        assert!(parse_vec(&["record", "--duration", "1e308h"]).is_err());
+        assert!(parse_vec(&["record", "--duration", "99999999999999999999"]).is_err());
     }
 
     #[test]
