@@ -110,9 +110,13 @@ pub fn record(args: RecordArgs) -> ExitCode {
 
     let mut code = ExitCode::SUCCESS;
     while let Ok(event) = rx.recv() {
-        if let EventAction::Exit(exit_code) = handle_backend_event(json, &mut backend, &event) {
-            code = exit_code;
-            break;
+        match handle_backend_event(json, &mut backend, &event) {
+            EventAction::Continue => {}
+            EventAction::MarkFailure => code = ExitCode::FAILURE,
+            EventAction::Exit(exit_code) => {
+                code = exit_code;
+                break;
+            }
         }
     }
 
@@ -121,6 +125,7 @@ pub fn record(args: RecordArgs) -> ExitCode {
 
 enum EventAction {
     Continue,
+    MarkFailure,
     Exit(ExitCode),
 }
 
@@ -202,7 +207,7 @@ fn handle_backend_event(
                     "message": message,
                 }),
             );
-            EventAction::Exit(ExitCode::FAILURE)
+            EventAction::MarkFailure
         }
         BackendEvent::Exited {
             session_id,
