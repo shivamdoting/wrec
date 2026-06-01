@@ -136,7 +136,7 @@ pub struct RecorderSettings {
     pub fps: FrameRate,
     pub codec: Codec,
     pub quality: Quality,
-    #[serde(default)]
+    #[serde(default = "default_resolution")]
     pub resolution: Resolution,
     pub output_dir: PathBuf,
     pub include_cursor: bool,
@@ -153,7 +153,7 @@ impl Default for RecorderSettings {
             fps: FrameRate::Fps30,
             codec: Codec::Hevc,
             quality: Quality::Balanced,
-            resolution: Resolution::R1080p,
+            resolution: default_resolution(),
             output_dir: dirs_output_dir(),
             include_cursor: true,
             include_system_audio: true,
@@ -178,6 +178,10 @@ fn default_include_system_audio() -> bool {
 
 fn default_hide_wrec() -> bool {
     true
+}
+
+fn default_resolution() -> Resolution {
+    Resolution::R1080p
 }
 
 fn dirs_output_dir() -> PathBuf {

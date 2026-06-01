@@ -168,3 +168,31 @@ fn runtime_app_name() -> String {
         })
         .unwrap_or_else(|| "Wrec".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wrec_core::Resolution;
+
+    #[test]
+    fn missing_resolution_uses_recorder_settings_default() {
+        let config = serde_json::from_str::<AppConfig>(
+            r#"{
+                "settings": {
+                    "source": "Display",
+                    "fps": "Fps30",
+                    "codec": "Hevc",
+                    "quality": "High",
+                    "output_dir": "/tmp/wrec",
+                    "include_cursor": true,
+                    "include_system_audio": true,
+                    "hide_wrec": true
+                },
+                "selected_target_key": null
+            }"#,
+        )
+        .expect("old config without resolution should still load");
+
+        assert_eq!(config.settings.resolution, Resolution::R1080p);
+    }
+}
