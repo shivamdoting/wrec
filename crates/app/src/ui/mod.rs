@@ -479,7 +479,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .child(
                 div()
                     .flex()
@@ -609,23 +609,21 @@ impl WrecApp {
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let metrics_label = metrics_label.unwrap_or_else(zero_metrics_label);
+
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .flex_1()
             .min_h(px(0.))
-            .child(nerd_section_title(
-                "Metrics",
-                muted_foreground,
-                metrics_label,
-            ))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap_3()
+                    .min_h(px(CONTROL_HEIGHT))
                     .child(row_label("Logs"))
                     .child(
                         UiButton::new("open-recordings-data-dir")
@@ -640,6 +638,28 @@ impl WrecApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_recordings_data_dir(window, cx);
                             })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .px_3()
+                    .child(
+                        div()
+                            .max_w_full()
+                            .truncate()
+                            .text_center()
+                            .text_size(px(24.))
+                            .line_height(relative(1.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(metrics_label),
                     ),
             )
     }
@@ -925,24 +945,6 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
         )
         .on_click(move |event, window, cx| {
             on_click(event, window, cx);
-        })
-}
-
-fn nerd_section_title(title: &'static str, muted_foreground: Hsla, detail: Option<String>) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(row_label(title))
-        .when_some(detail, |this, detail| {
-            this.child(
-                div()
-                    .text_sm()
-                    .text_color(muted_foreground)
-                    .truncate()
-                    .child(detail),
-            )
         })
 }
 
