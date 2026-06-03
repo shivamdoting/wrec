@@ -1,6 +1,134 @@
 ---
 import { Font } from "astro:assets";
 import "../styles/global.css";
+
+const commandBlocks = [
+  {
+    title: "List targets",
+    body: "Use JSON output when an agent needs to choose a display or window.",
+    code: "wrec targets --json",
+  },
+  {
+    title: "Start from saved app settings",
+    body: "The CLI loads the app config first, then applies only the flags passed for this run.",
+    code: "wrec record start --target display:1 --duration 30s --json",
+  },
+  {
+    title: "Run non-interactively",
+    body: "A duration recording keeps running if stdin closes, then finalizes when the duration elapses.",
+    code: "wrec record start --target window:438 --duration 30s --json </dev/null",
+  },
+  {
+    title: "Override capture settings",
+    body: "Per-run overrides do not rewrite saved app settings.",
+    code: "wrec record start --app Safari --quality high --resolution native --fps 60 --codec hevc --out ~/Movies/Wrec --no-cursor --system-audio --hide-wrec",
+  },
+  {
+    title: "Foreground control",
+    body: "Without --duration, the CLI stays attached. Type a command and press Enter.",
+    code: "pause\nresume\nstop",
+  },
+];
+
+const appRows = [
+  [
+    "Source and target",
+    "Display or window capture, with a searchable target picker populated from ScreenCaptureKit.",
+  ],
+  ["Format", "HEVC or H.264 video."],
+  [
+    "Preset",
+    "Efficient, Balanced, or High, with resolution and frame-rate limits applied automatically.",
+  ],
+  [
+    "Resolution",
+    "Native, 720p, 1080p, 2k, or 4k, subject to the selected preset.",
+  ],
+  ["Frame rate", "30 or 60 fps, subject to the selected preset."],
+  ["Cursor and audio", "Independent cursor and system-audio toggles."],
+  ["Hide wrec", "Keeps wrec windows out of the recording by default."],
+  [
+    "Output folder",
+    "Saved folder picker plus an Open action for the last recording folder.",
+  ],
+  [
+    "Permission",
+    "Screen Recording permission state, grant action, and recheck action.",
+  ],
+  [
+    "Nerd tab",
+    "Live metrics, recorder logs, and an Open action for the recordings data folder.",
+  ],
+];
+
+const commandRows = [
+  ["wrec targets", "List capture targets."],
+  ["wrec targets list", "Explicit form of target listing."],
+  ["wrec list", "Alias for wrec targets."],
+  [
+    "wrec record start",
+    "Start recording with saved app settings and optional overrides.",
+  ],
+  ["wrec record", "Alias for wrec record start."],
+  ["wrec help, -h, --help", "Print CLI help."],
+  ["wrec -V, --version", "Print the CLI version."],
+];
+
+const selectorRows = [
+  ["--target display:1", "Record an exact display id."],
+  ["--target window:438", "Record an exact window id."],
+  ["--display 1", "Set source to display and record that display id."],
+  ["--window 438", "Set source to window and record that window id."],
+  ["--app Safari", "Record the one visible window whose app name matches."],
+  [
+    "--target-name README",
+    "Record the one display or window whose name matches.",
+  ],
+  ["--display-name Studio", "Record the one display whose name matches."],
+  ["--window-name README", "Record the one window whose name matches."],
+];
+
+const overrideRows = [
+  ["--fps 30|60", "Override frame rate."],
+  ["--codec hevc|h264", "Override video codec."],
+  ["--quality efficient|balanced|high", "Override quality preset."],
+  ["--resolution native|720p|1080p|2k|4k", "Override output resolution."],
+  ["--out <dir>", "Override output directory."],
+  ["--duration <time>", "Stop after a duration like 500ms, 30s, 5m, or 1h."],
+  ["--cursor / --no-cursor", "Enable or disable cursor capture."],
+  [
+    "--system-audio / --no-system-audio",
+    "Enable or disable system audio capture.",
+  ],
+  [
+    "--hide-wrec / --no-hide-wrec",
+    "Enable or disable hiding wrec windows from capture.",
+  ],
+  ["--json", "Emit recording events as JSON lines."],
+];
+
+const presetRows = [
+  ["Efficient", "720p", "30 fps"],
+  ["Balanced", "1080p", "30 fps"],
+  ["High", "Native, 2k, or 4k", "60 fps"],
+];
+
+const eventRows = [
+  ["starting", "session_id, target, settings, output"],
+  ["log", "session_id, message, marked_started"],
+  ["metrics", "session_id, elapsed_secs, output_bytes, bitrate_mbps"],
+  ["warning", "message"],
+  ["failed", "recording_id, message"],
+  ["exited", "session_id, success, status, output"],
+];
+
+const targetJson = `[{"id":1,"kind":"display","name":"Display 1"}]`;
+
+const escapeHtml = (value: string) =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 ---
 
 <html lang="en">
@@ -103,145 +231,156 @@ import "../styles/global.css";
       </nav>
 
       <article data-docs-content>
-        <h2>List targets</h2>
+        <h1>wrec app and CLI docs</h1>
         <p>
-          Use JSON output when an agent needs to choose a display or window.
+          wrec is a macOS screen recorder with a GPUI app and an automation CLI.
+          The app owns saved settings. The CLI uses those settings as the base
+          for each recording and lets scripts override them per run.
         </p>
-        <div class="code-block" data-copy-block>
-          <button
-            type="button"
-            class="copy-button"
-            data-copy-button
-            data-label="Copy command"
-            aria-label="Copy command"
-            title="Copy command"
-          >
-            <svg
-              class="copy-default"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="18"
-            >
-              <path d="M168 168h48V40H88v48"></path>
-              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
-            </svg>
-            <svg
-              class="copy-success"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="20"
-            >
-              <path d="M40 144l56 56L216 72"></path>
-            </svg>
-          </button>
-          <pre><code>wrec targets --json</code></pre>
-        </div>
 
+        <h2>App</h2>
         <p>
-          Targets include a stable kind for the current run, an id, and a
-          readable name.
+          The current app records displays or windows through the native macOS
+          capture path and writes finalized <code>.mov</code> files. Rust never handles
+          raw pixels or audio samples.
         </p>
-        <div class="code-block" data-copy-block>
-          <button
-            type="button"
-            class="copy-button"
-            data-copy-button
-            data-label="Copy command"
-            aria-label="Copy command"
-            title="Copy command"
-          >
-            <svg
-              class="copy-default"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="18"
-            >
-              <path d="M168 168h48V40H88v48"></path>
-              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
-            </svg>
-            <svg
-              class="copy-success"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="20"
-            >
-              <path d="M40 144l56 56L216 72"></path>
-            </svg>
-          </button>
-          <pre><code>[&#123;"id":1,"kind":"display","name":"Display 1"&#125;]</code></pre>
-        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Surface</th>
+              <th>Current behavior</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              appRows.map(([surface, behavior]) => (
+                <tr>
+                  <td>{surface}</td>
+                  <td>{behavior}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
 
-        <h2>Record</h2>
+        <h2>Defaults</h2>
         <p>
-          Start a recording with saved app settings, then override only what the
-          automation needs for that run.
+          Fresh config defaults to display capture, 30 fps, HEVC, Balanced,
+          1080p, cursor on, system audio on, hide wrec on, and
+          <code>~/Movies/Wrec</code> as the output folder.
         </p>
-        <div class="code-block" data-copy-block>
-          <button
-            type="button"
-            class="copy-button"
-            data-copy-button
-            data-label="Copy command"
-            aria-label="Copy command"
-            title="Copy command"
-          >
-            <svg
-              class="copy-default"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="18"
-            >
-              <path d="M168 168h48V40H88v48"></path>
-              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
-            </svg>
-            <svg
-              class="copy-success"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="20"
-            >
-              <path d="M40 144l56 56L216 72"></path>
-            </svg>
-          </button>
-          <pre><code>wrec record start --target display:1 --duration 30s --json</code></pre>
-        </div>
 
+        <h2>Preset limits</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Preset</th>
+              <th>Max resolution</th>
+              <th>Max frame rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              presetRows.map(([preset, resolution, fps]) => (
+                <tr>
+                  <td>{preset}</td>
+                  <td>{resolution}</td>
+                  <td>{fps}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
         <p>
-          Duration recordings keep running even if stdin is closed, which is
-          useful for non-interactive agent jobs.
+          If a saved setting or CLI override exceeds the preset, wrec caps it
+          before recording. Use <code>--quality high</code> when automation needs
+          native resolution or 60 fps.
+        </p>
+
+        {
+          commandBlocks.map(({ title, body, code }) => (
+            <>
+              <h2>{title}</h2>
+              <p>{body}</p>
+              <div class="code-block" data-copy-block>
+                <button
+                  type="button"
+                  class="copy-button"
+                  data-copy-button
+                  data-label="Copy command"
+                  aria-label="Copy command"
+                  title="Copy command"
+                >
+                  <svg
+                    class="copy-default"
+                    viewBox="0 0 256 256"
+                    aria-hidden="true"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="18"
+                  >
+                    <path d="M168 168h48V40H88v48" />
+                    <rect x="40" y="88" width="128" height="128" rx="8" />
+                  </svg>
+                  <svg
+                    class="copy-success"
+                    viewBox="0 0 256 256"
+                    aria-hidden="true"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="20"
+                  >
+                    <path d="M40 144l56 56L216 72" />
+                  </svg>
+                </button>
+                <div class="code-pre">
+                  <code set:html={escapeHtml(code)} />
+                </div>
+              </div>
+            </>
+          ))
+        }
+
+        <h2>CLI commands</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Command</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              commandRows.map(([command, use]) => (
+                <tr>
+                  <td>
+                    <code>{command}</code>
+                  </td>
+                  <td>{use}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+
+        <h2>Targets</h2>
+        <p>
+          Targets include a kind, id, and readable name. IDs are stable for the
+          current target list only, so automation should list targets before
+          choosing one.
         </p>
         <div class="code-block" data-copy-block>
           <button
             type="button"
             class="copy-button"
             data-copy-button
-            data-label="Copy command"
-            aria-label="Copy command"
-            title="Copy command"
+            data-label="Copy example"
+            aria-label="Copy example"
+            title="Copy example"
           >
             <svg
               class="copy-default"
@@ -269,10 +408,21 @@ import "../styles/global.css";
               <path d="M40 144l56 56L216 72"></path>
             </svg>
           </button>
-          <pre><code>wrec record start --target window:438 --duration 30s --json &lt;/dev/null</code></pre>
+          <div class="code-pre"><code set:html={escapeHtml(targetJson)} /></div>
         </div>
+        <p>
+          Plain target output is tab-separated:
+          <code>kind id name</code>. If no target selector is passed, recording
+          uses the saved app target for the saved source when possible, then the
+          first available target of that source.
+        </p>
 
         <h2>Target selectors</h2>
+        <p>
+          Pass only one target selector. Name and app selectors resolve by
+          exact, prefix, then contains match, and fail if more than one target
+          matches.
+        </p>
         <table>
           <thead>
             <tr>
@@ -281,69 +431,81 @@ import "../styles/global.css";
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td><code>--target display:1</code></td>
-              <td>Record an exact display.</td>
-            </tr>
-            <tr>
-              <td><code>--target window:438</code></td>
-              <td>Record an exact window.</td>
-            </tr>
-            <tr>
-              <td><code>--app Safari</code></td>
-              <td>Record a visible window owned by an app.</td>
-            </tr>
-            <tr>
-              <td><code>--window-name README</code></td>
-              <td>Record the matching visible window.</td>
-            </tr>
+            {
+              selectorRows.map(([selector, use]) => (
+                <tr>
+                  <td>
+                    <code>{selector}</code>
+                  </td>
+                  <td>{use}</td>
+                </tr>
+              ))
+            }
           </tbody>
         </table>
 
-        <h2>Foreground control</h2>
+        <h2>Record options</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Option</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              overrideRows.map(([option, use]) => (
+                <tr>
+                  <td>
+                    <code>{option}</code>
+                  </td>
+                  <td>{use}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+
+        <h2>JSON events</h2>
         <p>
-          Without <code>--duration</code>, the CLI stays in the foreground. Type
-          a command and press Enter.
+          Recording JSON output is line-delimited. Every JSON event also
+          includes <code>timestamp_ms</code>.
         </p>
-        <div class="code-block" data-copy-block>
-          <button
-            type="button"
-            class="copy-button"
-            data-copy-button
-            data-label="Copy command"
-            aria-label="Copy command"
-            title="Copy command"
-          >
-            <svg
-              class="copy-default"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="18"
-            >
-              <path d="M168 168h48V40H88v48"></path>
-              <rect x="40" y="88" width="128" height="128" rx="8"></rect>
-            </svg>
-            <svg
-              class="copy-success"
-              viewBox="0 0 256 256"
-              aria-hidden="true"
-              fill="none"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="20"
-            >
-              <path d="M40 144l56 56L216 72"></path>
-            </svg>
-          </button>
-          <pre><code>pause
-resume
-stop</code></pre>
-        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Fields</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              eventRows.map(([event, fields]) => (
+                <tr>
+                  <td>
+                    <code>{event}</code>
+                  </td>
+                  <td>{fields}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+
+        <h2>Control model</h2>
+        <p>
+          Foreground recordings accept <code>pause</code>, <code>resume</code>,
+          <code>stop</code>, <code>q</code>, or <code>quit</code> on stdin. Ctrl+C,
+          SIGTERM, and SIGHUP stop cleanly so the helper can finalize the <code
+            >.mov</code
+          >.
+        </p>
+        <p>
+          Detached background control is not wired yet. Subcommands like
+          <code>wrec record pause</code>, <code>wrec record resume</code>,
+          <code>wrec record stop</code>, and <code>wrec record status</code>
+          return an error for now.
+        </p>
       </article>
     </main>
   </body>

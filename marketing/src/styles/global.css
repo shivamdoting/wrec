@@ -76,7 +76,8 @@ body {
   font-family: var(--font-geist-mono), monospace;
 }
 
-.docs-page pre {
+.docs-page pre,
+.docs-page .code-pre {
   position: relative;
   margin: 0 0 14px;
   padding: 12px 44px 12px 12px;
@@ -86,6 +87,12 @@ body {
   background: #f6f8fa;
   font-size: 0.85rem;
   line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.docs-page .code-pre code {
+  display: block;
   white-space: pre-wrap;
   word-break: break-word;
 }
