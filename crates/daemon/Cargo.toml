@@ -11,3 +11,4 @@ wrec-core = { path = "../core" }
 wrec-macos = { path = "../macos" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

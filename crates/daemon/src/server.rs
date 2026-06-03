@@ -1,11 +1,12 @@
 use crate::{
     coordinator::{lock_state, Coordinator, SharedCoordinator},
-    paths::{append_daemon_log, socket_path, wrec_home},
+    paths::{append_daemon_log, daemon_log_path, socket_path, wrec_home},
     protocol::{response_error, AgentError, IpcRequest, IpcResponse, StartRecordingParams},
     runtime::{MacosRuntime, RecordingRuntime},
 };
 use serde_json::Value;
 use std::{
+    fs,
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::{UnixListener, UnixStream},
     sync::{Arc, Mutex},
@@ -21,6 +22,7 @@ pub fn serve_forever() -> Result<(), String> {
     let home = wrec_home();
     std::fs::create_dir_all(&home)
         .map_err(|err| format!("failed to create {}: {err}", home.display()))?;
+    init_tracing();
     let socket = socket_path();
     if socket.exists() {
         if UnixStream::connect(&socket).is_ok() {
@@ -57,6 +59,26 @@ pub fn serve_forever() -> Result<(), String> {
     append_daemon_log("daemon stopped");
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+fn init_tracing() {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(daemon_log_path())
+    {
+        Ok(file) => {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_ansi(false)
+                .with_writer(move || file.try_clone().expect("clone daemon log file"))
+                .try_init();
+        }
+        Err(err) => append_daemon_log(format!("tracing log open failed: {err}")),
+    }
 }
 
 fn handle_client(stream: UnixStream, state: SharedCoordinator<MacosRuntime>) {

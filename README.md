@@ -146,6 +146,8 @@ cargo run -p wrec -- daemon stop
 socket so multiple clients can submit work while Wrec keeps one active recording
 at a time. Additional requests queue by default; pass `--no-queue` to fail when
 another recording is active, or `--detach` to submit and return immediately.
+For foreground `record start` commands, Ctrl+C asks the daemon to stop the
+submitted job before the CLI exits.
 
 Daemon runtime files are intentionally agent-accessible:
 

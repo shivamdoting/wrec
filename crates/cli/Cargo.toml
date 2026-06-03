@@ -15,3 +15,4 @@ wrec-backend = { path = "../backend" }
 wrec-daemon = { path = "../daemon" }
 wrec-macos = { path = "../macos" }
 serde_json = "1.0.150"
+ctrlc = "3.5.2"

@@ -1,9 +1,15 @@
-use std::process::ExitCode;
+use std::{
+    process::ExitCode,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use serde_json::{json, Value};
 use wrec_daemon::{
-    emit_error, ensure_daemon, send_request, serve_forever, wait_for_job, AgentError, IpcResponse,
-    JobSnapshot, JobStatus, RecordingOptions, StartRecordingParams, TargetSelector,
+    emit_error, ensure_daemon, send_request, serve_forever, wait_for_job, AgentError, DaemonClient,
+    IpcResponse, JobSnapshot, JobStatus, RecordingOptions, StartRecordingParams, TargetSelector,
 };
 
 use crate::args::{DaemonCommand, JobCommand, JobsArgs, ListArgs, RecordArgs, TargetQuery};
@@ -52,6 +58,10 @@ pub fn record(args: RecordArgs) -> ExitCode {
             return Ok(ExitCode::SUCCESS);
         }
 
+        if let Err(err) = install_record_interrupt_handler(job.id) {
+            eprintln!("warning: Ctrl+C will not stop job {}: {err}", job.id);
+        }
+
         let completed = wait_for_job(job.id, json_output)?;
         Ok(match completed.status {
             JobStatus::Completed => ExitCode::SUCCESS,
@@ -59,6 +69,18 @@ pub fn record(args: RecordArgs) -> ExitCode {
             _ => ExitCode::SUCCESS,
         })
     })
+}
+
+fn install_record_interrupt_handler(job_id: u64) -> Result<(), ctrlc::Error> {
+    let interrupt_count = Arc::new(AtomicUsize::new(0));
+    ctrlc::set_handler(
+        move || match interrupt_count.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                let _ = DaemonClient::new().stop_job(job_id);
+            }
+            _ => std::process::exit(130),
+        },
+    )
 }
 
 pub fn daemon(command: DaemonCommand) -> ExitCode {

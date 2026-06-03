@@ -674,13 +674,13 @@ impl WrecApp {
                 self.push_log("recorder is busy");
                 return;
             }
-            self.recorder_state = RecorderState::Stopping;
-            self.status = "Stopping".to_string();
-            self.push_log("stopping recording");
             let Some(job_id) = self.active_job_id else {
                 self.show_error("No active daemon job to stop", window, cx);
                 return;
             };
+            self.recorder_state = RecorderState::Stopping;
+            self.status = "Stopping".to_string();
+            self.push_log("stopping recording");
             let daemon = self.daemon.clone();
             let app_events = self.app_events.clone();
             std::thread::spawn(move || {
@@ -731,13 +731,13 @@ impl WrecApp {
     pub(crate) fn toggle_pause(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.recorder_state {
             RecorderState::Recording => {
-                self.recorder_state = RecorderState::Pausing;
-                self.status = "Pausing".to_string();
-                self.push_log("pausing recording");
                 let Some(job_id) = self.active_job_id else {
                     self.show_error("No active daemon job to pause", window, cx);
                     return;
                 };
+                self.recorder_state = RecorderState::Pausing;
+                self.status = "Pausing".to_string();
+                self.push_log("pausing recording");
                 let daemon = self.daemon.clone();
                 let app_events = self.app_events.clone();
                 std::thread::spawn(move || {
@@ -747,13 +747,13 @@ impl WrecApp {
                 cx.notify();
             }
             RecorderState::Paused => {
-                self.recorder_state = RecorderState::Resuming;
-                self.status = "Resuming".to_string();
-                self.push_log("resuming recording");
                 let Some(job_id) = self.active_job_id else {
                     self.show_error("No active daemon job to resume", window, cx);
                     return;
                 };
+                self.recorder_state = RecorderState::Resuming;
+                self.status = "Resuming".to_string();
+                self.push_log("resuming recording");
                 let daemon = self.daemon.clone();
                 let app_events = self.app_events.clone();
                 std::thread::spawn(move || {
@@ -1054,7 +1054,7 @@ impl WrecApp {
     fn should_accept_job(&self, job_id: u64) -> bool {
         self.active_job_id
             .map(|active_job_id| active_job_id == job_id)
-            .unwrap_or_else(|| matches!(self.recorder_state, RecorderState::Starting))
+            .unwrap_or(false)
     }
 
     fn start_job_poll(&self) {

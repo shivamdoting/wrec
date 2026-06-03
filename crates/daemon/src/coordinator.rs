@@ -387,6 +387,12 @@ fn launch_job<R: RecordingRuntime>(state: SharedCoordinator<R>, job_id: u64) {
         Ok(runtime) => runtime,
         Err(err) => {
             append_daemon_log(format!("job {job_id} launch failed: {}", err.message));
+            finish_job_failed(
+                &state,
+                job_id,
+                format!("recording failed to launch: {}", err.message),
+            );
+            launch_next_queued_job(state.clone());
             return;
         }
     };
@@ -397,6 +403,12 @@ fn launch_job<R: RecordingRuntime>(state: SharedCoordinator<R>, job_id: u64) {
             Ok(state) => state,
             Err(err) => {
                 append_daemon_log(format!("job {job_id} launch failed: {}", err.message));
+                finish_job_failed(
+                    &state,
+                    job_id,
+                    format!("recording failed to launch: {}", err.message),
+                );
+                launch_next_queued_job(state.clone());
                 return;
             }
         };
@@ -443,7 +455,6 @@ fn run_job<R: RecordingRuntime>(
     rx: mpsc::Receiver<RecorderEvent>,
 ) {
     append_daemon_log(format!("job {job_id} starting"));
-    let started = Instant::now();
     let start_result = match lock_control(&engine, job_id) {
         Ok(mut engine) => engine.start(target, settings),
         Err(err) => {
@@ -463,6 +474,7 @@ fn run_job<R: RecordingRuntime>(
         }
     }
 
+    let started = Instant::now();
     let mut duration_stop_requested = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -582,14 +594,14 @@ fn finish_job_failed<R: RecordingRuntime>(
     job_id: u64,
     message: impl Into<String>,
 ) {
-    let mut state = match lock_state(state) {
+    let mut state = match state.lock() {
         Ok(state) => state,
         Err(err) => {
             append_daemon_log(format!(
-                "job {job_id} fail handling failed: {}",
-                err.message
+                "job {job_id} fail handling recovered poisoned state"
             ));
-            return;
+            state.clear_poison();
+            err.into_inner()
         }
     };
     if let Some(job) = state.jobs.get_mut(&job_id) {
