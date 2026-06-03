@@ -9,8 +9,10 @@ wrec is a Rust app with a small native macOS capture helper.
 - `crates/app` owns the GPUI window, controls, notifications, and app state.
 - `crates/core` defines shared recorder types: settings, targets, sessions,
   metrics, and the recorder engine trait.
+- `crates/daemon` owns local IPC, one active recording job, queued jobs, and
+  shared recording control for the app, CLI, and agents.
 - `crates/macos` implements the macOS recorder engine. It supervises the native
-  helper process and translates helper output into app events.
+  helper process and translates helper output into recorder events.
 - `crates/store` writes recording history, events, and metrics to SQLite.
 - `crates/macos/native/wrec_helper.swift` is the native capture and encode path.
 
@@ -18,17 +20,20 @@ At runtime the flow is:
 
 ```text
 User changes settings in the GPUI app
-  -> app asks the macOS recorder engine to start/stop
+  -> app submits recording control to the local coordinator daemon
+  -> daemon starts one active macOS recorder job or queues the request
   -> macOS engine starts the compiled Swift helper
   -> helper captures and writes the .mov file
   -> helper emits progress/errors/metrics
-  -> app updates UI state and persists records in SQLite
+  -> daemon persists records in SQLite and exposes job state over IPC
+  -> app/CLI poll job state and update their UI/output
 ```
 
 The media path stays inside Apple's native stack:
 
 ```text
-Rust GPUI app
+Rust GPUI app / CLI / agents
+  -> local coordinator daemon
   -> macOS recorder engine
   -> Swift helper
   -> ScreenCaptureKit SCStream
@@ -93,7 +98,8 @@ Recording-affecting controls are disabled while recording so the UI cannot diver
 ## Reliability
 
 - Recording events are session-scoped so stale helper events do not mutate the wrong recording state.
-- The backend stops the helper on recorder drop.
+- The macOS recorder only stops the helper on drop when it owns an active session.
+- The daemon keeps one active recording job and queues additional requests by default.
 - Stop has a timeout and kill fallback.
 - Screen Recording permission denial maps to a typed recorder error.
 - The Swift helper is compiled during Cargo checks/tests, so Swift API breakage is caught early.
