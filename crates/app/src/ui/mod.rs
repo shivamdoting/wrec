@@ -827,7 +827,7 @@ fn sidebar_header(is_dark: bool, cx: &mut Context<WrecApp>) -> Div {
         .gap_2()
         .h(px(HEADER_HEIGHT))
         .pl(px(SIDEBAR_LEFT_INSET))
-        .pr_3()
+        .pr_2()
         .child(div().size(px(22.)).bg(rgb(0xc62828)))
         .child(
             div()

@@ -191,7 +191,8 @@ Contributor/dev builds are the default:
 
 This uses Cargo's dev profile and creates `dist/dev/Wrec Dev.app`.
 Dev packaging also writes `dist/dev/README.md` with the local open/rebuild
-commands and generated build details.
+commands and generated build details. The dev app icon is generated from
+`images/wrec-dev.png`.
 
 Release builds are explicit:
 
@@ -200,7 +201,8 @@ Release builds are explicit:
 ```
 
 This uses Cargo's release profile and creates `dist/release/Wrec.app`.
-Release packaging does not create a companion README.
+Release packaging does not create a companion README. The release app icon is
+generated from `images/wrec.png`.
 
 Both channels copy the Rust GPUI app as `wrec-app`, copy the terminal client as
 `wrec`, copy the compiled Swift `wrec-helper`, and sign each executable.

@@ -35,6 +35,8 @@ The dev CLI is bundled at:
 dist/dev/Wrec\ Dev.app/Contents/MacOS/wrec
 ```
 
+Dev packaging uses `images/wrec-dev.png` as the app icon.
+
 For release packaging:
 
 ```bash
@@ -44,6 +46,8 @@ For release packaging:
 This creates `dist/release/Wrec.app` with the release Cargo profile,
 bundle id `app.wrec.wrec`, and a `.dmg` by default. Release packaging does not
 generate the companion README.
+
+Release packaging uses `images/wrec.png` as the app icon.
 
 For Developer ID signing a release:
 
@@ -63,8 +67,7 @@ NOTARIZE=1 \
 ./scripts/package-macos.sh release
 ```
 
-Add `packaging/macos/AppIcon.icns` when the icon is ready; the script copies it
-automatically if present.
+Set `ICON_SOURCE=/path/to/icon.png` to override the channel's default icon.
 
 ## GitHub release workflow
 

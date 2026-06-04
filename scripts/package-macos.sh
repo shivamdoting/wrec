@@ -18,6 +18,45 @@ run() {
   "$@"
 }
 
+generate_app_icon() {
+  local source="$1"
+  local iconset="$RESOURCES/AppIcon.iconset"
+  local output="$RESOURCES/AppIcon.icns"
+
+  if [[ ! -f "$source" ]]; then
+    die "App icon source not found: $source"
+  fi
+
+  log "Generating app icon from: $source"
+  run rm -rf "$iconset"
+  run mkdir -p "$iconset"
+
+  local names=(
+    icon_16x16.png
+    icon_16x16@2x.png
+    icon_32x32.png
+    icon_32x32@2x.png
+    icon_128x128.png
+    icon_128x128@2x.png
+    icon_256x256.png
+    icon_256x256@2x.png
+    icon_512x512.png
+    icon_512x512@2x.png
+  )
+  local sizes=(16 32 32 64 128 256 256 512 512 1024)
+
+  for i in "${!names[@]}"; do
+    local size="${sizes[$i]}"
+    run cp "$source" "$iconset/${names[$i]}"
+    run sips -Z "$size" --padToHeightWidth "$size" "$size" "$iconset/${names[$i]}" >/dev/null
+  done
+
+  run iconutil -c icns "$iconset" -o "$output"
+  run rm -rf "$iconset"
+  run /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$INFO_PLIST" 2>/dev/null \
+    || run /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$INFO_PLIST"
+}
+
 write_dev_readme() {
   local readme="$DIST_DIR/README.md"
 
@@ -103,12 +142,14 @@ case "$CHANNEL" in
     DEFAULT_BUNDLE_ID="app.wrec.wrec.dev"
     DEFAULT_PROFILE="dev"
     DEFAULT_CREATE_DMG="0"
+    DEFAULT_ICON_SOURCE="$ROOT/images/wrec-dev.png"
     ;;
   release)
     DEFAULT_APP_NAME="Wrec"
     DEFAULT_BUNDLE_ID="app.wrec.wrec"
     DEFAULT_PROFILE="release"
     DEFAULT_CREATE_DMG="1"
+    DEFAULT_ICON_SOURCE="$ROOT/images/wrec.png"
     ;;
   -h | --help | help)
     usage
@@ -128,6 +169,7 @@ PROFILE="${PROFILE:-$DEFAULT_PROFILE}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 NOTARIZE="${NOTARIZE:-0}"
 CREATE_DMG="${CREATE_DMG:-$DEFAULT_CREATE_DMG}"
+ICON_SOURCE="${ICON_SOURCE:-$DEFAULT_ICON_SOURCE}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DIST_DIR="$ROOT/dist/$CHANNEL"
 APP="$DIST_DIR/$APP_NAME.app"
@@ -171,6 +213,7 @@ log "Bundle id: $BUNDLE_ID"
 log "Cargo profile: $PROFILE_DIR"
 log "Version: $VERSION"
 log "Output app: $APP"
+log "Icon source: $ICON_SOURCE"
 log "Dmg enabled: $CREATE_DMG"
 log "Notarization enabled: $NOTARIZE"
 
@@ -209,15 +252,7 @@ run cp "$TARGET_DIR/$PROFILE_DIR/$BIN_NAME" "$MACOS/$BIN_NAME"
 run cp "$TARGET_DIR/$PROFILE_DIR/$CLI_BIN_NAME" "$MACOS/$CLI_BIN_NAME"
 run cp "$HELPER" "$MACOS/wrec-helper"
 run cp "$ROOT/packaging/macos/Info.plist" "$INFO_PLIST"
-
-if [[ -f "$ROOT/packaging/macos/AppIcon.icns" ]]; then
-  log "Copying app icon"
-  run cp "$ROOT/packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
-  run /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$INFO_PLIST" 2>/dev/null \
-    || run /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$INFO_PLIST"
-else
-  log "No AppIcon.icns found; continuing without a custom icon"
-fi
+generate_app_icon "$ICON_SOURCE"
 
 log "Writing bundle metadata"
 run /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$INFO_PLIST"
