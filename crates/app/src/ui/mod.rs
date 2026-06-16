@@ -25,19 +25,19 @@ pub(crate) type ControlSelect = SelectState<Vec<&'static str>>;
 pub(crate) type LimitedSelect = SelectState<Vec<LimitedOption>>;
 pub(crate) type TargetSelect = SelectState<Vec<TargetOption>>;
 
-pub(crate) const CONTROL_HEIGHT: f32 = 32.;
-pub(crate) const WINDOW_WIDTH: f32 = 560.;
-pub(crate) const WINDOW_HEIGHT: f32 = 540.;
-pub(crate) const WINDOW_MIN_WIDTH: f32 = 540.;
-pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
+pub(crate) const CONTROL_HEIGHT: f32 = 44.;
+pub(crate) const WINDOW_WIDTH: f32 = 600.;
+pub(crate) const WINDOW_HEIGHT: f32 = 680.;
+pub(crate) const WINDOW_MIN_WIDTH: f32 = 580.;
+pub(crate) const WINDOW_MIN_HEIGHT: f32 = 640.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 
-const SIDEBAR_WIDTH: f32 = 154.;
-const SIDEBAR_LEFT_INSET: f32 = 16.;
-const HEADER_HEIGHT: f32 = 48.;
-const FIELD_LABEL_WIDTH: f32 = 96.;
+const SIDEBAR_WIDTH: f32 = 168.;
+const SIDEBAR_LEFT_INSET: f32 = 18.;
+const HEADER_HEIGHT: f32 = 56.;
+const FIELD_LABEL_WIDTH: f32 = 104.;
 const NOTIFICATION_WIDTH: f32 = 320.;
 
 #[derive(Clone, Copy)]
@@ -76,71 +76,71 @@ struct ThemePalette {
 }
 
 const LIGHT_PALETTE: ThemePalette = ThemePalette {
-    background: 0xf9f9f9,
-    foreground: 0x202020,
-    card: 0xfcfcfc,
-    card_foreground: 0x202020,
-    popover: 0xfcfcfc,
-    popover_foreground: 0x202020,
-    primary: 0x454956,
+    background: 0xffffff,
+    foreground: 0x111111,
+    card: 0xffffff,
+    card_foreground: 0x111111,
+    popover: 0xffffff,
+    popover_foreground: 0x111111,
+    primary: 0x121212,
     primary_foreground: 0xffffff,
-    secondary: 0xbab7e7,
-    secondary_foreground: 0x2a3046,
-    muted: 0xefefef,
-    muted_foreground: 0x646464,
-    accent: 0xe8e8e8,
-    accent_foreground: 0x202020,
-    destructive: 0x5272b3,
+    secondary: 0xeeeeef,
+    secondary_foreground: 0x111111,
+    muted: 0xf2f2f3,
+    muted_foreground: 0x8a8a8e,
+    accent: 0xf0f0f1,
+    accent_foreground: 0x111111,
+    destructive: 0xe5484d,
     destructive_foreground: 0xffffff,
-    border: 0xd8d8d8,
-    input: 0xd8d8d8,
-    ring: 0x454956,
-    chart_1: 0x454956,
-    chart_2: 0xbab7e7,
-    chart_3: 0xe8e8e8,
-    chart_4: 0xc5c2eb,
-    chart_5: 0x444957,
-    sidebar: 0xfbfbfb,
-    sidebar_foreground: 0x252525,
-    sidebar_primary: 0x343434,
-    sidebar_primary_foreground: 0xfbfbfb,
-    sidebar_accent: 0xf7f7f7,
-    sidebar_accent_foreground: 0x343434,
-    sidebar_border: 0xebebeb,
+    border: 0xe7e7e9,
+    input: 0xe7e7e9,
+    ring: 0x121212,
+    chart_1: 0x121212,
+    chart_2: 0xeeeeef,
+    chart_3: 0xf0f0f1,
+    chart_4: 0xdcdce0,
+    chart_5: 0x111111,
+    sidebar: 0xf6f6f7,
+    sidebar_foreground: 0x111111,
+    sidebar_primary: 0x121212,
+    sidebar_primary_foreground: 0xffffff,
+    sidebar_accent: 0xeeeeef,
+    sidebar_accent_foreground: 0x111111,
+    sidebar_border: 0xeaeaec,
 };
 
 const DARK_PALETTE: ThemePalette = ThemePalette {
-    background: 0x0e0e0e,
-    foreground: 0xeeeeee,
-    card: 0x1b1b1b,
-    card_foreground: 0xeeeeee,
-    popover: 0x191919,
-    popover_foreground: 0xeeeeee,
-    primary: 0xc0c1ea,
-    primary_foreground: 0x201a13,
-    secondary: 0x2a2a32,
-    secondary_foreground: 0xc0c1ea,
-    muted: 0x202020,
-    muted_foreground: 0xb4b4b4,
-    accent: 0x2a2a2a,
-    accent_foreground: 0xeeeeee,
-    destructive: 0xcf3a3a,
+    background: 0x121212,
+    foreground: 0xf2f2f2,
+    card: 0x1b1b1d,
+    card_foreground: 0xf2f2f2,
+    popover: 0x1b1b1d,
+    popover_foreground: 0xf2f2f2,
+    primary: 0xf2f2f2,
+    primary_foreground: 0x121212,
+    secondary: 0x262628,
+    secondary_foreground: 0xf2f2f2,
+    muted: 0x1e1e20,
+    muted_foreground: 0x9a9a9e,
+    accent: 0x242426,
+    accent_foreground: 0xf2f2f2,
+    destructive: 0xe5484d,
     destructive_foreground: 0xffffff,
-    border: 0x1a191c,
-    input: 0x484848,
-    ring: 0xc0c1ea,
-    chart_1: 0xc0c1ea,
-    chart_2: 0x2a2a32,
-    chart_3: 0x2a2a2a,
-    chart_4: 0x30303a,
-    chart_5: 0xc0c0ea,
-    sidebar: 0x1f1f1f,
-    sidebar_foreground: 0xe8e9e8,
-    sidebar_primary: 0x8ca148,
-    sidebar_primary_foreground: 0xffffff,
-    sidebar_accent: 0x262726,
-    sidebar_accent_foreground: 0xe8e9e8,
-    sidebar_border: 0x262726,
+    border: 0x2a2a2c,
+    input: 0x2a2a2c,
+    ring: 0xf2f2f2,
+    chart_1: 0xf2f2f2,
+    chart_2: 0x262628,
+    chart_3: 0x242426,
+    chart_4: 0x303034,
+    chart_5: 0xf2f2f2,
+    sidebar: 0x161617,
+    sidebar_foreground: 0xf2f2f2,
+    sidebar_primary: 0xf2f2f2,
+    sidebar_primary_foreground: 0x121212,
+    sidebar_accent: 0x262628,
+    sidebar_accent_foreground: 0xf2f2f2,
+    sidebar_border: 0x242426,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,19 +419,19 @@ impl WrecApp {
             .flex_col()
             .flex_1()
             .min_h(px(0.))
-            .gap_4()
+            .gap_5()
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_3()
                     .child(source_row)
                     .child(target_row)
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .gap_3()
                             .child(format_row)
                             .child(resolution_row)
                             .child(quality_row)
@@ -488,7 +488,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_3()
             .child(
                 div()
                     .flex()
@@ -580,7 +580,7 @@ impl WrecApp {
                     .gap_2()
                     .child(
                         UiButton::new("choose-output-dir")
-                            .outline()
+                            .secondary()
                             .flex_1()
                             .h(px(CONTROL_HEIGHT))
                             .icon(
@@ -596,7 +596,7 @@ impl WrecApp {
                     )
                     .child(
                         UiButton::new("open-last-recording-dir")
-                            .outline()
+                            .secondary()
                             .flex_1()
                             .h(px(CONTROL_HEIGHT))
                             .icon(
@@ -629,7 +629,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_3()
             .child(
                 div()
                     .flex()
@@ -691,7 +691,7 @@ impl WrecApp {
                     )
                     .child(
                         UiButton::new("cli-copy-install")
-                            .outline()
+                            .secondary()
                             .compact()
                             .size(px(28.))
                             .icon(UiIcon::new(PhosphorIcon::Clipboard))
@@ -715,7 +715,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_3()
             .flex_1()
             .min_h(px(0.))
             .child(
@@ -728,7 +728,7 @@ impl WrecApp {
                     .child(row_label("Logs"))
                     .child(
                         UiButton::new("open-recordings-data-dir")
-                            .outline()
+                            .secondary()
                             .compact()
                             .h(px(CONTROL_HEIGHT))
                             .icon(
@@ -781,7 +781,7 @@ impl WrecApp {
             ))
             .child(
                 UiButton::new("open-github")
-                    .outline()
+                    .secondary()
                     .w_full()
                     .h(px(CONTROL_HEIGHT))
                     .icon(UiIcon::new(PhosphorIcon::Github).text_color(muted_foreground))
@@ -857,7 +857,7 @@ impl Render for WrecApp {
             .min_w(px(0.))
             .min_h(px(0.))
             .overflow_hidden()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
             .border_color(border)
             .bg(background)
@@ -873,10 +873,10 @@ impl Render for WrecApp {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .pt_2()
-                            .pb_4()
-                            .pl_4()
-                            .pr_3()
+                            .pt_5()
+                            .pb_6()
+                            .pl_6()
+                            .pr_5()
                             .child(div().id("tab-content").flex().flex_col().flex_1().map(
                                 |this| match self.active_tab {
                                     AppTab::General => this.child(self.render_general_tab(
@@ -932,7 +932,7 @@ fn sidebar_header(is_dark: bool, cx: &mut Context<WrecApp>) -> Div {
         .h(px(HEADER_HEIGHT))
         .pl(px(SIDEBAR_LEFT_INSET))
         .pr_2()
-        .child(div().size(px(22.)).bg(rgb(0xc62828)))
+        .child(div().size(px(20.)).rounded_full().bg(rgb(0xe5484d)))
         .child(
             div()
                 .flex_1()
@@ -996,18 +996,9 @@ fn sidebar_nav_item(
 }
 
 fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl IntoElement {
-    // Translucent white pill highlights so the selected/hovered nav item reads
-    // as frosted glass over the blurred backdrop.
-    let active_bg = if cx.theme().mode.is_dark() {
-        hsla(0., 0., 1., 0.14)
-    } else {
-        hsla(0., 0., 1., 0.65)
-    };
-    let hover_bg = if cx.theme().mode.is_dark() {
-        hsla(0., 0., 1., 0.07)
-    } else {
-        hsla(0., 0., 1., 0.40)
-    };
+    // Clean filled pill, inset from the sidebar edges, for the selected/hovered item.
+    let active_bg = cx.theme().accent;
+    let hover_bg = cx.theme().muted;
     let color = if item.active {
         cx.theme().sidebar_accent_foreground
     } else {
@@ -1019,35 +1010,35 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
         .id(format!("sidebar-nav-{}", item.tab.id()))
         .flex()
         .items_center()
-        .gap_2()
         .w_full()
-        .h(px(CONTROL_HEIGHT))
-        .text_sm()
-        .font_weight(if item.active {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::MEDIUM
-        })
-        .text_color(color)
-        .cursor_pointer()
-        .when(item.active, |this| {
-            this.bg(active_bg)
-                .text_color(cx.theme().sidebar_accent_foreground)
-        })
-        .when(!item.active, |this| {
-            this.hover(|this| {
-                this.bg(hover_bg)
-                    .text_color(cx.theme().sidebar_accent_foreground)
-            })
-        })
+        .px_2()
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.))
-                .pl(px(SIDEBAR_LEFT_INSET))
-                .pr_3()
-                .truncate()
-                .child(item.label),
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(40.))
+                .px_3()
+                .rounded_lg()
+                .text_sm()
+                .font_weight(if item.active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(color)
+                .cursor_pointer()
+                .when(item.active, |this| {
+                    this.bg(active_bg)
+                        .text_color(cx.theme().sidebar_accent_foreground)
+                })
+                .when(!item.active, |this| {
+                    this.hover(|this| {
+                        this.bg(hover_bg)
+                            .text_color(cx.theme().sidebar_accent_foreground)
+                    })
+                })
+                .child(div().flex_1().min_w(px(0.)).truncate().child(item.label)),
         )
         .on_click(move |event, window, cx| {
             on_click(event, window, cx);
@@ -1073,7 +1064,7 @@ fn permission_state_button(
     };
     let button = UiButton::new("settings-screen-recording-state")
         .compact()
-        .outline()
+        .secondary()
         .h(px(CONTROL_HEIGHT))
         .label(label)
         .tooltip(tooltip)
@@ -1128,7 +1119,7 @@ fn pause_button(
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
     UiButton::new("pause-button")
-        .outline()
+        .secondary()
         .h(px(CONTROL_HEIGHT))
         .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
         .label(label)
@@ -1144,13 +1135,16 @@ fn field_label(label: &'static str, color: Hsla) -> Div {
     div().w(px(FIELD_LABEL_WIDTH)).flex_none().child(
         Label::new(label)
             .text_sm()
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(color),
     )
 }
 
 fn row_label(label: &'static str) -> Div {
-    div().text_sm().font_weight(FontWeight::MEDIUM).child(label)
+    div()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(label)
 }
 
 fn labeled_select_row(label: &'static str, color: Hsla, select: impl IntoElement) -> Div {
@@ -1300,8 +1294,11 @@ fn apply_wrec_theme(cx: &mut App) {
 
     theme.font_family = GEIST_FONT_FAMILY.into();
     theme.mono_font_family = GEIST_MONO_FONT_FAMILY.into();
-    theme.radius = px(8.);
-    theme.radius_lg = px(8.);
+    theme.font_size = px(14.);
+    // Flat, clean look: rounded-rectangle corners and no shadows anywhere.
+    theme.radius = px(12.);
+    theme.radius_lg = px(16.);
+    theme.shadow = false;
 
     theme.background = color(palette.background);
     theme.foreground = color(palette.foreground);
@@ -1378,61 +1375,6 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.link = theme.primary;
     theme.link_hover = theme.primary_hover;
     theme.link_active = theme.primary_active;
-
-    apply_liquid_glass(theme, palette, &color);
-}
-
-/// Liquid-glass pass.
-///
-/// The window is opened with `WindowBackgroundAppearance::Blurred`, so the macOS
-/// backdrop blur sits behind the entire app. Lowering the alpha of the surface
-/// tokens lets that blur read through as frosted "liquid glass", while a bright
-/// translucent edge gives panels and controls the glassy rim highlight. This
-/// runs last so it overrides the solid surface colors assigned above — tweak the
-/// alpha values here to taste, or delete this call to revert to flat surfaces.
-fn apply_liquid_glass(
-    theme: &mut Theme,
-    palette: ThemePalette,
-    color: &impl Fn(u32) -> Hsla,
-) {
-    let dark = theme.mode.is_dark();
-    let surface = |hex: u32, alpha: f32| color(hex).opacity(alpha);
-
-    // Translucent surfaces — the lower the alpha, the more backdrop shows through.
-    theme.background = surface(palette.background, if dark { 0.62 } else { 0.68 });
-    theme.sidebar = surface(palette.sidebar, if dark { 0.45 } else { 0.50 });
-    theme.group_box = surface(palette.card, if dark { 0.55 } else { 0.60 });
-    theme.tiles = theme.group_box;
-    theme.table = theme.group_box;
-    theme.table_even = theme.group_box;
-    theme.accent = surface(palette.accent, if dark { 0.65 } else { 0.70 });
-    theme.muted = surface(palette.muted, if dark { 0.55 } else { 0.60 });
-    theme.secondary = surface(palette.secondary, if dark { 0.70 } else { 0.75 });
-    theme.input = surface(palette.input, if dark { 0.45 } else { 0.55 });
-    theme.switch = theme.muted;
-
-    // Floating menus overlay app content (not just the desktop), so keep them
-    // mostly opaque to stay readable.
-    theme.popover = surface(palette.popover, if dark { 0.92 } else { 0.94 });
-    theme.colors.list = theme.popover;
-    theme.list_even = theme.popover;
-
-    // Bright translucent edge = the glass rim highlight.
-    let edge = hsla(0., 0., 1., if dark { 0.12 } else { 0.55 });
-    theme.border = edge;
-    theme.sidebar_border = edge;
-    theme.title_bar_border = edge;
-    theme.list_active_border = edge;
-    theme.table_active_border = edge;
-    theme.table_row_border = edge;
-
-    // Chrome bars inherit the frosted background.
-    theme.title_bar = theme.background;
-    theme.tab_bar = theme.background;
-
-    // Softer, more "squircle" corners read as glass.
-    theme.radius = px(10.);
-    theme.radius_lg = px(14.);
 }
 
 pub(crate) fn target_key(target: &CaptureTarget) -> String {

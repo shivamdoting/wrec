@@ -31,7 +31,7 @@ fn main() {
             )),
             window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
             titlebar: None,
-            window_background: WindowBackgroundAppearance::Blurred,
+            window_background: WindowBackgroundAppearance::Transparent,
             window_decorations: Some(WindowDecorations::Client),
             ..Default::default()
         };
