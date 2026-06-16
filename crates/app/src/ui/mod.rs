@@ -1296,8 +1296,8 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.mono_font_family = GEIST_MONO_FONT_FAMILY.into();
     theme.font_size = px(14.);
     // Flat, clean look: rounded-rectangle corners and no shadows anywhere.
-    theme.radius = px(12.);
-    theme.radius_lg = px(16.);
+    theme.radius = px(8.);
+    theme.radius_lg = px(12.);
     theme.shadow = false;
 
     theme.background = color(palette.background);
