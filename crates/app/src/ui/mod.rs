@@ -25,19 +25,19 @@ pub(crate) type ControlSelect = SelectState<Vec<&'static str>>;
 pub(crate) type LimitedSelect = SelectState<Vec<LimitedOption>>;
 pub(crate) type TargetSelect = SelectState<Vec<TargetOption>>;
 
-pub(crate) const CONTROL_HEIGHT: f32 = 44.;
-pub(crate) const WINDOW_WIDTH: f32 = 600.;
-pub(crate) const WINDOW_HEIGHT: f32 = 680.;
-pub(crate) const WINDOW_MIN_WIDTH: f32 = 580.;
-pub(crate) const WINDOW_MIN_HEIGHT: f32 = 640.;
+pub(crate) const CONTROL_HEIGHT: f32 = 32.;
+pub(crate) const WINDOW_WIDTH: f32 = 560.;
+pub(crate) const WINDOW_HEIGHT: f32 = 540.;
+pub(crate) const WINDOW_MIN_WIDTH: f32 = 540.;
+pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 
-const SIDEBAR_WIDTH: f32 = 168.;
-const SIDEBAR_LEFT_INSET: f32 = 18.;
-const HEADER_HEIGHT: f32 = 56.;
-const FIELD_LABEL_WIDTH: f32 = 104.;
+const SIDEBAR_WIDTH: f32 = 154.;
+const SIDEBAR_LEFT_INSET: f32 = 16.;
+const HEADER_HEIGHT: f32 = 48.;
+const FIELD_LABEL_WIDTH: f32 = 96.;
 const NOTIFICATION_WIDTH: f32 = 320.;
 
 #[derive(Clone, Copy)]
@@ -419,19 +419,19 @@ impl WrecApp {
             .flex_col()
             .flex_1()
             .min_h(px(0.))
-            .gap_5()
+            .gap_4()
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_2()
                     .child(source_row)
                     .child(target_row)
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_2()
                             .child(format_row)
                             .child(resolution_row)
                             .child(quality_row)
@@ -488,7 +488,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .child(
                 div()
                     .flex()
@@ -629,7 +629,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .child(
                 div()
                     .flex()
@@ -715,7 +715,7 @@ impl WrecApp {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .flex_1()
             .min_h(px(0.))
             .child(
@@ -857,7 +857,7 @@ impl Render for WrecApp {
             .min_w(px(0.))
             .min_h(px(0.))
             .overflow_hidden()
-            .rounded_xl()
+            .rounded_lg()
             .border_1()
             .border_color(border)
             .bg(background)
@@ -873,10 +873,10 @@ impl Render for WrecApp {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .pt_5()
-                            .pb_6()
-                            .pl_6()
-                            .pr_5()
+                            .pt_2()
+                            .pb_4()
+                            .pl_4()
+                            .pr_3()
                             .child(div().id("tab-content").flex().flex_col().flex_1().map(
                                 |this| match self.active_tab {
                                     AppTab::General => this.child(self.render_general_tab(
@@ -1017,7 +1017,7 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
                 .flex()
                 .items_center()
                 .w_full()
-                .h(px(40.))
+                .h(px(CONTROL_HEIGHT))
                 .px_3()
                 .rounded_lg()
                 .text_sm()
