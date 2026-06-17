@@ -26,6 +26,7 @@ pub(crate) type LimitedSelect = SelectState<Vec<LimitedOption>>;
 pub(crate) type TargetSelect = SelectState<Vec<TargetOption>>;
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
+const RECORD_BUTTON_HEIGHT: f32 = 42.;
 pub(crate) const WINDOW_WIDTH: f32 = 628.;
 pub(crate) const WINDOW_HEIGHT: f32 = 540.;
 pub(crate) const WINDOW_MIN_WIDTH: f32 = 608.;
@@ -866,7 +867,7 @@ impl Render for WrecApp {
         let (record_icon, record_label, record_tip, record_is_idle) = if active_session {
             (PhosphorIcon::Stop, "Stop", "Stop recording", false)
         } else {
-            (PhosphorIcon::Record, "Rec", "Start recording", true)
+            (PhosphorIcon::FilmReel, "Record", "Start recording", true)
         };
         let (pause_icon, pause_label, pause_tip) = if self.recorder_state.is_paused() {
             (PhosphorIcon::Play, "Resume", "Resume recording")
@@ -1151,7 +1152,7 @@ fn record_button(
 ) -> UiButton {
     let theme = cx.theme();
     let button = UiButton::new("record-button")
-        .h(px(CONTROL_HEIGHT))
+        .h(px(RECORD_BUTTON_HEIGHT))
         .font_weight(FontWeight::SEMIBOLD)
         .icon(UiIcon::new(icon).text_color(if is_idle {
             theme.button_primary_foreground
@@ -1182,7 +1183,7 @@ fn pause_button(
 ) -> UiButton {
     UiButton::new("pause-button")
         .secondary()
-        .h(px(CONTROL_HEIGHT))
+        .h(px(RECORD_BUTTON_HEIGHT))
         .font_weight(FontWeight::SEMIBOLD)
         .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
         .label(label)
