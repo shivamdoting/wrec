@@ -534,11 +534,6 @@ impl WrecApp {
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let refresh_disabled = !self.permission_status.is_granted()
-            || self.permission_busy
-            || self.recorder_state.is_busy()
-            || self.recorder_state.is_recording();
-
         div()
             .flex()
             .flex_col()
@@ -550,52 +545,12 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .min_w(px(0.))
-                            .child(row_label("Screen Recording"))
-                            .child(
-                                UiButton::new("settings-retry-screen-recording")
-                                    .compact()
-                                    .ghost()
-                                    .size(px(28.))
-                                    .icon(UiIcon::new(PhosphorIcon::Shield))
-                                    .tooltip("Recheck Screen Recording permission")
-                                    .disabled(self.permission_busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.refresh_permission_status(false, cx);
-                                    })),
-                            ),
-                    )
+                    .child(row_label("Screen Recording"))
                     .child(permission_state_button(
                         self.permission_status,
                         self.permission_busy,
                         cx,
                     )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .min_h(px(CONTROL_HEIGHT))
-                    .child(row_label("Targets"))
-                    .child(
-                        UiButton::new("settings-refresh-targets")
-                            .link()
-                            .compact()
-                            .size(px(28.))
-                            .icon(UiIcon::new(PhosphorIcon::Refresh))
-                            .tooltip("Refresh capture targets")
-                            .disabled(refresh_disabled)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_targets(cx);
-                            })),
-                    ),
             )
             .child(switch_row(
                 "Hide wrec",
@@ -712,10 +667,10 @@ impl WrecApp {
                     )
                     .child(
                         UiButton::new("cli-refresh-install")
-                            .link()
+                            .ghost()
                             .compact()
-                            .size(px(28.))
-                            .icon(UiIcon::new(PhosphorIcon::Refresh))
+                            .size(px(CONTROL_HEIGHT))
+                            .icon(UiIcon::new(PhosphorIcon::Refresh).text_color(muted_foreground))
                             .tooltip("Refresh CLI install status")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_cli_install_status(cx);
