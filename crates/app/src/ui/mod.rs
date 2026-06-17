@@ -1417,9 +1417,9 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.danger_foreground = color(palette.destructive_foreground);
     theme.border = color(palette.border);
     theme.input = color(palette.input);
-    // Reuse the brand record-dot red as the single interaction accent.
-    theme.ring = theme.danger;
-    theme.caret = theme.danger;
+    // Neutral focus ring / caret — no colored accent on focused controls.
+    theme.ring = theme.border;
+    theme.caret = theme.foreground;
     theme.chart_1 = color(palette.chart_1);
     theme.chart_2 = color(palette.chart_2);
     theme.chart_3 = color(palette.chart_3);
@@ -1471,7 +1471,7 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.slider_bar = theme.primary;
     theme.slider_thumb = theme.primary_foreground;
     theme.progress_bar = theme.primary;
-    theme.selection = theme.danger.opacity(0.2);
+    theme.selection = theme.foreground.opacity(0.14);
     theme.link = theme.primary;
     theme.link_hover = theme.primary_hover;
     theme.link_active = theme.primary_active;
