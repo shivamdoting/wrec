@@ -26,9 +26,9 @@ pub(crate) type LimitedSelect = SelectState<Vec<LimitedOption>>;
 pub(crate) type TargetSelect = SelectState<Vec<TargetOption>>;
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
-pub(crate) const WINDOW_WIDTH: f32 = 560.;
+pub(crate) const WINDOW_WIDTH: f32 = 628.;
 pub(crate) const WINDOW_HEIGHT: f32 = 540.;
-pub(crate) const WINDOW_MIN_WIDTH: f32 = 540.;
+pub(crate) const WINDOW_MIN_WIDTH: f32 = 608.;
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
@@ -910,7 +910,7 @@ impl Render for WrecApp {
             .bg(background)
             .text_color(foreground)
             .text_size(px(15.))
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::SEMIBOLD)
             .flex()
             .flex_col()
             .child(self.render_title_bar(cx))
@@ -1075,9 +1075,9 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
                 .rounded_lg()
                 .text_base()
                 .font_weight(if item.active {
-                    FontWeight::SEMIBOLD
+                    FontWeight::BOLD
                 } else {
-                    FontWeight::MEDIUM
+                    FontWeight::SEMIBOLD
                 })
                 .text_color(color)
                 .cursor_pointer()
