@@ -35,7 +35,6 @@ pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 
 const SIDEBAR_WIDTH: f32 = 154.;
-const SIDEBAR_LEFT_INSET: f32 = 16.;
 const TITLE_BAR_HEIGHT: f32 = 40.;
 const FIELD_LABEL_WIDTH: f32 = 96.;
 const NOTIFICATION_WIDTH: f32 = 320.;
@@ -281,25 +280,24 @@ impl WrecApp {
             .justify_between()
             .h(px(TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(px(SIDEBAR_LEFT_INSET))
+            .pl(px(14.))
             .pr_2()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
                 div()
                     .flex()
-                    .flex_1()
                     .items_center()
                     .gap_2()
+                    .child(window_control(WinControl::Close))
+                    .child(window_control(WinControl::Min))
+                    .child(window_control(WinControl::Zoom)),
+            )
+            .child(
+                div()
+                    .flex_1()
                     .h_full()
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(div().size(px(11.)).rounded_full().bg(rgb(0xe5484d)))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .child("wrec"),
-                    ),
+                    .window_control_area(WindowControlArea::Drag),
             )
             .child(theme_toggle(is_dark, cx))
     }
@@ -1195,11 +1193,10 @@ fn field_label(label: &'static str, color: Hsla) -> Div {
     )
 }
 
-fn section_label(label: &'static str, color: Hsla) -> Div {
+fn section_label(label: &'static str, _color: Hsla) -> Div {
     div()
-        .text_xs()
+        .text_base()
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(color)
         .child(label)
 }
 
@@ -1224,6 +1221,34 @@ fn labeled_select_row(label: &'static str, color: Hsla, select: impl IntoElement
                 .h(px(CONTROL_HEIGHT))
                 .child(select),
         )
+}
+
+#[derive(Clone, Copy)]
+enum WinControl {
+    Close,
+    Min,
+    Zoom,
+}
+
+/// macOS-style traffic-light window control button.
+fn window_control(kind: WinControl) -> impl IntoElement {
+    let (id, color): (&'static str, u32) = match kind {
+        WinControl::Close => ("win-close", 0xff5f57),
+        WinControl::Min => ("win-min", 0xfebc2e),
+        WinControl::Zoom => ("win-zoom", 0x28c840),
+    };
+    div()
+        .id(id)
+        .size(px(12.))
+        .rounded_full()
+        .bg(rgb(color))
+        .cursor_pointer()
+        .hover(|this| this.opacity(0.82))
+        .on_click(move |_, window, _cx| match kind {
+            WinControl::Close => window.remove_window(),
+            WinControl::Min => window.minimize_window(),
+            WinControl::Zoom => window.zoom_window(),
+        })
 }
 
 fn theme_toggle(is_dark: bool, cx: &mut Context<WrecApp>) -> impl IntoElement {
