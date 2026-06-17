@@ -1380,7 +1380,13 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.tab_active = theme.accent;
     theme.tab_active_foreground = theme.accent_foreground;
     theme.tab_foreground = theme.muted_foreground;
-    theme.switch = theme.muted;
+    // Off-state track: `muted` is nearly invisible against the pitch-black
+    // background, so use a clearly visible neutral gray in each mode.
+    theme.switch = if theme.mode.is_dark() {
+        color(0x3f3f46)
+    } else {
+        color(0xd4d4d8)
+    };
     theme.switch_thumb = theme.popover;
     theme.skeleton = theme.muted;
     theme.slider_bar = theme.primary;
