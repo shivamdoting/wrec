@@ -437,9 +437,9 @@ impl WrecApp {
 
     pub(crate) fn set_show_nerd_logs(&mut self, show_nerd_logs: bool, cx: &mut Context<Self>) {
         self.show_nerd_logs = show_nerd_logs;
-        if show_nerd_logs {
-            self.active_tab = AppTab::Nerd;
-        } else if self.active_tab == AppTab::Nerd {
+        // Don't auto-jump to the Nerd tab when enabling logs; only move away
+        // from it when it's being hidden.
+        if !show_nerd_logs && self.active_tab == AppTab::Nerd {
             self.active_tab = AppTab::Settings;
         }
         self.push_log(format!(

@@ -16,8 +16,8 @@ use gpui_component::{
     notification::Notification,
     select::{Select, SelectItem, SelectState},
     switch::Switch,
-    ActiveTheme as _, Colorize as _, Disableable as _, Icon as UiIcon, Root, Theme, ThemeMode,
-    WindowExt as _,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon as UiIcon, Root, Sizable as _, Theme,
+    ThemeMode, WindowExt as _,
 };
 use std::rc::Rc;
 
@@ -26,17 +26,17 @@ pub(crate) type LimitedSelect = SelectState<Vec<LimitedOption>>;
 pub(crate) type TargetSelect = SelectState<Vec<TargetOption>>;
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
-pub(crate) const WINDOW_WIDTH: f32 = 560.;
+const RECORD_BUTTON_HEIGHT: f32 = 42.;
+pub(crate) const WINDOW_WIDTH: f32 = 628.;
 pub(crate) const WINDOW_HEIGHT: f32 = 540.;
-pub(crate) const WINDOW_MIN_WIDTH: f32 = 540.;
+pub(crate) const WINDOW_MIN_WIDTH: f32 = 608.;
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 
 const SIDEBAR_WIDTH: f32 = 154.;
-const SIDEBAR_LEFT_INSET: f32 = 16.;
-const HEADER_HEIGHT: f32 = 48.;
+const TITLE_BAR_HEIGHT: f32 = 40.;
 const FIELD_LABEL_WIDTH: f32 = 96.;
 const NOTIFICATION_WIDTH: f32 = 320.;
 
@@ -49,8 +49,12 @@ struct ThemePalette {
     popover: u32,
     popover_foreground: u32,
     primary: u32,
+    primary_hover: u32,
+    primary_active: u32,
     primary_foreground: u32,
     secondary: u32,
+    secondary_hover: u32,
+    secondary_active: u32,
     secondary_foreground: u32,
     muted: u32,
     muted_foreground: u32,
@@ -60,7 +64,6 @@ struct ThemePalette {
     destructive_foreground: u32,
     border: u32,
     input: u32,
-    ring: u32,
     chart_1: u32,
     chart_2: u32,
     chart_3: u32,
@@ -76,71 +79,77 @@ struct ThemePalette {
 }
 
 const LIGHT_PALETTE: ThemePalette = ThemePalette {
-    background: 0xf9f9f9,
-    foreground: 0x202020,
-    card: 0xfcfcfc,
-    card_foreground: 0x202020,
-    popover: 0xfcfcfc,
-    popover_foreground: 0x202020,
-    primary: 0x454956,
-    primary_foreground: 0xffffff,
-    secondary: 0xbab7e7,
-    secondary_foreground: 0x2a3046,
-    muted: 0xefefef,
-    muted_foreground: 0x646464,
-    accent: 0xe8e8e8,
-    accent_foreground: 0x202020,
-    destructive: 0x5272b3,
+    background: 0xffffff,
+    foreground: 0x18181b,
+    card: 0xffffff,
+    card_foreground: 0x18181b,
+    popover: 0xffffff,
+    popover_foreground: 0x18181b,
+    primary: 0x18181b,
+    primary_hover: 0x333338,
+    primary_active: 0x000000,
+    primary_foreground: 0xfafafa,
+    secondary: 0xededf0,
+    secondary_hover: 0xe1e1e6,
+    secondary_active: 0xd6d6dc,
+    secondary_foreground: 0x18181b,
+    muted: 0xf4f4f5,
+    muted_foreground: 0x71717a,
+    accent: 0xf4f4f5,
+    accent_foreground: 0x18181b,
+    destructive: 0xe5484d,
     destructive_foreground: 0xffffff,
-    border: 0xd8d8d8,
-    input: 0xd8d8d8,
-    ring: 0x454956,
-    chart_1: 0x454956,
-    chart_2: 0xbab7e7,
-    chart_3: 0xe8e8e8,
-    chart_4: 0xc5c2eb,
-    chart_5: 0x444957,
-    sidebar: 0xfbfbfb,
-    sidebar_foreground: 0x252525,
-    sidebar_primary: 0x343434,
-    sidebar_primary_foreground: 0xfbfbfb,
-    sidebar_accent: 0xf7f7f7,
-    sidebar_accent_foreground: 0x343434,
-    sidebar_border: 0xebebeb,
+    border: 0xe4e4e7,
+    input: 0xe4e4e7,
+    chart_1: 0x18181b,
+    chart_2: 0xededf0,
+    chart_3: 0xf4f4f5,
+    chart_4: 0xd4d4d8,
+    chart_5: 0x18181b,
+    sidebar: 0xfafafa,
+    sidebar_foreground: 0x18181b,
+    sidebar_primary: 0x18181b,
+    sidebar_primary_foreground: 0xfafafa,
+    sidebar_accent: 0xf0f0f2,
+    sidebar_accent_foreground: 0x18181b,
+    sidebar_border: 0xededf0,
 };
 
 const DARK_PALETTE: ThemePalette = ThemePalette {
-    background: 0x0e0e0e,
-    foreground: 0xeeeeee,
-    card: 0x1b1b1b,
-    card_foreground: 0xeeeeee,
-    popover: 0x191919,
-    popover_foreground: 0xeeeeee,
-    primary: 0xc0c1ea,
-    primary_foreground: 0x201a13,
-    secondary: 0x2a2a32,
-    secondary_foreground: 0xc0c1ea,
-    muted: 0x202020,
-    muted_foreground: 0xb4b4b4,
-    accent: 0x2a2a2a,
-    accent_foreground: 0xeeeeee,
-    destructive: 0xcf3a3a,
+    background: 0x000000,
+    foreground: 0xfafafa,
+    card: 0x141416,
+    card_foreground: 0xfafafa,
+    popover: 0x141416,
+    popover_foreground: 0xfafafa,
+    primary: 0xfafafa,
+    primary_hover: 0xe2e2e6,
+    primary_active: 0xcacace,
+    primary_foreground: 0x0a0a0a,
+    secondary: 0x1f1f22,
+    secondary_hover: 0x2b2b2f,
+    secondary_active: 0x343438,
+    secondary_foreground: 0xfafafa,
+    muted: 0x161618,
+    muted_foreground: 0xa1a1aa,
+    accent: 0x1f1f22,
+    accent_foreground: 0xfafafa,
+    destructive: 0xe5484d,
     destructive_foreground: 0xffffff,
-    border: 0x1a191c,
-    input: 0x484848,
-    ring: 0xc0c1ea,
-    chart_1: 0xc0c1ea,
-    chart_2: 0x2a2a32,
-    chart_3: 0x2a2a2a,
-    chart_4: 0x30303a,
-    chart_5: 0xc0c0ea,
-    sidebar: 0x1f1f1f,
-    sidebar_foreground: 0xe8e9e8,
-    sidebar_primary: 0x8ca148,
-    sidebar_primary_foreground: 0xffffff,
-    sidebar_accent: 0x262726,
-    sidebar_accent_foreground: 0xe8e9e8,
-    sidebar_border: 0x262726,
+    border: 0x232326,
+    input: 0x232326,
+    chart_1: 0xfafafa,
+    chart_2: 0x1f1f22,
+    chart_3: 0x1f1f22,
+    chart_4: 0x3f3f46,
+    chart_5: 0xfafafa,
+    sidebar: 0x0b0b0c,
+    sidebar_foreground: 0xfafafa,
+    sidebar_primary: 0xfafafa,
+    sidebar_primary_foreground: 0x0a0a0a,
+    sidebar_accent: 0x1f1f22,
+    sidebar_accent_foreground: 0xfafafa,
+    sidebar_border: 0x1c1c1f,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,40 +272,77 @@ pub(crate) fn fps_disabled(quality: Quality, fps: FrameRate) -> bool {
 }
 
 impl WrecApp {
+    pub(crate) fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_dark = cx.theme().mode.is_dark();
+        div()
+            .id("wrec-titlebar")
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(TITLE_BAR_HEIGHT))
+            .flex_shrink_0()
+            .pl(px(14.))
+            .pr_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(window_control(WinControl::Close))
+                    .child(window_control(WinControl::Min))
+                    .child(window_control(WinControl::Zoom)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(theme_toggle(is_dark, cx))
+    }
+
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active_tab;
         let items = [
             Some(sidebar_nav_item(
                 "General",
+                PhosphorIcon::Gauge,
                 AppTab::General,
-                AppTab::General.is_active(self.active_tab),
-                cx,
-            )),
-            Some(sidebar_nav_item(
-                "Settings",
-                AppTab::Settings,
-                AppTab::Settings.is_active(self.active_tab),
+                AppTab::General.is_active(active),
                 cx,
             )),
             Some(sidebar_nav_item(
                 "CLI",
+                PhosphorIcon::Terminal,
                 AppTab::Cli,
-                AppTab::Cli.is_active(self.active_tab),
-                cx,
-            )),
-            Some(sidebar_nav_item(
-                "About",
-                AppTab::About,
-                AppTab::About.is_active(self.active_tab),
+                AppTab::Cli.is_active(active),
                 cx,
             )),
             self.show_nerd_logs.then(|| {
                 sidebar_nav_item(
                     "Nerd",
+                    PhosphorIcon::Pulse,
                     AppTab::Nerd,
-                    AppTab::Nerd.is_active(self.active_tab),
+                    AppTab::Nerd.is_active(active),
                     cx,
                 )
             }),
+            Some(sidebar_nav_item(
+                "Settings",
+                PhosphorIcon::Gear,
+                AppTab::Settings,
+                AppTab::Settings.is_active(active),
+                cx,
+            )),
+            Some(sidebar_nav_item(
+                "About",
+                PhosphorIcon::Info,
+                AppTab::About,
+                AppTab::About.is_active(active),
+                cx,
+            )),
         ]
         .into_iter()
         .flatten()
@@ -310,11 +356,11 @@ impl WrecApp {
             .h_full()
             .flex_shrink_0()
             .overflow_hidden()
+            .pt_3()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .child(sidebar_header(cx.theme().mode.is_dark(), cx))
             .child(WrecSidebarNav { items }.render("wrec-sidebar-nav", cx))
     }
 
@@ -343,6 +389,7 @@ impl WrecApp {
             .child(
                 div().flex_1().min_w(px(0.)).h(px(CONTROL_HEIGHT)).child(
                     Select::new(&self.source_select)
+                        .large()
                         .h(px(CONTROL_HEIGHT))
                         .placeholder("Source")
                         .menu_max_h(rems(7.))
@@ -353,6 +400,7 @@ impl WrecApp {
             "Target",
             muted_foreground,
             Select::new(&self.target_select)
+                .large()
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Target")
                 .search_placeholder("Search targets")
@@ -363,6 +411,7 @@ impl WrecApp {
             "Format",
             muted_foreground,
             Select::new(&self.codec_select)
+                .large()
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Format")
                 .disabled(controls_disabled),
@@ -371,6 +420,7 @@ impl WrecApp {
             "Preset",
             muted_foreground,
             Select::new(&self.quality_select)
+                .large()
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Preset")
                 .disabled(controls_disabled),
@@ -379,6 +429,7 @@ impl WrecApp {
             "Resolution",
             muted_foreground,
             Select::new(&self.resolution_select)
+                .large()
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Resolution")
                 .disabled(controls_disabled),
@@ -387,6 +438,7 @@ impl WrecApp {
             "Frame Rate",
             muted_foreground,
             Select::new(&self.fps_select)
+                .large()
                 .h(px(CONTROL_HEIGHT))
                 .placeholder("Frame Rate")
                 .disabled(controls_disabled),
@@ -396,6 +448,7 @@ impl WrecApp {
             muted_foreground,
             Switch::new("cursor-switch")
                 .checked(self.settings.include_cursor)
+                .color(switch_on_color(cx))
                 .tooltip("Capture cursor")
                 .disabled(controls_disabled)
                 .on_click(cx.listener(|this, checked, _, cx| {
@@ -407,6 +460,7 @@ impl WrecApp {
             muted_foreground,
             Switch::new("system-audio-switch")
                 .checked(self.settings.include_system_audio)
+                .color(switch_on_color(cx))
                 .tooltip("Capture system audio")
                 .disabled(controls_disabled)
                 .on_click(cx.listener(|this, checked, _, cx| {
@@ -426,19 +480,19 @@ impl WrecApp {
                     .flex_col()
                     .gap_2()
                     .child(source_row)
-                    .child(target_row)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(format_row)
-                            .child(resolution_row)
-                            .child(quality_row)
-                            .child(frame_rate_row)
-                            .child(cursor_row)
-                            .child(audio_row),
-                    ),
+                    .child(target_row),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(format_row)
+                    .child(resolution_row)
+                    .child(quality_row)
+                    .child(frame_rate_row)
+                    .child(cursor_row)
+                    .child(audio_row),
             )
             .child(if show_pause_button {
                 div()
@@ -480,11 +534,6 @@ impl WrecApp {
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let refresh_disabled = !self.permission_status.is_granted()
-            || self.permission_busy
-            || self.recorder_state.is_busy()
-            || self.recorder_state.is_recording();
-
         div()
             .flex()
             .flex_col()
@@ -496,52 +545,12 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .min_w(px(0.))
-                            .child(row_label("Screen Recording"))
-                            .child(
-                                UiButton::new("settings-retry-screen-recording")
-                                    .compact()
-                                    .ghost()
-                                    .size(px(28.))
-                                    .icon(UiIcon::new(PhosphorIcon::Shield))
-                                    .tooltip("Recheck Screen Recording permission")
-                                    .disabled(self.permission_busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.refresh_permission_status(false, cx);
-                                    })),
-                            ),
-                    )
+                    .child(row_label("Screen Recording"))
                     .child(permission_state_button(
                         self.permission_status,
                         self.permission_busy,
                         cx,
                     )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .min_h(px(CONTROL_HEIGHT))
-                    .child(row_label("Targets"))
-                    .child(
-                        UiButton::new("settings-refresh-targets")
-                            .link()
-                            .compact()
-                            .size(px(28.))
-                            .icon(UiIcon::new(PhosphorIcon::Refresh))
-                            .tooltip("Refresh capture targets")
-                            .disabled(refresh_disabled)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_targets(cx);
-                            })),
-                    ),
             )
             .child(switch_row(
                 "Hide wrec",
@@ -549,6 +558,7 @@ impl WrecApp {
                 muted_foreground,
                 Switch::new("hide-window-switch")
                     .checked(self.settings.hide_wrec)
+                    .color(switch_on_color(cx))
                     .tooltip("Hide wrec from recording")
                     .disabled(controls_disabled)
                     .on_click(cx.listener(|this, checked, _, cx| {
@@ -561,6 +571,7 @@ impl WrecApp {
                 muted_foreground,
                 Switch::new("logs-switch")
                     .checked(self.show_nerd_logs)
+                    .color(switch_on_color(cx))
                     .tooltip("Show Nerd tab")
                     .on_click(cx.listener(|this, checked, _, cx| {
                         this.set_show_nerd_logs(*checked, cx);
@@ -569,6 +580,7 @@ impl WrecApp {
             .child(
                 div().w_full().h(px(CONTROL_HEIGHT)).child(
                     Input::new(&self.output_input)
+                        .large()
                         .h(px(CONTROL_HEIGHT))
                         .disabled(controls_disabled),
                 ),
@@ -578,11 +590,13 @@ impl WrecApp {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .mt_3()
                     .child(
                         UiButton::new("choose-output-dir")
-                            .outline()
+                            .secondary()
                             .flex_1()
                             .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .icon(
                                 UiIcon::new(PhosphorIcon::FolderOpen).text_color(muted_foreground),
                             )
@@ -596,9 +610,10 @@ impl WrecApp {
                     )
                     .child(
                         UiButton::new("open-last-recording-dir")
-                            .outline()
+                            .secondary()
                             .flex_1()
                             .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .icon(
                                 UiIcon::new(PhosphorIcon::FolderOpen).text_color(muted_foreground),
                             )
@@ -618,9 +633,6 @@ impl WrecApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let cli_command = crate::platform::cli_install_command();
-        let cli_command_label = cli_command
-            .clone()
-            .unwrap_or_else(|| "Unavailable outside packaged app".to_string());
         let cli_status_color = match self.cli_install_status {
             CliInstallStatus::Conflict => cx.theme().danger,
             _ => muted_foreground,
@@ -655,10 +667,10 @@ impl WrecApp {
                     )
                     .child(
                         UiButton::new("cli-refresh-install")
-                            .link()
+                            .ghost()
                             .compact()
-                            .size(px(28.))
-                            .icon(UiIcon::new(PhosphorIcon::Refresh))
+                            .size(px(CONTROL_HEIGHT))
+                            .icon(UiIcon::new(PhosphorIcon::Refresh).text_color(muted_foreground))
                             .tooltip("Refresh CLI install status")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_cli_install_status(cx);
@@ -672,29 +684,17 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .items_baseline()
-                            .gap_2()
-                            .min_w(px(0.))
-                            .child(row_label("Command"))
-                            .child(
-                                div()
-                                    .min_w(px(0.))
-                                    .text_sm()
-                                    .text_color(muted_foreground)
-                                    .truncate()
-                                    .child(cli_command_label),
-                            ),
-                    )
+                    .child(row_label("Install command"))
                     .child(
                         UiButton::new("cli-copy-install")
-                            .outline()
+                            .secondary()
                             .compact()
-                            .size(px(28.))
-                            .icon(UiIcon::new(PhosphorIcon::Clipboard))
+                            .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .icon(
+                                UiIcon::new(PhosphorIcon::Clipboard).text_color(muted_foreground),
+                            )
+                            .label("Copy")
                             .tooltip("Copy CLI install command")
                             .disabled(cli_command.is_none())
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -728,9 +728,10 @@ impl WrecApp {
                     .child(row_label("Logs"))
                     .child(
                         UiButton::new("open-recordings-data-dir")
-                            .outline()
+                            .secondary()
                             .compact()
                             .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .icon(
                                 UiIcon::new(PhosphorIcon::FolderOpen).text_color(muted_foreground),
                             )
@@ -781,9 +782,10 @@ impl WrecApp {
             ))
             .child(
                 UiButton::new("open-github")
-                    .outline()
+                    .secondary()
                     .w_full()
                     .h(px(CONTROL_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .icon(UiIcon::new(PhosphorIcon::Github).text_color(muted_foreground))
                     .label("GitHub")
                     .tooltip("Open GitHub repository")
@@ -818,7 +820,7 @@ impl Render for WrecApp {
         let (record_icon, record_label, record_tip, record_is_idle) = if active_session {
             (PhosphorIcon::Stop, "Stop", "Stop recording", false)
         } else {
-            (PhosphorIcon::Record, "Rec", "Start recording", true)
+            (PhosphorIcon::FilmReel, "Record", "Start recording", true)
         };
         let (pause_icon, pause_label, pause_tip) = if self.recorder_state.is_paused() {
             (PhosphorIcon::Play, "Resume", "Resume recording")
@@ -862,10 +864,16 @@ impl Render for WrecApp {
             .border_color(border)
             .bg(background)
             .text_color(foreground)
+            .text_size(px(15.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .flex()
+            .flex_col()
+            .child(self.render_title_bar(cx))
             .child(
                 div()
                     .flex()
-                    .size_full()
+                    .flex_1()
+                    .min_h(px(0.))
                     .child(self.render_sidebar(cx))
                     .child(
                         div()
@@ -873,7 +881,7 @@ impl Render for WrecApp {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .pt_2()
+                            .pt_4()
                             .pb_4()
                             .pl_4()
                             .pr_3()
@@ -923,23 +931,14 @@ impl Render for WrecApp {
 
 type SidebarClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
-fn sidebar_header(is_dark: bool, cx: &mut Context<WrecApp>) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .h(px(HEADER_HEIGHT))
-        .pl(px(SIDEBAR_LEFT_INSET))
-        .pr_2()
-        .child(div().size(px(22.)).bg(rgb(0xc62828)))
-        .child(
-            div()
-                .flex_1()
-                .h_full()
-                .window_control_area(WindowControlArea::Drag),
-        )
-        .child(theme_toggle(is_dark, cx))
+/// Toned-down "on" color for switches — pure-white (primary) reads too loud on
+/// the pitch-black background, so use a soft gray in dark mode.
+fn switch_on_color(cx: &Context<WrecApp>) -> Hsla {
+    if cx.theme().mode.is_dark() {
+        Hsla::from(rgb(0xb0b0b8))
+    } else {
+        cx.theme().primary
+    }
 }
 
 #[derive(Clone)]
@@ -950,6 +949,7 @@ struct WrecSidebarNav {
 #[derive(Clone)]
 struct WrecSidebarNavItem {
     label: &'static str,
+    icon: PhosphorIcon,
     tab: AppTab,
     active: bool,
     on_click: SidebarClickHandler,
@@ -976,6 +976,7 @@ impl WrecSidebarNav {
 
 fn sidebar_nav_item(
     label: &'static str,
+    icon: PhosphorIcon,
     tab: AppTab,
     active: bool,
     cx: &mut Context<WrecApp>,
@@ -989,6 +990,7 @@ fn sidebar_nav_item(
 
     WrecSidebarNavItem {
         label,
+        icon,
         tab,
         active,
         on_click,
@@ -996,20 +998,18 @@ fn sidebar_nav_item(
 }
 
 fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl IntoElement {
-    let active_bg = if cx.theme().mode.is_dark() {
-        Hsla::from(rgb(0x343434))
-    } else {
-        Hsla::from(rgb(0xe4e4e4))
-    };
-    let hover_bg = if cx.theme().mode.is_dark() {
-        Hsla::from(rgb(0x2d2d2d))
-    } else {
-        Hsla::from(rgb(0xeeeeee))
-    };
+    // Clean filled pill, inset from the sidebar edges, for the selected/hovered item.
+    let active_bg = cx.theme().accent;
+    let hover_bg = cx.theme().muted;
     let color = if item.active {
         cx.theme().sidebar_accent_foreground
     } else {
         cx.theme().sidebar_foreground
+    };
+    let icon_color = if item.active {
+        cx.theme().sidebar_accent_foreground
+    } else {
+        cx.theme().muted_foreground
     };
     let on_click = item.on_click.clone();
 
@@ -1017,35 +1017,42 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
         .id(format!("sidebar-nav-{}", item.tab.id()))
         .flex()
         .items_center()
-        .gap_2()
         .w_full()
-        .h(px(CONTROL_HEIGHT))
-        .text_sm()
-        .font_weight(if item.active {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::MEDIUM
-        })
-        .text_color(color)
-        .cursor_pointer()
-        .when(item.active, |this| {
-            this.bg(active_bg)
-                .text_color(cx.theme().sidebar_accent_foreground)
-        })
-        .when(!item.active, |this| {
-            this.hover(|this| {
-                this.bg(hover_bg)
-                    .text_color(cx.theme().sidebar_accent_foreground)
-            })
-        })
+        .px_2()
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.))
-                .pl(px(SIDEBAR_LEFT_INSET))
-                .pr_3()
-                .truncate()
-                .child(item.label),
+                .flex()
+                .items_center()
+                .gap_2p5()
+                .w_full()
+                .h(px(CONTROL_HEIGHT))
+                .px_2p5()
+                .rounded_lg()
+                .text_base()
+                .font_weight(if item.active {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::SEMIBOLD
+                })
+                .text_color(color)
+                .cursor_pointer()
+                .when(item.active, |this| {
+                    this.bg(active_bg)
+                        .text_color(cx.theme().sidebar_accent_foreground)
+                })
+                .when(!item.active, |this| {
+                    this.hover(|this| {
+                        this.bg(hover_bg)
+                            .text_color(cx.theme().sidebar_accent_foreground)
+                    })
+                })
+                .child(
+                    UiIcon::new(item.icon)
+                        .size(px(16.))
+                        .text_color(icon_color)
+                        .flex_shrink_0(),
+                )
+                .child(div().flex_1().min_w(px(0.)).truncate().child(item.label)),
         )
         .on_click(move |event, window, cx| {
             on_click(event, window, cx);
@@ -1071,8 +1078,9 @@ fn permission_state_button(
     };
     let button = UiButton::new("settings-screen-recording-state")
         .compact()
-        .outline()
+        .secondary()
         .h(px(CONTROL_HEIGHT))
+        .font_weight(FontWeight::SEMIBOLD)
         .label(label)
         .tooltip(tooltip)
         .disabled(busy || status.is_granted())
@@ -1097,7 +1105,8 @@ fn record_button(
 ) -> UiButton {
     let theme = cx.theme();
     let button = UiButton::new("record-button")
-        .h(px(CONTROL_HEIGHT))
+        .h(px(RECORD_BUTTON_HEIGHT))
+        .font_weight(FontWeight::SEMIBOLD)
         .icon(UiIcon::new(icon).text_color(if is_idle {
             theme.button_primary_foreground
         } else {
@@ -1126,8 +1135,9 @@ fn pause_button(
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
     UiButton::new("pause-button")
-        .outline()
-        .h(px(CONTROL_HEIGHT))
+        .secondary()
+        .h(px(RECORD_BUTTON_HEIGHT))
+        .font_weight(FontWeight::SEMIBOLD)
         .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
         .label(label)
         .tooltip(tooltip)
@@ -1141,14 +1151,17 @@ fn pause_button(
 fn field_label(label: &'static str, color: Hsla) -> Div {
     div().w(px(FIELD_LABEL_WIDTH)).flex_none().child(
         Label::new(label)
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
+            .text_base()
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(color),
     )
 }
 
 fn row_label(label: &'static str) -> Div {
-    div().text_sm().font_weight(FontWeight::MEDIUM).child(label)
+    div()
+        .text_base()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(label)
 }
 
 fn labeled_select_row(label: &'static str, color: Hsla, select: impl IntoElement) -> Div {
@@ -1167,19 +1180,49 @@ fn labeled_select_row(label: &'static str, color: Hsla, select: impl IntoElement
         )
 }
 
-fn theme_toggle(is_dark: bool, cx: &mut Context<WrecApp>) -> impl IntoElement {
+#[derive(Clone, Copy)]
+enum WinControl {
+    Close,
+    Min,
+    Zoom,
+}
+
+/// macOS-style traffic-light window control button.
+fn window_control(kind: WinControl) -> impl IntoElement {
+    let (id, color): (&'static str, u32) = match kind {
+        WinControl::Close => ("win-close", 0xff5f57),
+        WinControl::Min => ("win-min", 0xfebc2e),
+        WinControl::Zoom => ("win-zoom", 0x28c840),
+    };
     div()
-        .id("theme-mode")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(CONTROL_HEIGHT))
+        .id(id)
+        .size(px(12.))
+        .rounded_full()
+        .bg(rgb(color))
         .cursor_pointer()
-        .child(UiIcon::new(if is_dark {
+        .hover(|this| this.opacity(0.82))
+        .on_click(move |_, window, _cx| match kind {
+            WinControl::Close => window.remove_window(),
+            WinControl::Min => window.minimize_window(),
+            WinControl::Zoom => window.zoom_window(),
+        })
+}
+
+fn theme_toggle(is_dark: bool, cx: &mut Context<WrecApp>) -> impl IntoElement {
+    UiButton::new("theme-mode")
+        .ghost()
+        .compact()
+        .size(px(30.))
+        .icon(UiIcon::new(if is_dark {
             PhosphorIcon::Moon
         } else {
             PhosphorIcon::Sun
         }))
+        .tooltip(if is_dark {
+            "Switch to light mode"
+        } else {
+            "Switch to dark mode"
+        })
         .on_click(cx.listener(move |_, _, window, cx| {
             let mode = if is_dark {
                 ThemeMode::Light
@@ -1298,8 +1341,11 @@ fn apply_wrec_theme(cx: &mut App) {
 
     theme.font_family = GEIST_FONT_FAMILY.into();
     theme.mono_font_family = GEIST_MONO_FONT_FAMILY.into();
+    theme.font_size = px(14.);
+    // Flat, clean look: rounded-rectangle corners and no shadows anywhere.
     theme.radius = px(8.);
-    theme.radius_lg = px(8.);
+    theme.radius_lg = px(12.);
+    theme.shadow = false;
 
     theme.background = color(palette.background);
     theme.foreground = color(palette.foreground);
@@ -1308,12 +1354,15 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.popover = color(palette.popover);
     theme.popover_foreground = color(palette.popover_foreground);
     theme.primary = color(palette.primary);
-    theme.primary_hover = theme.primary.mix(theme.foreground, 0.12);
-    theme.primary_active = theme.primary.mix(theme.foreground, 0.2);
+    // Explicit hover/active ramp, following gpui-component's own convention
+    // (filled buttons shift their own lightness on interaction) instead of a
+    // derived mix — `primary` equals `foreground` here so a mix would be a no-op.
+    theme.primary_hover = color(palette.primary_hover);
+    theme.primary_active = color(palette.primary_active);
     theme.primary_foreground = color(palette.primary_foreground);
     theme.secondary = color(palette.secondary);
-    theme.secondary_hover = theme.secondary.mix(theme.foreground, 0.08);
-    theme.secondary_active = theme.secondary.mix(theme.foreground, 0.14);
+    theme.secondary_hover = color(palette.secondary_hover);
+    theme.secondary_active = color(palette.secondary_active);
     theme.secondary_foreground = color(palette.secondary_foreground);
     theme.muted = color(palette.muted);
     theme.muted_foreground = color(palette.muted_foreground);
@@ -1325,8 +1374,9 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.danger_foreground = color(palette.destructive_foreground);
     theme.border = color(palette.border);
     theme.input = color(palette.input);
-    theme.ring = theme.input;
-    theme.caret = color(palette.ring);
+    // Neutral focus ring / caret — no colored accent on focused controls.
+    theme.ring = theme.border;
+    theme.caret = theme.foreground;
     theme.chart_1 = color(palette.chart_1);
     theme.chart_2 = color(palette.chart_2);
     theme.chart_3 = color(palette.chart_3);
@@ -1366,13 +1416,19 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.tab_active = theme.accent;
     theme.tab_active_foreground = theme.accent_foreground;
     theme.tab_foreground = theme.muted_foreground;
-    theme.switch = theme.muted;
+    // Off-state track: `muted` is nearly invisible against the pitch-black
+    // background, so use a clearly visible neutral gray in each mode.
+    theme.switch = if theme.mode.is_dark() {
+        color(0x3f3f46)
+    } else {
+        color(0xd4d4d8)
+    };
     theme.switch_thumb = theme.popover;
     theme.skeleton = theme.muted;
     theme.slider_bar = theme.primary;
     theme.slider_thumb = theme.primary_foreground;
     theme.progress_bar = theme.primary;
-    theme.selection = color(palette.ring).opacity(0.24);
+    theme.selection = theme.foreground.opacity(0.14);
     theme.link = theme.primary;
     theme.link_hover = theme.primary_hover;
     theme.link_active = theme.primary_active;
