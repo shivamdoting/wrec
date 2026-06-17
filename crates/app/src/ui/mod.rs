@@ -49,8 +49,12 @@ struct ThemePalette {
     popover: u32,
     popover_foreground: u32,
     primary: u32,
+    primary_hover: u32,
+    primary_active: u32,
     primary_foreground: u32,
     secondary: u32,
+    secondary_hover: u32,
+    secondary_active: u32,
     secondary_foreground: u32,
     muted: u32,
     muted_foreground: u32,
@@ -82,8 +86,12 @@ const LIGHT_PALETTE: ThemePalette = ThemePalette {
     popover: 0xffffff,
     popover_foreground: 0x18181b,
     primary: 0x18181b,
+    primary_hover: 0x333338,
+    primary_active: 0x000000,
     primary_foreground: 0xfafafa,
     secondary: 0xededf0,
+    secondary_hover: 0xe1e1e6,
+    secondary_active: 0xd6d6dc,
     secondary_foreground: 0x18181b,
     muted: 0xf4f4f5,
     muted_foreground: 0x71717a,
@@ -108,36 +116,40 @@ const LIGHT_PALETTE: ThemePalette = ThemePalette {
 };
 
 const DARK_PALETTE: ThemePalette = ThemePalette {
-    background: 0x0e0e10,
+    background: 0x000000,
     foreground: 0xfafafa,
-    card: 0x18181b,
+    card: 0x141416,
     card_foreground: 0xfafafa,
-    popover: 0x18181b,
+    popover: 0x141416,
     popover_foreground: 0xfafafa,
     primary: 0xfafafa,
-    primary_foreground: 0x18181b,
-    secondary: 0x27272a,
+    primary_hover: 0xe2e2e6,
+    primary_active: 0xcacace,
+    primary_foreground: 0x0a0a0a,
+    secondary: 0x1f1f22,
+    secondary_hover: 0x2b2b2f,
+    secondary_active: 0x343438,
     secondary_foreground: 0xfafafa,
-    muted: 0x1c1c1f,
+    muted: 0x161618,
     muted_foreground: 0xa1a1aa,
-    accent: 0x27272a,
+    accent: 0x1f1f22,
     accent_foreground: 0xfafafa,
     destructive: 0xe5484d,
     destructive_foreground: 0xffffff,
-    border: 0x27272a,
-    input: 0x27272a,
+    border: 0x232326,
+    input: 0x232326,
     chart_1: 0xfafafa,
-    chart_2: 0x27272a,
-    chart_3: 0x27272a,
+    chart_2: 0x1f1f22,
+    chart_3: 0x1f1f22,
     chart_4: 0x3f3f46,
     chart_5: 0xfafafa,
-    sidebar: 0x131316,
+    sidebar: 0x0b0b0c,
     sidebar_foreground: 0xfafafa,
     sidebar_primary: 0xfafafa,
-    sidebar_primary_foreground: 0x18181b,
-    sidebar_accent: 0x232327,
+    sidebar_primary_foreground: 0x0a0a0a,
+    sidebar_accent: 0x1f1f22,
     sidebar_accent_foreground: 0xfafafa,
-    sidebar_border: 0x232327,
+    sidebar_border: 0x1c1c1f,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1306,14 +1318,15 @@ fn apply_wrec_theme(cx: &mut App) {
     theme.popover = color(palette.popover);
     theme.popover_foreground = color(palette.popover_foreground);
     theme.primary = color(palette.primary);
-    // `primary` equals `foreground` in this palette, so mix toward `background`
-    // (the contrasting end) to get a visible hover/press on the dark CTA.
-    theme.primary_hover = theme.primary.mix(theme.background, 0.16);
-    theme.primary_active = theme.primary.mix(theme.background, 0.28);
+    // Explicit hover/active ramp, following gpui-component's own convention
+    // (filled buttons shift their own lightness on interaction) instead of a
+    // derived mix — `primary` equals `foreground` here so a mix would be a no-op.
+    theme.primary_hover = color(palette.primary_hover);
+    theme.primary_active = color(palette.primary_active);
     theme.primary_foreground = color(palette.primary_foreground);
     theme.secondary = color(palette.secondary);
-    theme.secondary_hover = theme.secondary.mix(theme.foreground, 0.1);
-    theme.secondary_active = theme.secondary.mix(theme.foreground, 0.16);
+    theme.secondary_hover = color(palette.secondary_hover);
+    theme.secondary_active = color(palette.secondary_active);
     theme.secondary_foreground = color(palette.secondary_foreground);
     theme.muted = color(palette.muted);
     theme.muted_foreground = color(palette.muted_foreground);
