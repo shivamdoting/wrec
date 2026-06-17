@@ -314,24 +314,10 @@ impl WrecApp {
                 cx,
             )),
             Some(sidebar_nav_item(
-                "Settings",
-                PhosphorIcon::Gear,
-                AppTab::Settings,
-                AppTab::Settings.is_active(active),
-                cx,
-            )),
-            Some(sidebar_nav_item(
                 "CLI",
                 PhosphorIcon::Terminal,
                 AppTab::Cli,
                 AppTab::Cli.is_active(active),
-                cx,
-            )),
-            Some(sidebar_nav_item(
-                "About",
-                PhosphorIcon::Info,
-                AppTab::About,
-                AppTab::About.is_active(active),
                 cx,
             )),
             self.show_nerd_logs.then(|| {
@@ -343,6 +329,20 @@ impl WrecApp {
                     cx,
                 )
             }),
+            Some(sidebar_nav_item(
+                "Settings",
+                PhosphorIcon::Gear,
+                AppTab::Settings,
+                AppTab::Settings.is_active(active),
+                cx,
+            )),
+            Some(sidebar_nav_item(
+                "About",
+                PhosphorIcon::Info,
+                AppTab::About,
+                AppTab::About.is_active(active),
+                cx,
+            )),
         ]
         .into_iter()
         .flatten()
