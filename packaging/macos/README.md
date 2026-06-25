@@ -38,28 +38,15 @@ For release packaging:
 ```
 
 This creates `dist/release/Wrec.app` with the release Cargo profile,
-bundle id `app.wrec.wrec`, and a `.dmg` by default. Release packaging does not
+bundle id `app.wrec.wrec`, and a GitHub-facing dev DMG like
+`dist/release/wrec-0.1.0-dev.dmg` by default. Release packaging does not
 generate the companion README.
 
 Release packaging uses `images/wrec.png` as the app icon.
 
-For Developer ID signing a release:
-
-```bash
-CODESIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" \
-./scripts/package-macos.sh release
-```
-
-For notarization, provide App Store Connect credentials and enable notarization:
-
-```bash
-CODESIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" \
-APPLE_ID="dev@example.com" \
-APPLE_TEAM_ID="TEAMID" \
-APPLE_APP_PASSWORD="app-specific-password" \
-NOTARIZE=1 \
-./scripts/package-macos.sh release
-```
+Release artifacts are unsigned dev builds. The app bundle is ad-hoc signed so
+the bundle is internally consistent, but macOS Gatekeeper will still warn users
+because there is no Developer ID signature or notarization.
 
 Set `ICON_SOURCE=/path/to/icon.png` to override the channel's default icon.
 
@@ -74,7 +61,8 @@ wrec-cli/
   capture-engine
 ```
 
-The resulting archive is written to `dist/cli/wrec-cli-<target>.tar.gz`.
+The resulting release archive is written to
+`dist/cli/wrec-cli-<target>-dev.tar.gz`.
 `scripts/install-cli.sh` installs that runtime under `/usr/local/lib/wrec` and
 places a managed wrapper at `/usr/local/bin/wrec`.
 
@@ -89,13 +77,5 @@ tag is pushed and the tagged commit is on `origin/main`. GitHub Actions cannot
 filter tags by source branch in the trigger itself, so the workflow does an
 explicit ancestry check before packaging.
 
-The workflow uploads the notarized `.dmg` and the standalone CLI runtime archive
-as GitHub Release assets. Required repository secrets:
-
-- `MACOS_CERTIFICATE_BASE64` - base64-encoded Developer ID Application `.p12`
-- `MACOS_CERTIFICATE_PASSWORD` - password for that `.p12`
-- `MACOS_KEYCHAIN_PASSWORD` - temporary CI keychain password
-- `MACOS_CODESIGN_IDENTITY` - Developer ID Application identity name
-- `APPLE_ID` - App Store Connect Apple ID
-- `APPLE_TEAM_ID` - Apple developer team id
-- `APPLE_APP_PASSWORD` - app-specific password for notarization
+The workflow uploads the unsigned dev `.dmg` and standalone CLI runtime archive
+as GitHub Release assets. It does not require Apple Developer Program secrets.

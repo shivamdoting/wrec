@@ -62,47 +62,47 @@ jobs:
           swiftc --version
           xcodebuild -version
 
-      - name: Import Developer ID certificate
+      - name: Check
+        run: |
+          cargo fmt --check
+          cargo check
+          cargo test
+
+      - name: Package unsigned dev DMG
         env:
-          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          ARTIFACT_QUALIFIER: dev
+        run: ./scripts/package-macos.sh release
+
+      - name: Package dev CLI runtime
+        env:
+          ARTIFACT_QUALIFIER: dev
+        run: ./scripts/package-cli-macos.sh release
+
+      - name: Verify release artifacts
         run: |
           set -euo pipefail
 
-          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
-          keychain_path="$RUNNER_TEMP/wrec-signing.keychain-db"
+          case "$(uname -m)" in
+            arm64) target="aarch64-apple-darwin" ;;
+            x86_64) target="x86_64-apple-darwin" ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
 
-          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security import "$certificate_path" \
-            -P "$MACOS_CERTIFICATE_PASSWORD" \
-            -A \
-            -t cert \
-            -f pkcs12 \
-            -k "$keychain_path"
-          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
-            -s \
-            -k "$KEYCHAIN_PASSWORD" \
-            "$keychain_path"
+          dmg="dist/release/wrec-${{ steps.tag.outputs.version }}-dev.dmg"
+          cli_archive="dist/cli/wrec-cli-$target-dev.tar.gz"
 
-      - name: Package, sign, and notarize
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
-          ARTIFACT_VERSION: ${{ steps.tag.outputs.version }}
-          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          NOTARIZE: "1"
-        run: ./scripts/package-macos.sh release
+          test -f "$dmg"
+          test -f "$cli_archive"
+          codesign --verify --deep --strict --verbose=2 dist/release/Wrec.app
+          tar -tzf "$cli_archive" | grep -qx 'wrec-cli/wrec'
+          tar -tzf "$cli_archive" | grep -qx 'wrec-cli/daemon'
+          tar -tzf "$cli_archive" | grep -qx 'wrec-cli/capture-engine'
 
-      - name: Package CLI runtime
-        run: ./scripts/package-cli-macos.sh release
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          codesign --verify --deep --strict --verbose=2 "$mount_dir/Wrec.app"
+          hdiutil detach "$mount_dir"
 
       - name: Publish GitHub Release
         env:
@@ -115,5 +115,5 @@ jobs:
             dist/cli/*.tar.gz \
             --target "${{ steps.tag.outputs.commit }}" \
             --title "$GITHUB_REF_NAME" \
-            --notes "macOS release for $GITHUB_REF_NAME" \
+            --notes "Unsigned macOS dev build for $GITHUB_REF_NAME. macOS will show an unsigned-app warning." \
             --verify-tag

@@ -185,9 +185,20 @@ BUILT_BY="$(id -un 2>/dev/null || whoami 2>/dev/null || echo unknown)"
 BUILD_HOST="$(hostname 2>/dev/null || echo unknown)"
 ARTIFACT_VERSION="${ARTIFACT_VERSION:-$VERSION}"
 
-if [[ "$CHANNEL" == "dev" ]]; then
-  ARTIFACT_VERSION="${ARTIFACT_VERSION}-dev-$GIT_SHA"
+case "$CHANNEL" in
+  dev)
+    ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER:-dev-$GIT_SHA}"
+    ;;
+  release)
+    ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER-dev}"
+    ;;
+esac
+
+if [[ -n "${ARTIFACT_QUALIFIER:-}" ]]; then
+  ARTIFACT_VERSION="${ARTIFACT_VERSION}-${ARTIFACT_QUALIFIER}"
 fi
+
+DMG_NAME="${DMG_NAME:-wrec-$ARTIFACT_VERSION.dmg}"
 
 if [[ "$NOTARIZE" == "1" && "$CODESIGN_IDENTITY" == "-" ]]; then
   die "NOTARIZE=1 requires CODESIGN_IDENTITY to be a Developer ID Application identity"
@@ -212,9 +223,11 @@ log "App name: $APP_NAME"
 log "Bundle id: $BUNDLE_ID"
 log "Cargo profile: $PROFILE_DIR"
 log "Version: $VERSION"
+log "Artifact version: $ARTIFACT_VERSION"
 log "Output app: $APP"
 log "Icon source: $ICON_SOURCE"
 log "Dmg enabled: $CREATE_DMG"
+log "Dmg name: $DMG_NAME"
 log "Notarization enabled: $NOTARIZE"
 
 log "Building Rust app"
@@ -279,9 +292,9 @@ if [[ "$CHANNEL" == "dev" ]]; then
 fi
 
 if [[ "$CREATE_DMG" == "1" ]]; then
-  DMG="$DIST_DIR/$APP_NAME-$ARTIFACT_VERSION.dmg"
+  DMG="$DIST_DIR/$DMG_NAME"
   log "Creating dmg: $DMG"
-  run rm -f "$DMG"
+  run rm -f "$DIST_DIR"/*.dmg
   run hdiutil create -volname "$APP_NAME" -srcfolder "$APP" -ov -format UDZO "$DMG"
   log "Created dmg: $DMG"
 

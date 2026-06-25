@@ -63,11 +63,20 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DIST_DIR="$ROOT/dist/cli"
 STAGE="$DIST_DIR/wrec-cli"
 TARGET="$(target_triple)"
-ARCHIVE="$DIST_DIR/wrec-cli-$TARGET.tar.gz"
+case "$CHANNEL" in
+  release) ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER-dev}" ;;
+  *) ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER:-}" ;;
+esac
+ARCHIVE_SUFFIX=""
+if [[ -n "${ARTIFACT_QUALIFIER:-}" ]]; then
+  ARCHIVE_SUFFIX="-$ARTIFACT_QUALIFIER"
+fi
+ARCHIVE="$DIST_DIR/wrec-cli-$TARGET$ARCHIVE_SUFFIX.tar.gz"
 
 log "Packaging channel: $CHANNEL"
 log "Cargo profile: $PROFILE_DIR"
 log "Target: $TARGET"
+log "Archive: $ARCHIVE"
 
 log "Building CLI"
 run cargo "${cargo_args[@]}" -p cli --bin wrec
@@ -94,6 +103,6 @@ run cp "$TARGET_DIR/$PROFILE_DIR/wrec" "$STAGE/wrec"
 run cp "$TARGET_DIR/$PROFILE_DIR/daemon" "$STAGE/daemon"
 run cp "$CAPTURE_ENGINE" "$STAGE/capture-engine"
 
-run rm -f "$ARCHIVE"
+run rm -f "$DIST_DIR"/wrec-cli-"$TARGET"*.tar.gz
 run tar -C "$DIST_DIR" -czf "$ARCHIVE" wrec-cli
 log "Created $ARCHIVE"

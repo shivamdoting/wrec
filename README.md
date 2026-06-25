@@ -260,9 +260,10 @@ Release builds are explicit:
 ./scripts/package-macos.sh release
 ```
 
-This uses Cargo's release profile and creates `dist/release/Wrec.app`.
-Release packaging does not create a companion README. The release app icon is
-generated from `images/wrec.png`.
+This uses Cargo's release profile and creates `dist/release/Wrec.app` plus a
+GitHub-facing dev DMG like `dist/release/wrec-0.1.0-dev.dmg`. Release packaging
+does not create a companion README. The release app icon is generated from
+`images/wrec.png`.
 
 Both channels copy the Rust GPUI app as `wrec-app`, copy the daemon as `daemon`,
 copy the compiled Swift `capture-engine`, and sign each executable. Dev builds
@@ -275,29 +276,23 @@ The standalone CLI runtime is packaged separately:
 ./scripts/package-cli-macos.sh release
 ```
 
+Release CLI packaging writes an archive like
+`dist/cli/wrec-cli-aarch64-apple-darwin-dev.tar.gz`.
+
 Install it with:
 
 ```bash
 curl -fsSL https://wrec-beta.vercel.app/install | sh
 ```
 
-Local packaging uses ad-hoc signing by default. Developer ID signing and
-notarization can be enabled for release builds with environment variables:
-
-```bash
-CODESIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" \
-APPLE_ID="dev@example.com" \
-APPLE_TEAM_ID="TEAMID" \
-APPLE_APP_PASSWORD="app-specific-password" \
-NOTARIZE=1 \
-./scripts/package-macos.sh release
-```
+Local packaging uses ad-hoc signing. GitHub releases are unsigned dev builds,
+so macOS will show an unsigned-app warning when users open the app.
 
 Runtime app data lives in `~/Library/Application Support/Wrec`.
 Recordings default to `~/Movies/<app name>`.
 
 Pushing a `v*` tag whose commit is on `main` runs the release workflow and
-uploads the notarized `.dmg` to GitHub Releases.
+uploads the unsigned dev `.dmg` and CLI archive to GitHub Releases.
 
 ## Current Limitations
 

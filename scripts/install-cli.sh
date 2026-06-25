@@ -4,6 +4,7 @@ set -eu
 PREFIX="${WREC_PREFIX:-/usr/local}"
 VERSION="${WREC_VERSION:-latest}"
 REPO="${WREC_REPO:-shivamhwp/wrec}"
+ARTIFACT_QUALIFIER="${WREC_ARTIFACT_QUALIFIER-dev}"
 BIN_DIR="$PREFIX/bin"
 LIB_DIR="$PREFIX/lib/wrec"
 BIN="$BIN_DIR/wrec"
@@ -58,7 +59,11 @@ target_name() {
 
 download_url() {
   target="$(target_name)"
-  asset="wrec-cli-$target.tar.gz"
+  asset="wrec-cli-$target"
+  if [ -n "$ARTIFACT_QUALIFIER" ]; then
+    asset="$asset-$ARTIFACT_QUALIFIER"
+  fi
+  asset="$asset.tar.gz"
 
   if [ "$VERSION" = "latest" ]; then
     echo "https://github.com/$REPO/releases/latest/download/$asset"
@@ -101,9 +106,9 @@ if [ -z "${WREC_CLI_ARCHIVE:-}" ]; then
 Could not download the wrec CLI package.
 URL: $url
 
-This usually means there is no GitHub Release asset named wrec-cli-$target.tar.gz.
+This usually means there is no GitHub Release asset named $asset.
 Publish a v* release, set WREC_VERSION to an existing tag, or install from a local archive:
-  curl -fsSL https://wrec-beta.vercel.app/install | WREC_CLI_ARCHIVE=/path/to/wrec-cli-$target.tar.gz sh
+  curl -fsSL https://wrec-beta.vercel.app/install | WREC_CLI_ARCHIVE=/path/to/$asset sh
 EOF
     exit 1
   fi

@@ -20,6 +20,7 @@ use std::{
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(debug_assertions)]
 const CARGO_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
