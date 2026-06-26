@@ -262,8 +262,8 @@ Release builds are explicit:
 
 This uses Cargo's release profile and creates `dist/release/Wrec.app` plus a
 GitHub-facing dev DMG like `dist/release/wrec-0.1.0-dev.dmg`. Release packaging
-does not create a companion README. The release app icon is generated from
-`images/wrec.png`.
+does not create a companion README. The GitHub-facing dev DMG uses the dev app
+icon from `images/wrec-dev.png`.
 
 Both channels copy the Rust GPUI app as `wrec-app`, copy the daemon as `daemon`,
 copy the compiled Swift `capture-engine`, and sign each executable. Dev builds

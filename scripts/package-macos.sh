@@ -149,7 +149,7 @@ case "$CHANNEL" in
     DEFAULT_BUNDLE_ID="app.wrec.wrec"
     DEFAULT_PROFILE="release"
     DEFAULT_CREATE_DMG="1"
-    DEFAULT_ICON_SOURCE="$ROOT/images/wrec.png"
+    DEFAULT_ICON_SOURCE="$ROOT/images/wrec-dev.png"
     ;;
   -h | --help | help)
     usage
@@ -293,9 +293,15 @@ fi
 
 if [[ "$CREATE_DMG" == "1" ]]; then
   DMG="$DIST_DIR/$DMG_NAME"
+  DMG_ROOT="$DIST_DIR/dmg-root"
   log "Creating dmg: $DMG"
   run rm -f "$DIST_DIR"/*.dmg
-  run hdiutil create -volname "$APP_NAME" -srcfolder "$APP" -ov -format UDZO "$DMG"
+  run rm -rf "$DMG_ROOT"
+  run mkdir -p "$DMG_ROOT"
+  run cp -R "$APP" "$DMG_ROOT/$APP_NAME.app"
+  run ln -s /Applications "$DMG_ROOT/Applications"
+  run hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
+  run rm -rf "$DMG_ROOT"
   log "Created dmg: $DMG"
 
   if [[ "$NOTARIZE" == "1" ]]; then

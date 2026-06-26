@@ -42,7 +42,8 @@ bundle id `app.wrec.wrec`, and a GitHub-facing dev DMG like
 `dist/release/wrec-0.1.0-dev.dmg` by default. Release packaging does not
 generate the companion README.
 
-Release packaging uses `images/wrec.png` as the app icon.
+Release packaging uses `images/wrec-dev.png` as the app icon while GitHub
+artifacts are still dev-labelled.
 
 Release artifacts are unsigned dev builds. The app bundle is ad-hoc signed so
 the bundle is internally consistent, but macOS Gatekeeper will still warn users
