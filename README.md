@@ -65,12 +65,6 @@ The CLI installer grabs the release archive for your Mac, installs the runtime
 under `/usr/local/lib/wrec`, and places a managed wrapper at
 `/usr/local/bin/wrec`.
 
-If you are testing a local CLI archive instead:
-
-```bash
-curl -fsSL https://wrec-beta.vercel.app/install | WREC_CLI_ARCHIVE=/path/to/wrec-cli-aarch64-apple-darwin-dev.tar.gz sh
-```
-
 ## Requirements
 
 - macOS 15+.
@@ -294,13 +288,12 @@ package contains `wrec`, `daemon`, and `capture-engine`, so it can run without
 copying anything out of the app bundle.
 
 Pushing a `v*` tag whose commit is on `main` runs the release workflow and
-uploads the unsigned dev `.dmg` and CLI archive to GitHub Releases.
+uploads the `.dmg` and CLI archive to GitHub Releases.
 
 ## Current Limitations
 
 - Microphone capture is not implemented.
 - Output is currently `.mov`.
-- Release artifacts are unsigned dev builds and are not notarized.
 - Compression is AVAssetWriter-managed so disk writing, audio muxing, and media
   finalization stay inside AVFoundation.
 - Pause/resume currently retimes samples after a pause. A future efficiency pass
