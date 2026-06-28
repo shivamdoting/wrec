@@ -18,10 +18,12 @@ use domain::{
 use futures::{channel::mpsc::UnboundedSender, StreamExt};
 use gpui::*;
 use gpui_component::{
+    button::ButtonVariant,
+    dialog::DialogButtonProps,
     input::{InputEvent, InputState},
     notification::Notification,
     select::{SelectEvent, SelectState},
-    IndexPath,
+    IndexPath, WindowExt as _,
 };
 use std::{
     collections::VecDeque,
@@ -32,6 +34,8 @@ use std::{
 pub(crate) const GITHUB_URL: &str = "https://github.com/shivamhwp/wrec";
 
 const MAX_LOGS: usize = 80;
+
+actions!(wrec, [Quit, Minimize]);
 
 #[derive(Clone, Debug)]
 pub(crate) enum RecorderState {
@@ -108,6 +112,7 @@ pub(crate) struct WrecApp {
     pub(crate) last_recording_dir: Option<PathBuf>,
     pub(crate) show_nerd_logs: bool,
     pub(crate) logs: VecDeque<String>,
+    quit_after_stop: bool,
     pub(crate) source_select: Entity<ControlSelect>,
     pub(crate) target_select: Entity<TargetSelect>,
     pub(crate) codec_select: Entity<ControlSelect>,
@@ -238,6 +243,7 @@ impl WrecApp {
             last_recording_dir: None,
             show_nerd_logs: config.show_nerd_logs,
             logs: VecDeque::new(),
+            quit_after_stop: false,
             source_select,
             target_select,
             codec_select,
@@ -710,16 +716,7 @@ impl WrecApp {
                 self.show_error("No active daemon job to stop", window, cx);
                 return;
             };
-            self.recorder_state = RecorderState::Stopping;
-            self.status = "Stopping".to_string();
-            self.push_log("stopping recording");
-            let daemon = self.daemon.clone();
-            let app_events = self.app_events.clone();
-            std::thread::spawn(move || {
-                let result = daemon.stop_job(job_id).map_err(agent_error_message);
-                let _ = app_events.unbounded_send(UiEvent::App(AppEvent::Stopped(result)));
-            });
-            cx.notify();
+            self.submit_stop_job(job_id, "stopping recording", cx);
             return;
         }
 
@@ -734,6 +731,111 @@ impl WrecApp {
         };
 
         self.start_recording(target, cx);
+    }
+
+    pub(crate) fn on_quit_action(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_quit(window, cx);
+    }
+
+    pub(crate) fn on_minimize_action(
+        &mut self,
+        _: &Minimize,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    pub(crate) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.recorder_state.is_active_session()
+            && !matches!(self.recorder_state, RecorderState::Starting)
+        {
+            cx.quit();
+            return true;
+        }
+
+        if self.quit_after_stop || matches!(self.recorder_state, RecorderState::Stopping) {
+            self.quit_after_stop = true;
+            self.push_log("waiting for recording to stop before quitting");
+            cx.notify();
+            return false;
+        }
+
+        if !window.has_active_dialog(cx) {
+            self.show_quit_recording_dialog(window, cx);
+        }
+        false
+    }
+
+    fn show_quit_recording_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let app = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app = app.clone();
+            alert
+                .title("Recording in progress")
+                .description("Stop the current recording, save it, and quit Wrec?")
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("stop recording & quit")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("cancel")
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = app.update_in(cx, |app, window, cx| {
+                                app.stop_recording_and_quit(window, cx);
+                            });
+                            true
+                        })
+                        .on_cancel(|_, _, _| true),
+                )
+        });
+    }
+
+    fn stop_recording_and_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.recorder_state, RecorderState::Starting) {
+            self.quit_after_stop = true;
+            self.status = "Will quit after recording starts".to_string();
+            self.push_log("waiting for recording to start before quitting");
+            cx.notify();
+            return;
+        }
+
+        if matches!(self.recorder_state, RecorderState::Stopping) {
+            self.quit_after_stop = true;
+            self.push_log("waiting for recording to stop before quitting");
+            cx.notify();
+            return;
+        }
+
+        if self.recorder_state.is_busy() {
+            self.show_error(
+                "Recording is busy. Try quitting again in a moment.",
+                window,
+                cx,
+            );
+            return;
+        }
+
+        let Some(job_id) = self.active_job_id else {
+            self.show_error("No active daemon job to stop", window, cx);
+            return;
+        };
+
+        self.quit_after_stop = true;
+        self.submit_stop_job(job_id, "stopping recording before quit", cx);
+    }
+
+    fn submit_stop_job(&mut self, job_id: u64, log_message: &'static str, cx: &mut Context<Self>) {
+        self.recorder_state = RecorderState::Stopping;
+        self.status = "Stopping".to_string();
+        self.push_log(log_message);
+        let daemon = self.daemon.clone();
+        let app_events = self.app_events.clone();
+        std::thread::spawn(move || {
+            let result = daemon.stop_job(job_id).map_err(agent_error_message);
+            let _ = app_events.unbounded_send(UiEvent::App(AppEvent::Stopped(result)));
+        });
+        cx.notify();
     }
 
     fn start_recording(&mut self, target: CaptureTarget, cx: &mut Context<Self>) {
@@ -903,6 +1005,15 @@ impl WrecApp {
                 self.active_job_event_count = 0;
                 self.apply_job_snapshot(job, window, cx);
                 self.start_job_poll();
+                if self.quit_after_stop {
+                    if let Some(job_id) = self.active_job_id {
+                        self.submit_stop_job(job_id, "stopping recording before quit", cx);
+                    } else {
+                        self.quit_after_stop = false;
+                        self.show_error("No active daemon job to stop", window, cx);
+                    }
+                    return;
+                }
                 push_app_notification(
                     window,
                     Notification::new().message("Recording submitted"),
@@ -918,6 +1029,7 @@ impl WrecApp {
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
+                self.quit_after_stop = false;
                 self.recorder_state = RecorderState::Failed;
                 if is_permission_message(&message) {
                     self.permission_status = ScreenRecordingPermissionStatus::Missing;
@@ -972,6 +1084,7 @@ impl WrecApp {
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
+                self.quit_after_stop = false;
                 self.recorder_state = RecorderState::Failed;
                 cx.activate(true);
                 window.activate_window();
@@ -990,6 +1103,7 @@ impl WrecApp {
             return;
         }
 
+        let quit_after_stop = self.quit_after_stop;
         let was_stopping = matches!(self.recorder_state, RecorderState::Stopping);
         self.active_job_id.get_or_insert(job.id);
         if let Some(path) = job.output_path.clone() {
@@ -1041,15 +1155,22 @@ impl WrecApp {
                     .as_ref()
                     .map(|path| format!("Saved to {}", path.display()))
                     .unwrap_or_else(|| "Recording completed".to_string());
-                cx.activate(true);
-                window.activate_window();
-                if was_stopping {
+                if quit_after_stop {
+                    self.quit_after_stop = false;
+                    self.push_log("recording saved; quitting Wrec");
+                    cx.quit();
+                } else if was_stopping {
+                    cx.activate(true);
+                    window.activate_window();
                     self.open_last_recording_folder(window, cx);
                     push_app_notification(
                         window,
                         Notification::new().message("Recording stopped"),
                         cx,
                     );
+                } else {
+                    cx.activate(true);
+                    window.activate_window();
                 }
             }
             JobStatus::Failed | JobStatus::Cancelled => {
@@ -1063,6 +1184,7 @@ impl WrecApp {
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
+                self.quit_after_stop = false;
                 self.recorder_state = RecorderState::Failed;
                 self.status = message.clone();
                 if is_permission_message(&message) {

@@ -3,7 +3,7 @@ mod assets;
 mod platform;
 mod ui;
 
-use app::WrecApp;
+use app::{Minimize, Quit, WrecApp};
 use assets::{register_fonts, WrecAssets};
 use gpui::*;
 use gpui_component::Root;
@@ -23,6 +23,7 @@ fn main() {
         change_theme(gpui_component::ThemeMode::Light, None, cx);
         configure_notifications(cx);
         cx.activate(true);
+        cx.bind_keys(app_key_bindings());
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(
@@ -45,6 +46,13 @@ fn main() {
                 window.activate_window();
                 window.set_window_title("wrec");
                 let app = cx.new(|cx| WrecApp::new(window, cx));
+                window.on_window_should_close(cx, {
+                    let app = app.downgrade();
+                    move |_, cx| {
+                        app.update_in(cx, |app, window, cx| app.request_quit(window, cx))
+                            .unwrap_or(true)
+                    }
+                });
                 cx.new(|cx| Root::new(app, window, cx))
             })
             .expect("open window");
@@ -80,4 +88,34 @@ fn create_parent_dir(path: &Path) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+fn app_key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("cmd-q", Quit, None),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::app_key_bindings;
+    use crate::app::{Minimize, Quit};
+    use gpui::{Action, KeyBinding, Keystroke};
+
+    #[test]
+    fn app_key_bindings_include_minimize_and_quit() {
+        let bindings = app_key_bindings();
+
+        assert!(has_binding::<Minimize>(&bindings, "cmd-m"));
+        assert!(has_binding::<Quit>(&bindings, "cmd-q"));
+    }
+
+    fn has_binding<A: Action>(bindings: &[KeyBinding], keystroke: &str) -> bool {
+        let keystroke = Keystroke::parse(keystroke).expect("valid keystroke");
+        bindings.iter().any(|binding| {
+            binding.action().as_any().is::<A>()
+                && binding.match_keystrokes(&[keystroke.clone()]) == Some(false)
+        })
+    }
 }
