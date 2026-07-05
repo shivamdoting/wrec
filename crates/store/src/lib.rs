@@ -313,8 +313,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
 }
 
+impl StoreCommand {
+    fn kind(&self) -> &'static str {
+        match self {
+            StoreCommand::UpsertRecording(_) => "upsert recording",
+            StoreCommand::MarkRecordingStarted { .. } => "mark recording started",
+            StoreCommand::MarkRecordingFinished { .. } => "mark recording finished",
+            StoreCommand::UpdateDimensions { .. } => "update dimensions",
+            StoreCommand::AppendEvent(_) => "append event",
+            StoreCommand::AppendMetric(_) => "append metric",
+            StoreCommand::Shutdown => "shutdown",
+        }
+    }
+}
+
 fn writer_loop(conn: Connection, receiver: mpsc::Receiver<StoreCommand>) {
     for command in receiver {
+        let kind = command.kind();
         let result = match command {
             StoreCommand::UpsertRecording(recording) => upsert_recording(&conn, &recording),
             StoreCommand::MarkRecordingStarted { id } => mark_recording_started(&conn, id),
@@ -341,7 +356,9 @@ fn writer_loop(conn: Connection, receiver: mpsc::Receiver<StoreCommand>) {
         };
 
         if let Err(err) = result {
-            tracing::warn!("store write failed: {err}");
+            // Writes are fire-and-forget, so a dropped write never reaches the
+            // caller; the log line is the only trace history has a gap.
+            tracing::error!("store write failed ({kind}): {err}");
         }
     }
 }
@@ -376,7 +393,15 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             resolution = excluded.resolution,
             fps = excluded.fps,
             include_cursor = excluded.include_cursor,
-            include_system_audio = excluded.include_system_audio
+            include_system_audio = excluded.include_system_audio,
+            stopped_at_ms = NULL,
+            duration_ms = NULL,
+            file_size_bytes = NULL,
+            error_message = NULL,
+            native_width = NULL,
+            native_height = NULL,
+            output_width = NULL,
+            output_height = NULL
         ",
         params![
             u64_to_i64(recording.id),
@@ -763,13 +788,17 @@ mod tests {
         let conn = read_connection(&db);
         let row = conn
             .query_row(
-                "SELECT status, codec, fps FROM recordings WHERE id = 1",
+                "SELECT status, codec, fps, stopped_at_ms, duration_ms, file_size_bytes
+                 FROM recordings WHERE id = 1",
                 [],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
                     ))
                 },
             )
@@ -779,6 +808,9 @@ mod tests {
         assert_eq!(row.0, "starting");
         assert_eq!(row.1, "h264");
         assert_eq!(row.2, 30);
+        assert_eq!(row.3, None);
+        assert_eq!(row.4, None);
+        assert_eq!(row.5, None);
     }
 
     #[test]
