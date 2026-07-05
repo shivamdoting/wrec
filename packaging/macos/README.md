@@ -24,7 +24,7 @@ For contributor/dev packaging:
 ```
 
 This creates `dist/dev/Wrec Dev.app` with the dev Cargo profile, ad-hoc
-signing, bundle id `app.wrec.wrec.dev`, shared app data in
+signing, bundle id `app.wrec.dev`, shared app data in
 `~/Library/Application Support/Wrec`, and recordings in `~/Movies/Wrec Dev`.
 It also writes `dist/dev/README.md` on every run with the local commands and
 build details for that generated app.
@@ -38,7 +38,7 @@ For release packaging:
 ```
 
 This creates `dist/release/Wrec Dev.app` with the release Cargo profile,
-bundle id `app.wrec.wrec.dev`, and a GitHub-facing dev DMG like
+bundle id `app.wrec.dev`, and a GitHub-facing dev DMG like
 `dist/release/wrec-0.1.0-dev.dmg` by default. Release packaging does not
 generate the companion README.
 

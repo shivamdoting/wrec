@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>wrec-app</string>
 	<key>CFBundleIdentifier</key>
-	<string>app.wrec.wrec.dev</string>
+	<string>app.wrec.dev</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

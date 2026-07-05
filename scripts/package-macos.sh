@@ -141,14 +141,14 @@ case "$CHANNEL" in
   dev | nightly)
     CHANNEL="dev"
     DEFAULT_APP_NAME="Wrec Dev"
-    DEFAULT_BUNDLE_ID="app.wrec.wrec.dev"
+    DEFAULT_BUNDLE_ID="app.wrec.dev"
     DEFAULT_PROFILE="dev"
     DEFAULT_CREATE_DMG="0"
     DEFAULT_ICON_SOURCE="$ROOT/images/wrec-dev.png"
     ;;
   release)
     DEFAULT_APP_NAME="Wrec Dev"
-    DEFAULT_BUNDLE_ID="app.wrec.wrec.dev"
+    DEFAULT_BUNDLE_ID="app.wrec.dev"
     DEFAULT_PROFILE="release"
     DEFAULT_CREATE_DMG="1"
     DEFAULT_ICON_SOURCE="$ROOT/images/wrec-dev.png"

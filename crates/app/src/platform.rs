@@ -99,7 +99,7 @@ fn is_dev_app(app: &Path) -> bool {
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("Dev"));
     let info_is_dev = fs::read_to_string(app.join("Contents").join("Info.plist"))
-        .is_ok_and(|info| info.contains("app.wrec.wrec.dev") || info.contains("Wrec Dev"));
+        .is_ok_and(|info| info.contains("app.wrec.dev") || info.contains("Wrec Dev"));
 
     name_is_dev || info_is_dev
 }
