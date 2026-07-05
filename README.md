@@ -54,7 +54,14 @@ JSON-friendly CLI for scripts and agents.
 Download the latest macOS app from
 <a href="https://github.com/shivamhwp/wrec/releases" target="_blank" rel="noopener noreferrer">GitHub Releases</a>.
 
-The standalone CLI can be installed with:
+Both are also on Homebrew:
+
+```bash
+brew install shivamhwp/tap/wrec-cli     # CLI for terminals, scripts, agents
+brew install --cask shivamhwp/tap/wrec  # the app
+```
+
+The standalone CLI can also be installed with:
 
 ```bash
 curl -fsSL https://wrec-beta.vercel.app/install | sh
