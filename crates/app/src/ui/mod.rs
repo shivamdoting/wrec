@@ -10,7 +10,7 @@ use domain::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::{Button as UiButton, ButtonVariants as _},
+    button::{Button as UiButton, ButtonVariant, ButtonVariants as _},
     input::Input,
     label::Label,
     notification::Notification,
@@ -1192,13 +1192,16 @@ fn record_button(
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
     let theme = cx.theme();
-    let button = UiButton::new("record-button")
+    // Recording keeps the solid primary button so stop carries the same
+    // weight as record; the red stop glyph is the destructive accent.
+    UiButton::new("record-button")
+        .primary()
         .h(px(RECORD_BUTTON_HEIGHT))
         .font_weight(FontWeight::SEMIBOLD)
         .icon(UiIcon::new(icon).text_color(if is_idle {
             theme.button_primary_foreground
         } else {
-            theme.danger_foreground
+            theme.danger
         }))
         .label(label)
         .tooltip(tooltip)
@@ -1206,13 +1209,7 @@ fn record_button(
         .on_click(cx.listener(|this, _, window, cx| {
             this.toggle_recording(window, cx);
             cx.notify();
-        }));
-
-    if is_idle {
-        button.primary()
-    } else {
-        button.danger()
-    }
+        }))
 }
 
 fn pause_button(
@@ -1223,10 +1220,10 @@ fn pause_button(
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
     UiButton::new("pause-button")
-        .secondary()
+        .with_variant(ButtonVariant::Default)
         .h(px(RECORD_BUTTON_HEIGHT))
         .font_weight(FontWeight::SEMIBOLD)
-        .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
+        .icon(UiIcon::new(icon).text_color(cx.theme().foreground))
         .label(label)
         .tooltip(tooltip)
         .disabled(disabled)
