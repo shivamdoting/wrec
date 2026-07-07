@@ -4,8 +4,8 @@ use crate::{
     platform::CliInstallStatus,
 };
 use domain::{
-    CaptureSourceKind, CaptureTarget, FrameRate, Quality, RecorderMetrics, Resolution,
-    ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, FrameRate, PermissionStatus, Quality, RecorderMetrics,
+    Resolution,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -32,6 +32,9 @@ pub(crate) const WINDOW_HEIGHT: f32 = 540.;
 pub(crate) const WINDOW_MIN_WIDTH: f32 = 608.;
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
+pub(crate) const PILL_WIDTH: f32 = 116.;
+pub(crate) const PILL_HEIGHT: f32 = 34.;
+pub(crate) const PILL_BOTTOM_MARGIN: f32 = 24.;
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 
@@ -465,18 +468,40 @@ impl WrecApp {
                     this.set_include_system_audio(*checked, cx);
                 })),
         );
-        let microphone_row = label_switch_row(
-            "Microphone",
-            muted_foreground,
-            Switch::new("microphone-switch")
-                .checked(self.settings.include_microphone)
-                .color(switch_on_color(cx))
-                .tooltip("Capture microphone")
-                .disabled(controls_disabled)
-                .on_click(cx.listener(|this, checked, _, cx| {
-                    this.set_include_microphone(*checked, cx);
-                })),
-        );
+        let mic_permission_missing =
+            self.settings.include_microphone && !self.mic_permission_status.is_granted();
+        let microphone_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .h(px(CONTROL_HEIGHT))
+            .gap_3()
+            .child(field_label("Microphone", muted_foreground))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(mic_permission_missing, |this| {
+                        this.child(mic_permission_button(
+                            "microphone-permission-grant",
+                            self.mic_permission_status,
+                            self.mic_permission_busy,
+                            cx,
+                        ))
+                    })
+                    .child(
+                        Switch::new("microphone-switch")
+                            .checked(self.settings.include_microphone)
+                            .color(switch_on_color(cx))
+                            .tooltip("Capture microphone")
+                            .disabled(controls_disabled)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.set_include_microphone(*checked, cx);
+                            })),
+                    ),
+            );
 
         div()
             .flex()
@@ -560,6 +585,21 @@ impl WrecApp {
                     .child(permission_state_button(
                         self.permission_status,
                         self.permission_busy,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .child(row_label("Microphone"))
+                    .child(mic_permission_button(
+                        "settings-microphone-state",
+                        self.mic_permission_status,
+                        self.mic_permission_busy,
                         cx,
                     )),
             )
@@ -1071,7 +1111,7 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
 }
 
 fn permission_state_button(
-    status: ScreenRecordingPermissionStatus,
+    status: PermissionStatus,
     busy: bool,
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
@@ -1097,6 +1137,43 @@ fn permission_state_button(
         .disabled(busy || status.is_granted())
         .on_click(cx.listener(|this, _, _, cx| {
             this.request_screen_recording_permission(cx);
+        }));
+
+    if !busy && !status.is_granted() {
+        button.primary()
+    } else {
+        button
+    }
+}
+
+fn mic_permission_button(
+    id: &'static str,
+    status: PermissionStatus,
+    busy: bool,
+    cx: &mut Context<WrecApp>,
+) -> UiButton {
+    let label = if busy {
+        "Checking"
+    } else if status.is_granted() {
+        "Granted"
+    } else {
+        "Grant"
+    };
+    let tooltip = if status.is_granted() {
+        "Microphone permission granted"
+    } else {
+        "Grant Microphone access. If macOS does not prompt, enable Wrec in System Settings > Privacy & Security > Microphone"
+    };
+    let button = UiButton::new(id)
+        .compact()
+        .secondary()
+        .h(px(CONTROL_HEIGHT))
+        .font_weight(FontWeight::SEMIBOLD)
+        .label(label)
+        .tooltip(tooltip)
+        .disabled(busy || status.is_granted())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.request_microphone_permission(cx);
         }));
 
     if !busy && !status.is_granted() {
@@ -1235,6 +1312,41 @@ fn switch_row(label: &'static str, value: &'static str, value_color: Hsla, switc
                 .child(div().text_sm().text_color(value_color).child(value)),
         )
         .child(switch)
+}
+
+/// Floating bottom-center indicator shown while a recording captures the
+/// microphone. Lives in its own always-on-top popup window so it stays
+/// visible when the main window is out of the way.
+pub(crate) struct RecordingPill;
+
+impl Render for RecordingPill {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(26.))
+                    .px_3()
+                    .rounded_full()
+                    .bg(rgba(0x111111e6))
+                    .border_1()
+                    .border_color(rgba(0xffffff26))
+                    .child(div().w_2().h_2().rounded_full().bg(rgb(0xe5484d)))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_family(GEIST_FONT_FAMILY)
+                            .text_color(rgb(0xffffff))
+                            .child("Mic on"),
+                    ),
+            )
+    }
 }
 
 fn label_switch_row(label: &'static str, color: Hsla, switch: Switch) -> Div {

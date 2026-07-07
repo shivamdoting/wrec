@@ -1,8 +1,8 @@
 use crate::runtime::RecordingRuntime;
 use control::{now_ms, AgentError};
 use domain::{
-    CaptureSourceKind, CaptureTarget, RecorderEngine, RecorderError, RecorderEvent,
-    RecorderSettings, RecordingSession, Result as RecorderResult, ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, PermissionStatus, RecorderEngine, RecorderError,
+    RecorderEvent, RecorderSettings, RecordingSession, Result as RecorderResult,
 };
 use std::{
     path::PathBuf,
@@ -71,16 +71,12 @@ impl RecordingRuntime for FakeRuntime {
         Ok((*self.targets).clone())
     }
 
-    fn screen_recording_permission_status(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError> {
-        Ok(ScreenRecordingPermissionStatus::Granted)
+    fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError> {
+        Ok(PermissionStatus::Granted)
     }
 
-    fn request_screen_recording_permission(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError> {
-        Ok(ScreenRecordingPermissionStatus::Granted)
+    fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError> {
+        Ok(PermissionStatus::Granted)
     }
 
     fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine {

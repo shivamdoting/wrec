@@ -89,6 +89,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
+ "macos",
  "phosphor-svgs",
  "tracing",
  "tracing-subscriber",

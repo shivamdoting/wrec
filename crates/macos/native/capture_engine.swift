@@ -374,6 +374,17 @@ func run() async {
         return
     }
 
+    if args.count >= 2 && args[1] == "--mic-permission-status" {
+        print(microphonePermissionGranted() ? "granted" : "missing")
+        return
+    }
+
+    if args.count >= 2 && args[1] == "--request-mic-permission" {
+        let granted = await requestMicrophonePermission()
+        print(granted ? "granted" : "missing")
+        return
+    }
+
     if args.count >= 2 && args[1] == "--list" {
         guard ensureScreenCapturePermission() else {
             fputs("capture-engine: permission denied: Screen Recording access is required\n", stderr)
@@ -402,6 +413,11 @@ func run() async {
 
     guard ensureScreenCapturePermission() else {
         fputs("capture-engine: permission denied: Screen Recording access is required\n", stderr)
+        Foundation.exit(13)
+    }
+
+    if includeMicrophone && microphonePermissionDenied() {
+        fputs("capture-engine: permission denied: Microphone access is required. Grant it in System Settings > Privacy & Security > Microphone, or disable the microphone toggle.\n", stderr)
         Foundation.exit(13)
     }
 
@@ -564,11 +580,49 @@ func ensureScreenCapturePermission() -> Bool {
     return CGRequestScreenCaptureAccess()
 }
 
-func wrecWindows(in content: SCShareableContent) -> [SCWindow] {
-    let wrecProcessID = getppid()
-    return content.windows.filter { window in
-        window.owningApplication?.processID == wrecProcessID
+func microphonePermissionGranted() -> Bool {
+    AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+}
+
+func microphonePermissionDenied() -> Bool {
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .denied, .restricted:
+        return true
+    default:
+        return false
     }
+}
+
+func requestMicrophonePermission() async -> Bool {
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized:
+        return true
+    case .notDetermined:
+        return await AVCaptureDevice.requestAccess(for: .audio)
+    default:
+        return false
+    }
+}
+
+func wrecWindows(in content: SCShareableContent) -> [SCWindow] {
+    let parentPID = getppid()
+    return content.windows.filter { isWrecWindow($0, parentPID: parentPID) }
+}
+
+// The engine's parent is the daemon, which owns no windows, so the ppid check
+// alone never matches the GPUI app. Match wrec by identity as well.
+func isWrecWindow(_ window: SCWindow, parentPID: pid_t) -> Bool {
+    guard let app = window.owningApplication else {
+        return false
+    }
+    if app.processID == parentPID {
+        return true
+    }
+    if app.bundleIdentifier.hasPrefix("app.wrec") {
+        return true
+    }
+    let name = app.applicationName.lowercased()
+    return name == "wrec" || name == "wrec dev" || name == "wrec-app"
 }
 
 @MainActor
@@ -620,7 +674,7 @@ func listTargets() async {
             print("display\t\(display.displayID)\tDisplay \(display.displayID)")
         }
         for window in content.windows {
-            if window.owningApplication?.processID == getppid() {
+            if isWrecWindow(window, parentPID: getppid()) {
                 continue
             }
             let appName = window.owningApplication?.applicationName ?? "App"

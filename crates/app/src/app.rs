@@ -3,8 +3,9 @@ use crate::{
     ui::{
         app_notification, fps_disabled, fps_label, fps_options_for, push_app_notification,
         resolution_disabled, resolution_label, resolution_options_for, target_key, AppTab,
-        ControlSelect, LimitedOption, LimitedSelect, TargetOption, TargetSelect, CODEC_OPTIONS,
-        QUALITY_OPTIONS, SOURCE_OPTIONS,
+        ControlSelect, LimitedOption, LimitedSelect, RecordingPill, TargetOption, TargetSelect,
+        CODEC_OPTIONS, PILL_BOTTOM_MARGIN, PILL_HEIGHT, PILL_WIDTH, QUALITY_OPTIONS,
+        SOURCE_OPTIONS,
     },
 };
 use config::{save_config as persist_config, wrec_dir, AppConfig};
@@ -13,8 +14,8 @@ use control::{
     StartRecordingParams, TargetSelector,
 };
 use domain::{
-    CaptureSourceKind, CaptureTarget, Codec, FrameRate, Quality, RecorderMetrics, RecorderSettings,
-    Resolution, ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, Codec, FrameRate, PermissionStatus, Quality, RecorderMetrics,
+    RecorderSettings, Resolution,
 };
 use futures::{channel::mpsc::UnboundedSender, StreamExt};
 use gpui::*;
@@ -77,10 +78,11 @@ impl RecorderState {
 #[derive(Debug)]
 enum AppEvent {
     PermissionChecked {
-        result: std::result::Result<ScreenRecordingPermissionStatus, String>,
+        result: std::result::Result<PermissionStatus, String>,
         refresh_targets_after_granted: bool,
     },
-    PermissionRequested(std::result::Result<ScreenRecordingPermissionStatus, String>),
+    PermissionRequested(std::result::Result<PermissionStatus, String>),
+    MicPermissionUpdated(std::result::Result<PermissionStatus, String>),
     TargetsLoaded(std::result::Result<Vec<CaptureTarget>, String>),
     Started(std::result::Result<JobSnapshot, String>),
     JobPolled(std::result::Result<JobSnapshot, String>),
@@ -103,8 +105,11 @@ pub(crate) struct WrecApp {
     active_job_event_count: usize,
     active_output_path: Option<PathBuf>,
     pub(crate) recorder_state: RecorderState,
-    pub(crate) permission_status: ScreenRecordingPermissionStatus,
+    pub(crate) permission_status: PermissionStatus,
     pub(crate) permission_busy: bool,
+    pub(crate) mic_permission_status: PermissionStatus,
+    pub(crate) mic_permission_busy: bool,
+    pill_window: Option<AnyWindowHandle>,
     pub(crate) metrics: Option<RecorderMetrics>,
     pub(crate) status: String,
     pub(crate) cli_install_status: CliInstallStatus,
@@ -234,8 +239,11 @@ impl WrecApp {
             active_job_event_count: 0,
             active_output_path: None,
             recorder_state: RecorderState::Idle,
-            permission_status: ScreenRecordingPermissionStatus::Unknown,
+            permission_status: PermissionStatus::Unknown,
             permission_busy: false,
+            mic_permission_status: PermissionStatus::Unknown,
+            mic_permission_busy: false,
+            pill_window: None,
             metrics: None,
             status: "Idle".to_string(),
             cli_install_status: crate::platform::cli_install_status(),
@@ -254,6 +262,7 @@ impl WrecApp {
             _event_task: event_task,
         };
         app.refresh_permission_status(true, cx);
+        app.refresh_mic_permission_status(cx);
         app
     }
 
@@ -442,6 +451,36 @@ impl WrecApp {
             if include_microphone { "on" } else { "off" }
         ));
         self.save_config();
+        if include_microphone && !self.mic_permission_status.is_granted() {
+            self.request_microphone_permission(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_mic_permission_status(&mut self, cx: &mut Context<Self>) {
+        if self.mic_permission_busy {
+            return;
+        }
+        self.mic_permission_busy = true;
+        let app_events = self.app_events.clone();
+        std::thread::spawn(move || {
+            let result = macos::microphone_permission_status().map_err(|err| err.to_string());
+            let _ = app_events.unbounded_send(UiEvent::App(AppEvent::MicPermissionUpdated(result)));
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn request_microphone_permission(&mut self, cx: &mut Context<Self>) {
+        if self.mic_permission_busy {
+            return;
+        }
+        self.mic_permission_busy = true;
+        self.push_log("requesting Microphone permission");
+        let app_events = self.app_events.clone();
+        std::thread::spawn(move || {
+            let result = macos::request_microphone_permission().map_err(|err| err.to_string());
+            let _ = app_events.unbounded_send(UiEvent::App(AppEvent::MicPermissionUpdated(result)));
+        });
         cx.notify();
     }
 
@@ -733,6 +772,15 @@ impl WrecApp {
             return;
         }
 
+        if self.settings.include_microphone && !self.mic_permission_status.is_granted() {
+            self.show_error(
+                "Microphone is on but access is not granted. Grant Microphone access in System Settings > Privacy & Security, or turn the Microphone toggle off",
+                window,
+                cx,
+            );
+            return;
+        }
+
         let Some(target) = self.selected_target() else {
             self.show_error("No capture target selected", window, cx);
             return;
@@ -854,6 +902,9 @@ impl WrecApp {
         if self.settings.hide_wrec {
             self.push_log("hiding Wrec from recording");
         }
+        // Open before the engine snapshots on-screen windows so the pill is
+        // part of the hide-wrec exclusion list.
+        self.open_recording_pill(&target, cx);
         self.active_job_id = None;
         self.active_job_event_count = 0;
         self.active_output_path = None;
@@ -868,6 +919,58 @@ impl WrecApp {
             let _ = app_events.unbounded_send(UiEvent::App(AppEvent::Started(result)));
         });
         cx.notify();
+    }
+
+    fn open_recording_pill(&mut self, target: &CaptureTarget, cx: &mut Context<Self>) {
+        if !self.settings.include_microphone || self.pill_window.is_some() {
+            return;
+        }
+        let display = match target.kind {
+            CaptureSourceKind::Display => cx
+                .find_display(DisplayId::new(target.id))
+                .or_else(|| cx.primary_display()),
+            CaptureSourceKind::Window => cx.primary_display(),
+        };
+        let Some(display) = display else {
+            return;
+        };
+        let display_bounds = display.bounds();
+        let pill_size = size(px(PILL_WIDTH), px(PILL_HEIGHT));
+        let origin = point(
+            display_bounds.origin.x + (display_bounds.size.width - pill_size.width) / 2.,
+            display_bounds.origin.y + display_bounds.size.height
+                - pill_size.height
+                - px(PILL_BOTTOM_MARGIN),
+        );
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin,
+                size: pill_size,
+            })),
+            titlebar: None,
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: Some(display.id()),
+            window_background: WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        };
+        match cx.open_window(options, |_, cx| cx.new(|_| RecordingPill)) {
+            Ok(handle) => {
+                self.pill_window = Some(handle.into());
+                self.push_log("microphone pill shown");
+            }
+            Err(err) => self.push_log(format!("microphone pill failed to open: {err}")),
+        }
+    }
+
+    fn close_recording_pill(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.pill_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
     }
 
     pub(crate) fn toggle_pause(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -917,7 +1020,7 @@ impl WrecApp {
                 self.permission_busy = false;
                 self.permission_status = status;
                 match status {
-                    ScreenRecordingPermissionStatus::Granted => {
+                    PermissionStatus::Granted => {
                         self.status = "Ready".to_string();
                         self.push_log("Screen Recording permission granted");
                         if refresh_targets_after_granted {
@@ -925,13 +1028,13 @@ impl WrecApp {
                             return;
                         }
                     }
-                    ScreenRecordingPermissionStatus::Missing => {
+                    PermissionStatus::Missing => {
                         self.targets.clear();
                         self.sync_target_select(window, cx);
                         self.status = "Screen Recording permission needed".to_string();
                         self.push_log("Screen Recording permission missing");
                     }
-                    ScreenRecordingPermissionStatus::Unknown => {
+                    PermissionStatus::Unknown => {
                         self.status = "Screen Recording permission unknown".to_string();
                         self.push_log("Screen Recording permission unknown");
                     }
@@ -943,14 +1046,14 @@ impl WrecApp {
                 ..
             } => {
                 self.permission_busy = false;
-                self.permission_status = ScreenRecordingPermissionStatus::Unknown;
+                self.permission_status = PermissionStatus::Unknown;
                 self.show_error(message, window, cx);
             }
             AppEvent::PermissionRequested(Ok(status)) => {
                 self.permission_busy = false;
                 self.permission_status = status;
                 match status {
-                    ScreenRecordingPermissionStatus::Granted => {
+                    PermissionStatus::Granted => {
                         self.status = "Ready".to_string();
                         self.push_log("Screen Recording permission granted");
                         push_app_notification(
@@ -962,7 +1065,7 @@ impl WrecApp {
                         );
                         cx.notify();
                     }
-                    ScreenRecordingPermissionStatus::Missing => {
+                    PermissionStatus::Missing => {
                         self.status = "Screen Recording permission needed".to_string();
                         self.push_log("Screen Recording permission still missing");
                         push_app_notification(
@@ -973,7 +1076,7 @@ impl WrecApp {
                         );
                         cx.notify();
                     }
-                    ScreenRecordingPermissionStatus::Unknown => {
+                    PermissionStatus::Unknown => {
                         self.status = "Screen Recording permission unknown".to_string();
                         self.push_log("Screen Recording permission unknown");
                         cx.notify();
@@ -982,8 +1085,43 @@ impl WrecApp {
             }
             AppEvent::PermissionRequested(Err(message)) => {
                 self.permission_busy = false;
-                self.permission_status = ScreenRecordingPermissionStatus::Unknown;
+                self.permission_status = PermissionStatus::Unknown;
                 self.show_error(message, window, cx);
+            }
+            AppEvent::MicPermissionUpdated(Ok(status)) => {
+                self.mic_permission_busy = false;
+                let previous = self.mic_permission_status;
+                self.mic_permission_status = status;
+                match status {
+                    PermissionStatus::Granted => {
+                        if !previous.is_granted() {
+                            self.push_log("Microphone permission granted");
+                        }
+                    }
+                    PermissionStatus::Missing => {
+                        self.push_log("Microphone permission missing");
+                        if self.settings.include_microphone {
+                            push_app_notification(
+                                window,
+                                app_notification(
+                                    "Microphone access is not granted. Enable Wrec in System Settings > Privacy & Security > Microphone.",
+                                )
+                                .autohide(false),
+                                cx,
+                            );
+                        }
+                    }
+                    PermissionStatus::Unknown => {
+                        self.push_log("Microphone permission unknown");
+                    }
+                }
+                cx.notify();
+            }
+            AppEvent::MicPermissionUpdated(Err(message)) => {
+                self.mic_permission_busy = false;
+                self.mic_permission_status = PermissionStatus::Unknown;
+                self.push_log(format!("microphone permission check failed: {message}"));
+                cx.notify();
             }
             AppEvent::TargetsLoaded(Ok(targets)) => {
                 let count = targets.len();
@@ -998,7 +1136,7 @@ impl WrecApp {
             AppEvent::TargetsLoaded(Err(message)) => {
                 self.recorder_state = RecorderState::Failed;
                 if is_permission_message(&message) {
-                    self.permission_status = ScreenRecordingPermissionStatus::Missing;
+                    self.permission_status = PermissionStatus::Missing;
                 }
                 self.show_error(message, window, cx);
             }
@@ -1029,13 +1167,14 @@ impl WrecApp {
                     cx.notify();
                     return;
                 }
+                self.close_recording_pill(cx);
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
                 self.quit_after_stop = false;
                 self.recorder_state = RecorderState::Failed;
                 if is_permission_message(&message) {
-                    self.permission_status = ScreenRecordingPermissionStatus::Missing;
+                    self.permission_status = PermissionStatus::Missing;
                 }
                 cx.activate(true);
                 window.activate_window();
@@ -1048,6 +1187,7 @@ impl WrecApp {
             }
             AppEvent::JobPolled(Err(message)) => {
                 if self.active_job_id.is_some() {
+                    self.close_recording_pill(cx);
                     self.recorder_state = RecorderState::Failed;
                     self.active_job_id = None;
                     self.active_output_path = None;
@@ -1084,6 +1224,7 @@ impl WrecApp {
                 self.apply_job_snapshot(job, window, cx);
             }
             AppEvent::Stopped(Err(message)) => {
+                self.close_recording_pill(cx);
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
@@ -1149,6 +1290,7 @@ impl WrecApp {
                 self.status = "Stopping".to_string();
             }
             JobStatus::Completed => {
+                self.close_recording_pill(cx);
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
@@ -1180,6 +1322,7 @@ impl WrecApp {
                         "Recording failed".to_string()
                     }
                 });
+                self.close_recording_pill(cx);
                 self.active_job_id = None;
                 self.active_job_event_count = 0;
                 self.active_output_path = None;
@@ -1187,7 +1330,7 @@ impl WrecApp {
                 self.recorder_state = RecorderState::Failed;
                 self.status = message.clone();
                 if is_permission_message(&message) {
-                    self.permission_status = ScreenRecordingPermissionStatus::Missing;
+                    self.permission_status = PermissionStatus::Missing;
                 }
                 cx.activate(true);
                 window.activate_window();

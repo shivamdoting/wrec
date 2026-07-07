@@ -135,13 +135,13 @@ impl Resolution {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ScreenRecordingPermissionStatus {
+pub enum PermissionStatus {
     Unknown,
     Granted,
     Missing,
 }
 
-impl ScreenRecordingPermissionStatus {
+impl PermissionStatus {
     pub const fn is_granted(self) -> bool {
         matches!(self, Self::Granted)
     }
