@@ -431,6 +431,20 @@ impl WrecApp {
         cx.notify();
     }
 
+    pub(crate) fn set_include_microphone(
+        &mut self,
+        include_microphone: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.include_microphone = include_microphone;
+        self.push_log(format!(
+            "microphone: {}",
+            if include_microphone { "on" } else { "off" }
+        ));
+        self.save_config();
+        cx.notify();
+    }
+
     pub(crate) fn set_hide_wrec(&mut self, hide_wrec: bool, cx: &mut Context<Self>) {
         self.settings.hide_wrec = hide_wrec;
         self.push_log(format!(
@@ -1304,6 +1318,7 @@ fn recording_params(target: CaptureTarget, settings: RecorderSettings) -> StartR
             output_dir: Some(settings.output_dir),
             include_cursor: Some(settings.include_cursor),
             include_system_audio: Some(settings.include_system_audio),
+            include_microphone: Some(settings.include_microphone),
             hide_wrec: Some(settings.hide_wrec),
         },
         duration_ms: None,

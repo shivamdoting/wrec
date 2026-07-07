@@ -295,6 +295,11 @@ mod platform {
                 "false"
             })
             .arg(if settings.hide_wrec { "true" } else { "false" })
+            .arg(if settings.include_microphone {
+                "true"
+            } else {
+                "false"
+            })
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
             .stderr(Stdio::piped())

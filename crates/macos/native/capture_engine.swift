@@ -14,6 +14,7 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let audioInput: AVAssetWriterInput?
+    private let micInput: AVAssetWriterInput?
     private let finished = DispatchSemaphore(value: 0)
     private var didStart = false
     private var didFinish = false
@@ -21,6 +22,8 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var droppedFrameCount: Int64 = 0
     private var audioSampleCount: Int64 = 0
     private var droppedAudioSampleCount: Int64 = 0
+    private var micSampleCount: Int64 = 0
+    private var droppedMicSampleCount: Int64 = 0
     private var firstPTS: CMTime?
     private var isPaused = false
     private var pauseStartedPTS: CMTime?
@@ -28,7 +31,7 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var pauseOffset = CMTime.zero
     private var lastMetricTime = DispatchTime.now()
 
-    init(outputURL: URL, width: Int, height: Int, fps: Int32, codec: String, quality: String, includeSystemAudio: Bool) throws {
+    init(outputURL: URL, width: Int, height: Int, fps: Int32, codec: String, quality: String, includeSystemAudio: Bool, includeMicrophone: Bool) throws {
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
         let bitrate = targetBitrate(width: width, height: height, fps: fps, quality: quality, codec: codec)
@@ -71,6 +74,26 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             audioInput = nil
         }
+
+        if includeMicrophone {
+            // Mono keeps the converter safe for any input device channel count.
+            let micSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 96_000,
+            ]
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: micSettings)
+            input.expectsMediaDataInRealTime = true
+
+            guard writer.canAdd(input) else {
+                throw HelperError.writerInputRejected
+            }
+            writer.add(input)
+            micInput = input
+        } else {
+            micInput = nil
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -83,6 +106,8 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             appendVideo(sampleBuffer)
         case .audio:
             appendAudio(sampleBuffer)
+        case .microphone:
+            appendMicrophone(sampleBuffer)
         default:
             return
         }
@@ -148,40 +173,52 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let audioInput else {
             return
         }
-        guard didStart, let firstPTS else {
-            droppedAudioSampleCount += 1
-            return
-        }
-        guard sampleBuffer.isValid else {
-            droppedAudioSampleCount += 1
-            return
-        }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        guard pts.isValid, CMTimeCompare(pts, firstPTS) >= 0 else {
-            droppedAudioSampleCount += 1
-            return
-        }
-        if isPaused || pendingResume {
-            droppedAudioSampleCount += 1
-            return
-        }
-        guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseOffset) else {
-            droppedAudioSampleCount += 1
-            return
-        }
-        guard audioInput.isReadyForMoreMediaData else {
-            droppedAudioSampleCount += 1
-            return
-        }
-
-        if audioInput.append(sampleBuffer) {
+        if appendAudioSample(sampleBuffer, to: audioInput, label: "audio") {
             audioSampleCount += 1
         } else {
             droppedAudioSampleCount += 1
-            if let error = writer.error {
-                FileHandle.standardError.write(Data("capture-engine: audio append failed: \(error)\n".utf8))
-            }
         }
+    }
+
+    private func appendMicrophone(_ sampleBuffer: CMSampleBuffer) {
+        guard let micInput else {
+            return
+        }
+        if appendAudioSample(sampleBuffer, to: micInput, label: "microphone") {
+            micSampleCount += 1
+        } else {
+            droppedMicSampleCount += 1
+        }
+    }
+
+    private func appendAudioSample(_ sampleBuffer: CMSampleBuffer, to input: AVAssetWriterInput, label: String) -> Bool {
+        guard didStart, let firstPTS else {
+            return false
+        }
+        guard sampleBuffer.isValid else {
+            return false
+        }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard pts.isValid, CMTimeCompare(pts, firstPTS) >= 0 else {
+            return false
+        }
+        if isPaused || pendingResume {
+            return false
+        }
+        guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseOffset) else {
+            return false
+        }
+        guard input.isReadyForMoreMediaData else {
+            return false
+        }
+
+        if input.append(sampleBuffer) {
+            return true
+        }
+        if let error = writer.error {
+            FileHandle.standardError.write(Data("capture-engine: \(label) append failed: \(error)\n".utf8))
+        }
+        return false
     }
 
     func pause() {
@@ -290,11 +327,12 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
             self.videoInput.markAsFinished()
             self.audioInput?.markAsFinished()
+            self.micInput?.markAsFinished()
             self.writer.finishWriting {
                 if let error = self.writer.error {
                     FileHandle.standardError.write(Data("capture-engine: writer finish failed: \(error)\n".utf8))
                 } else {
-                    FileHandle.standardError.write(Data("capture-engine: recording finished frames=\(self.frameCount) dropped=\(self.droppedFrameCount) audio=\(self.audioSampleCount) audio_dropped=\(self.droppedAudioSampleCount)\n".utf8))
+                    FileHandle.standardError.write(Data("capture-engine: recording finished frames=\(self.frameCount) dropped=\(self.droppedFrameCount) audio=\(self.audioSampleCount) audio_dropped=\(self.droppedAudioSampleCount) mic=\(self.micSampleCount) mic_dropped=\(self.droppedMicSampleCount)\n".utf8))
                 }
                 self.finished.signal()
             }
@@ -346,7 +384,7 @@ func run() async {
     }
 
     guard args.count >= 9 else {
-        fputs("usage: capture-engine <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k> [include-system-audio] [hide-wrec]\n", stderr)
+        fputs("usage: capture-engine <output-path> <fps> <include-cursor> <display|window> <id> <hevc|h264> <efficient|balanced|high> <native|720p|1080p|2k|4k> [include-system-audio] [hide-wrec] [include-microphone]\n", stderr)
         Foundation.exit(64)
     }
 
@@ -360,6 +398,7 @@ func run() async {
     let resolution = args[8]
     let includeSystemAudio = args.count >= 10 ? args[9] == "true" : false
     let hideWrec = args.count >= 11 ? args[10] == "true" : true
+    let includeMicrophone = args.count >= 12 ? args[11] == "true" : false
 
     guard ensureScreenCapturePermission() else {
         fputs("capture-engine: permission denied: Screen Recording access is required\n", stderr)
@@ -421,11 +460,13 @@ func run() async {
         streamConfig.excludesCurrentProcessAudio = true
         streamConfig.sampleRate = 48_000
         streamConfig.channelCount = 2
+        // nil device ID leaves ScreenCaptureKit on the system default microphone.
+        streamConfig.captureMicrophone = includeMicrophone
         streamConfig.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
         FileHandle.standardError.write(
             Data(
-                "capture-engine: target=\(targetKind) id=\(targetId) native=\(nativeSize.width)x\(nativeSize.height) size=\(captureWidth)x\(captureHeight) fps=\(fps) cursor=\(includeCursor) system_audio=\(includeSystemAudio) codec=\(codec) quality=\(quality) resolution=\(resolution) pipeline=scstream-avassetwriter\n"
+                "capture-engine: target=\(targetKind) id=\(targetId) native=\(nativeSize.width)x\(nativeSize.height) size=\(captureWidth)x\(captureHeight) fps=\(fps) cursor=\(includeCursor) system_audio=\(includeSystemAudio) microphone=\(includeMicrophone) codec=\(codec) quality=\(quality) resolution=\(resolution) pipeline=scstream-avassetwriter\n"
                     .utf8
             )
         )
@@ -438,12 +479,16 @@ func run() async {
             fps: fps,
             codec: codec,
             quality: quality,
-            includeSystemAudio: includeSystemAudio
+            includeSystemAudio: includeSystemAudio,
+            includeMicrophone: includeMicrophone
         )
         let stream = SCStream(filter: filter, configuration: streamConfig, delegate: recorder)
         try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: recorder.queue)
         if includeSystemAudio {
             try stream.addStreamOutput(recorder, type: .audio, sampleHandlerQueue: recorder.queue)
+        }
+        if includeMicrophone {
+            try stream.addStreamOutput(recorder, type: .microphone, sampleHandlerQueue: recorder.queue)
         }
 
         try await stream.startCapture()

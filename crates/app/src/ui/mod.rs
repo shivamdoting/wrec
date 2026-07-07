@@ -465,6 +465,18 @@ impl WrecApp {
                     this.set_include_system_audio(*checked, cx);
                 })),
         );
+        let microphone_row = label_switch_row(
+            "Microphone",
+            muted_foreground,
+            Switch::new("microphone-switch")
+                .checked(self.settings.include_microphone)
+                .color(switch_on_color(cx))
+                .tooltip("Capture microphone")
+                .disabled(controls_disabled)
+                .on_click(cx.listener(|this, checked, _, cx| {
+                    this.set_include_microphone(*checked, cx);
+                })),
+        );
 
         div()
             .flex()
@@ -490,7 +502,8 @@ impl WrecApp {
                     .child(quality_row)
                     .child(frame_rate_row)
                     .child(cursor_row)
-                    .child(audio_row),
+                    .child(audio_row)
+                    .child(microphone_row),
             )
             .child(if show_pause_button {
                 div()

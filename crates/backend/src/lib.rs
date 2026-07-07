@@ -24,6 +24,7 @@ pub struct RecordingOverrides {
     pub output_dir: Option<PathBuf>,
     pub include_cursor: Option<bool>,
     pub include_system_audio: Option<bool>,
+    pub include_microphone: Option<bool>,
     pub hide_wrec: Option<bool>,
 }
 
@@ -300,6 +301,7 @@ impl WrecBackend {
                 fps: settings.fps.as_u32(),
                 include_cursor: settings.include_cursor,
                 include_system_audio: settings.include_system_audio,
+                include_microphone: settings.include_microphone,
             });
         }
     }
@@ -380,6 +382,9 @@ fn settings_with_overrides(
     }
     if let Some(include_system_audio) = overrides.include_system_audio {
         settings.include_system_audio = include_system_audio;
+    }
+    if let Some(include_microphone) = overrides.include_microphone {
+        settings.include_microphone = include_microphone;
     }
     if let Some(hide_wrec) = overrides.hide_wrec {
         settings.hide_wrec = hide_wrec;
@@ -532,6 +537,19 @@ mod tests {
         assert_eq!(settings.quality, Quality::Efficient);
         assert_eq!(settings.fps, FrameRate::Fps30);
         assert_eq!(settings.resolution, Resolution::R720p);
+    }
+
+    #[test]
+    fn microphone_stays_off_unless_overridden() {
+        let saved = RecorderSettings::default();
+
+        assert!(!build_settings(&saved, &RecordingOverrides::default()).include_microphone);
+
+        let overrides = RecordingOverrides {
+            include_microphone: Some(true),
+            ..RecordingOverrides::default()
+        };
+        assert!(build_settings(&saved, &overrides).include_microphone);
     }
 
     #[test]

@@ -284,7 +284,7 @@ if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
 fi
 
 log "Signing capture engine, daemon, and app"
-run codesign "${sign_args[@]}" "$MACOS/capture-engine"
+run codesign "${sign_args[@]}" --entitlements "$ENTITLEMENTS" "$MACOS/capture-engine"
 run codesign "${sign_args[@]}" "$MACOS/$DAEMON_BIN_NAME"
 run codesign "${sign_args[@]}" --entitlements "$ENTITLEMENTS" "$APP"
 log "Verifying app signature"

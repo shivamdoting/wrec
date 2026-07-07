@@ -279,6 +279,7 @@ fn record_params(args: &RecordArgs) -> StartRecordingParams {
             output_dir: args.output_dir.clone(),
             include_cursor: args.include_cursor,
             include_system_audio: args.include_system_audio,
+            include_microphone: None,
             hide_wrec: args.hide_wrec,
         },
         duration_ms: args.duration.map(|duration| duration.as_millis() as u64),
