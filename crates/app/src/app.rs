@@ -1,9 +1,10 @@
 use crate::{
     platform::{choose_output_dir, open_path, CliInstallStatus},
     ui::{
-        fps_disabled, fps_label, fps_options_for, push_app_notification, resolution_disabled,
-        resolution_label, resolution_options_for, target_key, AppTab, ControlSelect, LimitedOption,
-        LimitedSelect, TargetOption, TargetSelect, CODEC_OPTIONS, QUALITY_OPTIONS, SOURCE_OPTIONS,
+        app_notification, fps_disabled, fps_label, fps_options_for, push_app_notification,
+        resolution_disabled, resolution_label, resolution_options_for, target_key, AppTab,
+        ControlSelect, LimitedOption, LimitedSelect, TargetOption, TargetSelect, CODEC_OPTIONS,
+        QUALITY_OPTIONS, SOURCE_OPTIONS,
     },
 };
 use config::{save_config as persist_config, wrec_dir, AppConfig};
@@ -21,7 +22,6 @@ use gpui_component::{
     button::ButtonVariant,
     dialog::DialogButtonProps,
     input::{InputEvent, InputState},
-    notification::Notification,
     select::{SelectEvent, SelectState},
     IndexPath, WindowExt as _,
 };
@@ -497,7 +497,7 @@ impl WrecApp {
                 self.push_log(format!("open failed: {err}"));
                 push_app_notification(
                     window,
-                    Notification::new().message(format!("Could not open output folder: {err}")),
+                    app_notification(format!("Could not open output folder: {err}")),
                     cx,
                 );
             }
@@ -511,8 +511,7 @@ impl WrecApp {
             self.push_log(format!("recordings data folder create failed: {err}"));
             push_app_notification(
                 window,
-                Notification::new()
-                    .message(format!("Could not create recordings data folder: {err}")),
+                app_notification(format!("Could not create recordings data folder: {err}")),
                 cx,
             );
             cx.notify();
@@ -525,8 +524,7 @@ impl WrecApp {
                 self.push_log(format!("recordings data folder open failed: {err}"));
                 push_app_notification(
                     window,
-                    Notification::new()
-                        .message(format!("Could not open recordings data folder: {err}")),
+                    app_notification(format!("Could not open recordings data folder: {err}")),
                     cx,
                 );
             }
@@ -547,11 +545,7 @@ impl WrecApp {
 
         cx.write_to_clipboard(ClipboardItem::new_string(command));
         self.push_log("copied CLI install command");
-        push_app_notification(
-            window,
-            Notification::new().message("CLI install command copied"),
-            cx,
-        );
+        push_app_notification(window, app_notification("CLI install command copied"), cx);
         cx.notify();
     }
 
@@ -961,7 +955,7 @@ impl WrecApp {
                         self.push_log("Screen Recording permission granted");
                         push_app_notification(
                             window,
-                            Notification::new().message(
+                            app_notification(
                                 "Screen Recording permission granted. Refresh targets to continue.",
                             ),
                             cx,
@@ -973,8 +967,7 @@ impl WrecApp {
                         self.push_log("Screen Recording permission still missing");
                         push_app_notification(
                             window,
-                            Notification::new()
-                                .message("Screen Recording permission is still missing")
+                            app_notification("Screen Recording permission is still missing")
                                 .autohide(false),
                             cx,
                         );
@@ -1000,7 +993,7 @@ impl WrecApp {
                 let message = format!("{count} capture targets loaded");
                 self.status = "Idle".to_string();
                 self.push_log(message.clone());
-                push_app_notification(window, Notification::new().message(message), cx);
+                push_app_notification(window, app_notification(message), cx);
             }
             AppEvent::TargetsLoaded(Err(message)) => {
                 self.recorder_state = RecorderState::Failed;
@@ -1028,11 +1021,7 @@ impl WrecApp {
                     }
                     return;
                 }
-                push_app_notification(
-                    window,
-                    Notification::new().message("Recording submitted"),
-                    cx,
-                );
+                push_app_notification(window, app_notification("Recording submitted"), cx);
             }
             AppEvent::Started(Err(message)) => {
                 if !matches!(self.recorder_state, RecorderState::Starting) {
@@ -1177,11 +1166,7 @@ impl WrecApp {
                     cx.activate(true);
                     window.activate_window();
                     self.open_last_recording_folder(window, cx);
-                    push_app_notification(
-                        window,
-                        Notification::new().message("Recording stopped"),
-                        cx,
-                    );
+                    push_app_notification(window, app_notification("Recording stopped"), cx);
                 } else {
                     cx.activate(true);
                     window.activate_window();
@@ -1252,7 +1237,7 @@ impl WrecApp {
                 self.push_log(format!("open failed: {err}"));
                 push_app_notification(
                     window,
-                    Notification::new().message(format!("Could not open output folder: {err}")),
+                    app_notification(format!("Could not open output folder: {err}")),
                     cx,
                 );
             }
@@ -1269,11 +1254,7 @@ impl WrecApp {
         self.status = message.clone();
         self.push_log_entry(format!("error: {message}"));
         tracing::error!("{message}");
-        push_app_notification(
-            window,
-            Notification::new().message(message).autohide(false),
-            cx,
-        );
+        push_app_notification(window, app_notification(message).autohide(false), cx);
     }
 
     pub(crate) fn push_log(&mut self, message: impl Into<String>) {

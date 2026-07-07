@@ -805,7 +805,7 @@ impl WrecApp {
                                 this.push_log(format!("open GitHub failed: {err}"));
                                 push_app_notification(
                                     window,
-                                    Notification::new().message(format!(
+                                    app_notification(format!(
                                         "Could not open GitHub repository: {err}"
                                     )),
                                     cx,
@@ -1275,6 +1275,47 @@ pub(crate) fn fps_label(fps: FrameRate) -> &'static str {
         FrameRate::Fps60 => "60 FPS",
         FrameRate::Fps30 => "30 FPS",
     }
+}
+
+/// Build an app toast whose message can be copied: hovering the toast reveals
+/// a copy button at its top right, next to the close button.
+pub(crate) fn app_notification(message: impl Into<SharedString>) -> Notification {
+    let message: SharedString = message.into();
+    Notification::new().content(move |_, _, cx| {
+        let copy_text = message.clone();
+        div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(message.clone()),
+            )
+            .child(
+                div()
+                    .invisible()
+                    .group_hover("", |this| this.visible())
+                    .child(
+                        UiButton::new("copy-notification")
+                            .icon(
+                                UiIcon::new(PhosphorIcon::Clipboard)
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Copy message")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_text.to_string(),
+                                ));
+                            }),
+                    ),
+            )
+            .into_any_element()
+    })
 }
 
 pub(crate) fn push_app_notification(window: &mut Window, notification: Notification, cx: &mut App) {
