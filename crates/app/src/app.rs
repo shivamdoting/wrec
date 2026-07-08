@@ -1,5 +1,5 @@
 use crate::{
-    platform::{choose_output_dir, open_path, CliInstallStatus},
+    platform::{choose_output_dir, open_path, CliInstallStatus, SkillInstallStatus},
     ui::{
         app_notification, fps_disabled, fps_label, fps_options_for, push_app_notification,
         resolution_disabled, resolution_label, resolution_options_for, target_key, AppTab,
@@ -113,6 +113,7 @@ pub(crate) struct WrecApp {
     pub(crate) metrics: Option<RecorderMetrics>,
     pub(crate) status: String,
     pub(crate) cli_install_status: CliInstallStatus,
+    pub(crate) skill_install_status: SkillInstallStatus,
     pub(crate) active_tab: AppTab,
     pub(crate) last_recording_dir: Option<PathBuf>,
     pub(crate) show_nerd_logs: bool,
@@ -247,6 +248,7 @@ impl WrecApp {
             metrics: None,
             status: "Idle".to_string(),
             cli_install_status: crate::platform::cli_install_status(),
+            skill_install_status: crate::platform::skill_install_status(),
             active_tab: AppTab::General,
             last_recording_dir: None,
             show_nerd_logs: config.show_nerd_logs,
@@ -593,6 +595,34 @@ impl WrecApp {
         self.push_log(format!(
             "cli install status: {}",
             self.cli_install_status.label()
+        ));
+        cx.notify();
+    }
+
+    pub(crate) fn install_wrec_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match crate::platform::install_skill() {
+            Ok(path) => {
+                self.push_log(format!("installed wrec skill: {}", path.display()));
+                push_app_notification(window, app_notification("wrec skill installed"), cx);
+            }
+            Err(err) => {
+                self.push_log(format!("skill install failed: {err}"));
+                push_app_notification(
+                    window,
+                    app_notification(format!("Could not install wrec skill: {err}")),
+                    cx,
+                );
+            }
+        }
+        self.skill_install_status = crate::platform::skill_install_status();
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_skill_install_status(&mut self, cx: &mut Context<Self>) {
+        self.skill_install_status = crate::platform::skill_install_status();
+        self.push_log(format!(
+            "skill install status: {}",
+            self.skill_install_status.label()
         ));
         cx.notify();
     }

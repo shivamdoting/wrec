@@ -19,6 +19,7 @@ pub(crate) fn register_fonts(cx: &mut App) {
 #[derive(Clone, Copy)]
 pub(crate) enum PhosphorIcon {
     Clipboard,
+    Download,
     FilmReel,
     FolderOpen,
     Gauge,
@@ -29,7 +30,6 @@ pub(crate) enum PhosphorIcon {
     Pause,
     Play,
     Pulse,
-    Refresh,
     Stop,
     Sun,
     Terminal,
@@ -39,6 +39,7 @@ impl IconNamed for PhosphorIcon {
     fn path(self) -> SharedString {
         match self {
             Self::Clipboard => "icons/phosphor/clipboard-text.svg",
+            Self::Download => "icons/phosphor/download-simple.svg",
             Self::FilmReel => "icons/phosphor/film-reel.svg",
             Self::FolderOpen => "icons/phosphor/folder-open.svg",
             Self::Gauge => "icons/phosphor/gauge.svg",
@@ -49,7 +50,6 @@ impl IconNamed for PhosphorIcon {
             Self::Pause => "icons/phosphor/pause.svg",
             Self::Play => "icons/phosphor/play.svg",
             Self::Pulse => "icons/phosphor/pulse.svg",
-            Self::Refresh => "icons/phosphor/arrow-clockwise.svg",
             Self::Stop => "icons/phosphor/stop.svg",
             Self::Sun => "icons/phosphor/sun.svg",
             Self::Terminal => "icons/phosphor/terminal.svg",
@@ -64,6 +64,7 @@ impl AssetSource for WrecAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let svg = match path {
             "icons/phosphor/clipboard-text.svg" => phosphor_svgs::style::bold::CLIPBOARD_TEXT,
+            "icons/phosphor/download-simple.svg" => phosphor_svgs::style::bold::DOWNLOAD_SIMPLE,
             "icons/phosphor/film-reel.svg" => phosphor_svgs::style::fill::FILM_REEL,
             "icons/phosphor/folder-open.svg" => phosphor_svgs::style::bold::FOLDER_OPEN,
             "icons/phosphor/gauge.svg" => phosphor_svgs::style::bold::GAUGE,
@@ -74,7 +75,6 @@ impl AssetSource for WrecAssets {
             "icons/phosphor/pause.svg" => phosphor_svgs::style::fill::PAUSE,
             "icons/phosphor/play.svg" => phosphor_svgs::style::fill::PLAY,
             "icons/phosphor/pulse.svg" => phosphor_svgs::style::bold::PULSE,
-            "icons/phosphor/arrow-clockwise.svg" => phosphor_svgs::style::bold::ARROW_CLOCKWISE,
             "icons/phosphor/stop.svg" => phosphor_svgs::style::fill::STOP,
             "icons/phosphor/sun.svg" => phosphor_svgs::style::bold::SUN,
             "icons/phosphor/terminal.svg" => phosphor_svgs::style::bold::TERMINAL,

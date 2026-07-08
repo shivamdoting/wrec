@@ -1,7 +1,7 @@
 use crate::{
     app::WrecApp,
     assets::{PhosphorIcon, GEIST_FONT_FAMILY, GEIST_MONO_FONT_FAMILY},
-    platform::CliInstallStatus,
+    platform::{CliInstallStatus, SkillInstallStatus},
 };
 use domain::{
     CaptureSourceKind, CaptureTarget, FrameRate, PermissionStatus, Quality, RecorderMetrics,
@@ -684,9 +684,27 @@ impl WrecApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let cli_command = crate::platform::cli_install_command();
-        let cli_status_color = match self.cli_install_status {
-            CliInstallStatus::Conflict => cx.theme().danger,
-            _ => muted_foreground,
+        let cli_installed = self.cli_install_status == CliInstallStatus::Installed;
+        let cli_button_label = match self.cli_install_status {
+            CliInstallStatus::Installed => "Installed",
+            CliInstallStatus::NeedsUpdate => "Update",
+            CliInstallStatus::NotInstalled | CliInstallStatus::Conflict => "Copy",
+        };
+        let cli_tooltip = if cli_installed {
+            "CLI is installed"
+        } else {
+            "Copy CLI install command"
+        };
+        let skill_installed = self.skill_install_status == SkillInstallStatus::Installed;
+        let skill_button_label = match self.skill_install_status {
+            SkillInstallStatus::Installed => "Installed",
+            SkillInstallStatus::NeedsUpdate => "Update",
+            SkillInstallStatus::NotInstalled => "Install",
+        };
+        let skill_tooltip = if skill_installed {
+            "Skill is installed"
+        } else {
+            "Install the wrec skill to ~/.claude/skills/wrec"
         };
 
         div()
@@ -700,31 +718,19 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
+                    .child(row_label("CLI"))
                     .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .items_baseline()
-                            .gap_2()
-                            .min_w(px(0.))
-                            .child(row_label("Status"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cli_status_color)
-                                    .truncate()
-                                    .child(self.cli_install_status.label()),
-                            ),
-                    )
-                    .child(
-                        UiButton::new("cli-refresh-install")
-                            .ghost()
+                        UiButton::new("cli-copy-install")
+                            .secondary()
                             .compact()
-                            .size(px(CONTROL_HEIGHT))
-                            .icon(UiIcon::new(PhosphorIcon::Refresh).text_color(muted_foreground))
-                            .tooltip("Refresh CLI install status")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_cli_install_status(cx);
+                            .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .icon(UiIcon::new(PhosphorIcon::Clipboard).text_color(muted_foreground))
+                            .label(cli_button_label)
+                            .tooltip(cli_tooltip)
+                            .disabled(cli_installed || cli_command.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.copy_cli_install_command(window, cx);
                             })),
                     ),
             )
@@ -735,19 +741,19 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(row_label("Install command"))
+                    .child(row_label("Skill"))
                     .child(
-                        UiButton::new("cli-copy-install")
+                        UiButton::new("skill-install")
                             .secondary()
                             .compact()
                             .h(px(CONTROL_HEIGHT))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .icon(UiIcon::new(PhosphorIcon::Clipboard).text_color(muted_foreground))
-                            .label("Copy")
-                            .tooltip("Copy CLI install command")
-                            .disabled(cli_command.is_none())
+                            .icon(UiIcon::new(PhosphorIcon::Download).text_color(muted_foreground))
+                            .label(skill_button_label)
+                            .tooltip(skill_tooltip)
+                            .disabled(skill_installed)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.copy_cli_install_command(window, cx);
+                                this.install_wrec_skill(window, cx);
                             })),
                     ),
             )
@@ -1035,6 +1041,10 @@ fn sidebar_nav_item(
     let on_click = Rc::new(cx.listener(move |this, _, _, cx| {
         if this.active_tab != tab {
             this.active_tab = tab;
+            if tab == AppTab::Cli {
+                this.refresh_cli_install_status(cx);
+                this.refresh_skill_install_status(cx);
+            }
             cx.notify();
         }
     }));
