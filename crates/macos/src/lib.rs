@@ -1,6 +1,6 @@
 use domain::{
-    CaptureSourceKind, CaptureTarget, RecorderEngine, RecorderError, RecorderEvent,
-    RecorderMetrics, RecorderSettings, RecordingSession, Result, ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, PermissionStatus, RecorderEngine, RecorderError,
+    RecorderEvent, RecorderMetrics, RecorderSettings, RecordingSession, Result,
 };
 
 static LAST_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -32,13 +32,21 @@ impl MacosRecorder {
         });
     }
 
-    pub fn screen_recording_permission_status(&self) -> Result<ScreenRecordingPermissionStatus> {
+    pub fn screen_recording_permission_status(&self) -> Result<PermissionStatus> {
         platform::screen_recording_permission_status()
     }
 
-    pub fn request_screen_recording_permission(&self) -> Result<ScreenRecordingPermissionStatus> {
+    pub fn request_screen_recording_permission(&self) -> Result<PermissionStatus> {
         platform::request_screen_recording_permission()
     }
+}
+
+pub fn microphone_permission_status() -> Result<PermissionStatus> {
+    platform::microphone_permission_status()
+}
+
+pub fn request_microphone_permission() -> Result<PermissionStatus> {
+    platform::request_microphone_permission()
 }
 
 impl RecorderEngine for MacosRecorder {
@@ -188,6 +196,8 @@ mod platform {
     use std::time::{Duration, Instant};
 
     const CAPTURE_ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+    // The mic request blocks on the macOS permission dialog until the user answers.
+    const MIC_PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
     const START_TIMEOUT: Duration = Duration::from_secs(5);
     const STOP_TIMEOUT: Duration = Duration::from_secs(20);
     const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -207,16 +217,44 @@ mod platform {
     static CHILD: OnceLock<Mutex<Option<RecordingProcess>>> = OnceLock::new();
     const CAPTURE_ENGINE_NAME: &str = "capture-engine";
 
-    pub fn screen_recording_permission_status() -> Result<ScreenRecordingPermissionStatus> {
-        run_permission_command("--permission-status")
+    pub fn screen_recording_permission_status() -> Result<PermissionStatus> {
+        run_permission_command(
+            "--permission-status",
+            "screen recording permission check",
+            CAPTURE_ENGINE_COMMAND_TIMEOUT,
+        )
     }
 
-    pub fn request_screen_recording_permission() -> Result<ScreenRecordingPermissionStatus> {
-        run_permission_command("--request-permission")
+    pub fn request_screen_recording_permission() -> Result<PermissionStatus> {
+        run_permission_command(
+            "--request-permission",
+            "screen recording permission request",
+            CAPTURE_ENGINE_COMMAND_TIMEOUT,
+        )
+    }
+
+    pub fn microphone_permission_status() -> Result<PermissionStatus> {
+        run_permission_command(
+            "--mic-permission-status",
+            "microphone permission check",
+            CAPTURE_ENGINE_COMMAND_TIMEOUT,
+        )
+    }
+
+    pub fn request_microphone_permission() -> Result<PermissionStatus> {
+        run_permission_command(
+            "--request-mic-permission",
+            "microphone permission request",
+            MIC_PERMISSION_REQUEST_TIMEOUT,
+        )
     }
 
     pub fn list_targets() -> Result<Vec<CaptureTarget>> {
-        let output = run_capture_engine_command(&["--list"], "target listing")?;
+        let output = run_capture_engine_command(
+            &["--list"],
+            "target listing",
+            CAPTURE_ENGINE_COMMAND_TIMEOUT,
+        )?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -295,6 +333,11 @@ mod platform {
                 "false"
             })
             .arg(if settings.hide_wrec { "true" } else { "false" })
+            .arg(if settings.include_microphone {
+                "true"
+            } else {
+                "false"
+            })
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
             .stderr(Stdio::piped())
@@ -648,26 +691,30 @@ mod platform {
         message.contains("permission denied") || message.contains("Screen Recording access")
     }
 
-    fn run_permission_command(arg: &str) -> Result<ScreenRecordingPermissionStatus> {
-        let output = run_capture_engine_command(&[arg], "screen recording permission check")?;
+    fn run_permission_command(
+        arg: &str,
+        label: &str,
+        timeout: Duration,
+    ) -> Result<PermissionStatus> {
+        let output = run_capture_engine_command(&[arg], label, timeout)?;
 
         if !output.status.success() {
             return Err(RecorderError::Backend(format!(
-                "screen recording permission check failed: {}",
+                "{label} failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
 
         match String::from_utf8_lossy(&output.stdout).trim() {
-            "granted" => Ok(ScreenRecordingPermissionStatus::Granted),
-            "missing" => Ok(ScreenRecordingPermissionStatus::Missing),
+            "granted" => Ok(PermissionStatus::Granted),
+            "missing" => Ok(PermissionStatus::Missing),
             status => Err(RecorderError::Backend(format!(
-                "unknown screen recording permission status: {status}"
+                "unknown {label} status: {status}"
             ))),
         }
     }
 
-    fn run_capture_engine_command(args: &[&str], label: &str) -> Result<Output> {
+    fn run_capture_engine_command(args: &[&str], label: &str, timeout: Duration) -> Result<Output> {
         let mut child = Command::new(capture_engine_path()?)
             .args(args)
             .stdout(Stdio::piped())
@@ -685,12 +732,12 @@ mod platform {
                         ))
                     });
                 }
-                Ok(None) if started_at.elapsed() >= CAPTURE_ENGINE_COMMAND_TIMEOUT => {
+                Ok(None) if started_at.elapsed() >= timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(RecorderError::Backend(format!(
                         "{label} timed out after {}s; killed capture engine. Run `wrec targets --json` again, and if this repeats, restart Wrec/Terminal and verify Screen Recording permission.",
-                        CAPTURE_ENGINE_COMMAND_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     )));
                 }
                 Ok(None) => std::thread::sleep(STOP_POLL_INTERVAL),
@@ -776,11 +823,19 @@ mod platform {
 mod platform {
     use super::*;
 
-    pub fn screen_recording_permission_status() -> Result<ScreenRecordingPermissionStatus> {
+    pub fn screen_recording_permission_status() -> Result<PermissionStatus> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))
     }
 
-    pub fn request_screen_recording_permission() -> Result<ScreenRecordingPermissionStatus> {
+    pub fn request_screen_recording_permission() -> Result<PermissionStatus> {
+        Err(RecorderError::Backend("wrec only supports macOS".into()))
+    }
+
+    pub fn microphone_permission_status() -> Result<PermissionStatus> {
+        Err(RecorderError::Backend("wrec only supports macOS".into()))
+    }
+
+    pub fn request_microphone_permission() -> Result<PermissionStatus> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))
     }
 

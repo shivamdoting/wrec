@@ -194,5 +194,6 @@ mod tests {
         .expect("old config without resolution should still load");
 
         assert_eq!(config.settings.resolution, Resolution::R1080p);
+        assert!(!config.settings.include_microphone);
     }
 }

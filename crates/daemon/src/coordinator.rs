@@ -367,6 +367,7 @@ fn recording_overrides(options: &RecordingOptions) -> RecordingOverrides {
         output_dir: options.output_dir.clone(),
         include_cursor: options.include_cursor,
         include_system_audio: options.include_system_audio,
+        include_microphone: options.include_microphone,
         hide_wrec: options.hide_wrec,
     }
 }

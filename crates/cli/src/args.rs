@@ -54,6 +54,7 @@ pub struct RecordArgs {
     pub output_dir: Option<PathBuf>,
     pub include_cursor: Option<bool>,
     pub include_system_audio: Option<bool>,
+    pub include_microphone: Option<bool>,
     pub hide_wrec: Option<bool>,
     pub duration: Option<Duration>,
     pub json: bool,
@@ -83,6 +84,7 @@ impl Default for RecordArgs {
             output_dir: None,
             include_cursor: None,
             include_system_audio: None,
+            include_microphone: None,
             hide_wrec: None,
             duration: None,
             json: false,
@@ -142,6 +144,8 @@ pub fn usage() -> String {
      \u{20}\u{20}--no-cursor          Do not capture the cursor for this recording\n\
      \u{20}\u{20}--system-audio       Capture system audio for this recording\n\
      \u{20}\u{20}--no-system-audio    Do not capture system audio for this recording\n\
+     \u{20}\u{20}--mic                Capture the default microphone as a separate audio track\n\
+     \u{20}\u{20}--no-mic             Do not capture the microphone for this recording\n\
      \u{20}\u{20}--hide-wrec          Hide Wrec windows for this recording\n\
      \u{20}\u{20}--no-hide-wrec       Do not hide Wrec windows for this recording\n\
      \u{20}\u{20}--detach             Submit the job and return immediately\n\
@@ -359,6 +363,8 @@ where
             "--no-cursor" => out.include_cursor = Some(false),
             "--system-audio" => out.include_system_audio = Some(true),
             "--no-system-audio" => out.include_system_audio = Some(false),
+            "--mic" => out.include_microphone = Some(true),
+            "--no-mic" => out.include_microphone = Some(false),
             "--hide-wrec" => out.hide_wrec = Some(true),
             "--no-hide-wrec" => out.hide_wrec = Some(false),
             "--detach" => out.detach = true,
@@ -653,6 +659,7 @@ mod tests {
             "5m",
             "--no-cursor",
             "--no-system-audio",
+            "--no-mic",
             "--json",
         ])
         .unwrap();
@@ -670,6 +677,7 @@ mod tests {
                 output_dir: Some(PathBuf::from("/tmp/out")),
                 include_cursor: Some(false),
                 include_system_audio: Some(false),
+                include_microphone: Some(false),
                 hide_wrec: None,
                 duration: Some(Duration::from_secs(5 * 60)),
                 json: true,
@@ -731,12 +739,20 @@ mod tests {
 
     #[test]
     fn record_parses_positive_boolean_overrides() {
-        let parsed = parse_vec(&["record", "--cursor", "--system-audio", "--hide-wrec"]).unwrap();
+        let parsed = parse_vec(&[
+            "record",
+            "--cursor",
+            "--system-audio",
+            "--mic",
+            "--hide-wrec",
+        ])
+        .unwrap();
         assert_eq!(
             parsed,
             Command::Record(RecordArgs {
                 include_cursor: Some(true),
                 include_system_audio: Some(true),
+                include_microphone: Some(true),
                 hide_wrec: Some(true),
                 ..RecordArgs::default()
             })

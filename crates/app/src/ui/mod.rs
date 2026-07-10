@@ -1,16 +1,16 @@
 use crate::{
     app::WrecApp,
     assets::{PhosphorIcon, GEIST_FONT_FAMILY, GEIST_MONO_FONT_FAMILY},
-    platform::CliInstallStatus,
+    platform::{CliInstallStatus, SkillInstallStatus},
 };
 use domain::{
-    CaptureSourceKind, CaptureTarget, FrameRate, Quality, RecorderMetrics, Resolution,
-    ScreenRecordingPermissionStatus,
+    CaptureSourceKind, CaptureTarget, FrameRate, PermissionStatus, Quality, RecorderMetrics,
+    Resolution,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::{Button as UiButton, ButtonVariants as _},
+    button::{Button as UiButton, ButtonVariant, ButtonVariants as _},
     input::Input,
     label::Label,
     notification::Notification,
@@ -26,12 +26,15 @@ pub(crate) type LimitedSelect = SelectState<Vec<LimitedOption>>;
 pub(crate) type TargetSelect = SelectState<Vec<TargetOption>>;
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
-const RECORD_BUTTON_HEIGHT: f32 = 42.;
+const RECORD_BUTTON_HEIGHT: f32 = 48.;
 pub(crate) const WINDOW_WIDTH: f32 = 628.;
 pub(crate) const WINDOW_HEIGHT: f32 = 540.;
 pub(crate) const WINDOW_MIN_WIDTH: f32 = 608.;
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 500.;
 pub(crate) const SOURCE_OPTIONS: [&str; 2] = ["Display", "Window"];
+pub(crate) const PILL_WIDTH: f32 = 116.;
+pub(crate) const PILL_HEIGHT: f32 = 34.;
+pub(crate) const PILL_BOTTOM_MARGIN: f32 = 24.;
 pub(crate) const CODEC_OPTIONS: [&str; 2] = ["HEVC", "H.264"];
 pub(crate) const QUALITY_OPTIONS: [&str; 3] = ["Balanced", "Efficient", "High"];
 
@@ -465,6 +468,40 @@ impl WrecApp {
                     this.set_include_system_audio(*checked, cx);
                 })),
         );
+        let mic_permission_missing =
+            self.settings.include_microphone && !self.mic_permission_status.is_granted();
+        let microphone_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .h(px(CONTROL_HEIGHT))
+            .gap_3()
+            .child(field_label("Microphone", muted_foreground))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(mic_permission_missing, |this| {
+                        this.child(mic_permission_button(
+                            "microphone-permission-grant",
+                            self.mic_permission_status,
+                            self.mic_permission_busy,
+                            cx,
+                        ))
+                    })
+                    .child(
+                        Switch::new("microphone-switch")
+                            .checked(self.settings.include_microphone)
+                            .color(switch_on_color(cx))
+                            .tooltip("Capture microphone")
+                            .disabled(controls_disabled)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.set_include_microphone(*checked, cx);
+                            })),
+                    ),
+            );
 
         div()
             .flex()
@@ -490,7 +527,8 @@ impl WrecApp {
                     .child(quality_row)
                     .child(frame_rate_row)
                     .child(cursor_row)
-                    .child(audio_row),
+                    .child(audio_row)
+                    .child(microphone_row),
             )
             .child(if show_pause_button {
                 div()
@@ -547,6 +585,21 @@ impl WrecApp {
                     .child(permission_state_button(
                         self.permission_status,
                         self.permission_busy,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .child(row_label("Microphone"))
+                    .child(mic_permission_button(
+                        "settings-microphone-state",
+                        self.mic_permission_status,
+                        self.mic_permission_busy,
                         cx,
                     )),
             )
@@ -631,9 +684,27 @@ impl WrecApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let cli_command = crate::platform::cli_install_command();
-        let cli_status_color = match self.cli_install_status {
-            CliInstallStatus::Conflict => cx.theme().danger,
-            _ => muted_foreground,
+        let cli_installed = self.cli_install_status == CliInstallStatus::Installed;
+        let cli_button_label = match self.cli_install_status {
+            CliInstallStatus::Installed => "Installed",
+            CliInstallStatus::NeedsUpdate => "Update",
+            CliInstallStatus::NotInstalled | CliInstallStatus::Conflict => "Copy",
+        };
+        let cli_tooltip = if cli_installed {
+            "CLI is installed"
+        } else {
+            "Copy CLI install command"
+        };
+        let skill_installed = self.skill_install_status == SkillInstallStatus::Installed;
+        let skill_button_label = match self.skill_install_status {
+            SkillInstallStatus::Installed => "Installed",
+            SkillInstallStatus::NeedsUpdate => "Update",
+            SkillInstallStatus::NotInstalled => "Install",
+        };
+        let skill_tooltip = if skill_installed {
+            "Skill is installed"
+        } else {
+            "Install the wrec skill to ~/.claude/skills/wrec"
         };
 
         div()
@@ -647,31 +718,19 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
+                    .child(row_label("CLI"))
                     .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .items_baseline()
-                            .gap_2()
-                            .min_w(px(0.))
-                            .child(row_label("Status"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cli_status_color)
-                                    .truncate()
-                                    .child(self.cli_install_status.label()),
-                            ),
-                    )
-                    .child(
-                        UiButton::new("cli-refresh-install")
-                            .ghost()
+                        UiButton::new("cli-copy-install")
+                            .secondary()
                             .compact()
-                            .size(px(CONTROL_HEIGHT))
-                            .icon(UiIcon::new(PhosphorIcon::Refresh).text_color(muted_foreground))
-                            .tooltip("Refresh CLI install status")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_cli_install_status(cx);
+                            .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .icon(UiIcon::new(PhosphorIcon::Clipboard).text_color(muted_foreground))
+                            .label(cli_button_label)
+                            .tooltip(cli_tooltip)
+                            .disabled(cli_installed || cli_command.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.copy_cli_install_command(window, cx);
                             })),
                     ),
             )
@@ -682,19 +741,19 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(row_label("Install command"))
+                    .child(row_label("Skill"))
                     .child(
-                        UiButton::new("cli-copy-install")
+                        UiButton::new("skill-install")
                             .secondary()
                             .compact()
                             .h(px(CONTROL_HEIGHT))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .icon(UiIcon::new(PhosphorIcon::Clipboard).text_color(muted_foreground))
-                            .label("Copy")
-                            .tooltip("Copy CLI install command")
-                            .disabled(cli_command.is_none())
+                            .icon(UiIcon::new(PhosphorIcon::Download).text_color(muted_foreground))
+                            .label(skill_button_label)
+                            .tooltip(skill_tooltip)
+                            .disabled(skill_installed)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.copy_cli_install_command(window, cx);
+                                this.install_wrec_skill(window, cx);
                             })),
                     ),
             )
@@ -792,7 +851,7 @@ impl WrecApp {
                                 this.push_log(format!("open GitHub failed: {err}"));
                                 push_app_notification(
                                     window,
-                                    Notification::new().message(format!(
+                                    app_notification(format!(
                                         "Could not open GitHub repository: {err}"
                                     )),
                                     cx,
@@ -982,6 +1041,10 @@ fn sidebar_nav_item(
     let on_click = Rc::new(cx.listener(move |this, _, _, cx| {
         if this.active_tab != tab {
             this.active_tab = tab;
+            if tab == AppTab::Cli {
+                this.refresh_cli_install_status(cx);
+                this.refresh_skill_install_status(cx);
+            }
             cx.notify();
         }
     }));
@@ -1058,7 +1121,7 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
 }
 
 fn permission_state_button(
-    status: ScreenRecordingPermissionStatus,
+    status: PermissionStatus,
     busy: bool,
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
@@ -1093,6 +1156,43 @@ fn permission_state_button(
     }
 }
 
+fn mic_permission_button(
+    id: &'static str,
+    status: PermissionStatus,
+    busy: bool,
+    cx: &mut Context<WrecApp>,
+) -> UiButton {
+    let label = if busy {
+        "Checking"
+    } else if status.is_granted() {
+        "Granted"
+    } else {
+        "Grant"
+    };
+    let tooltip = if status.is_granted() {
+        "Microphone permission granted"
+    } else {
+        "Grant Microphone access. If macOS does not prompt, enable Wrec in System Settings > Privacy & Security > Microphone"
+    };
+    let button = UiButton::new(id)
+        .compact()
+        .secondary()
+        .h(px(CONTROL_HEIGHT))
+        .font_weight(FontWeight::SEMIBOLD)
+        .label(label)
+        .tooltip(tooltip)
+        .disabled(busy || status.is_granted())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.request_microphone_permission(cx);
+        }));
+
+    if !busy && !status.is_granted() {
+        button.primary()
+    } else {
+        button
+    }
+}
+
 fn record_button(
     icon: PhosphorIcon,
     label: &'static str,
@@ -1102,13 +1202,17 @@ fn record_button(
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
     let theme = cx.theme();
-    let button = UiButton::new("record-button")
+    // Recording keeps the solid primary button so stop carries the same
+    // weight as record; the red stop glyph is the destructive accent.
+    UiButton::new("record-button")
+        .primary()
+        .large()
         .h(px(RECORD_BUTTON_HEIGHT))
         .font_weight(FontWeight::SEMIBOLD)
         .icon(UiIcon::new(icon).text_color(if is_idle {
             theme.button_primary_foreground
         } else {
-            theme.danger_foreground
+            theme.danger
         }))
         .label(label)
         .tooltip(tooltip)
@@ -1116,13 +1220,7 @@ fn record_button(
         .on_click(cx.listener(|this, _, window, cx| {
             this.toggle_recording(window, cx);
             cx.notify();
-        }));
-
-    if is_idle {
-        button.primary()
-    } else {
-        button.danger()
-    }
+        }))
 }
 
 fn pause_button(
@@ -1133,10 +1231,11 @@ fn pause_button(
     cx: &mut Context<WrecApp>,
 ) -> UiButton {
     UiButton::new("pause-button")
-        .secondary()
+        .with_variant(ButtonVariant::Default)
+        .large()
         .h(px(RECORD_BUTTON_HEIGHT))
         .font_weight(FontWeight::SEMIBOLD)
-        .icon(UiIcon::new(icon).text_color(cx.theme().muted_foreground))
+        .icon(UiIcon::new(icon).text_color(cx.theme().foreground))
         .label(label)
         .tooltip(tooltip)
         .disabled(disabled)
@@ -1224,6 +1323,41 @@ fn switch_row(label: &'static str, value: &'static str, value_color: Hsla, switc
         .child(switch)
 }
 
+/// Floating bottom-center indicator shown while a recording captures the
+/// microphone. Lives in its own always-on-top popup window so it stays
+/// visible when the main window is out of the way.
+pub(crate) struct RecordingPill;
+
+impl Render for RecordingPill {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(26.))
+                    .px_3()
+                    .rounded_full()
+                    .bg(rgba(0x111111e6))
+                    .border_1()
+                    .border_color(rgba(0xffffff26))
+                    .child(div().w_2().h_2().rounded_full().bg(rgb(0xe5484d)))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_family(GEIST_FONT_FAMILY)
+                            .text_color(rgb(0xffffff))
+                            .child("Mic on"),
+                    ),
+            )
+    }
+}
+
 fn label_switch_row(label: &'static str, color: Hsla, switch: Switch) -> Div {
     div()
         .flex()
@@ -1262,6 +1396,47 @@ pub(crate) fn fps_label(fps: FrameRate) -> &'static str {
         FrameRate::Fps60 => "60 FPS",
         FrameRate::Fps30 => "30 FPS",
     }
+}
+
+/// Build an app toast whose message can be copied: hovering the toast reveals
+/// a copy button at its top right, next to the close button.
+pub(crate) fn app_notification(message: impl Into<SharedString>) -> Notification {
+    let message: SharedString = message.into();
+    Notification::new().content(move |_, _, cx| {
+        let copy_text = message.clone();
+        div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(message.clone()),
+            )
+            .child(
+                div()
+                    .invisible()
+                    .group_hover("", |this| this.visible())
+                    .child(
+                        UiButton::new("copy-notification")
+                            .icon(
+                                UiIcon::new(PhosphorIcon::Clipboard)
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Copy message")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_text.to_string(),
+                                ));
+                            }),
+                    ),
+            )
+            .into_any_element()
+    })
 }
 
 pub(crate) fn push_app_notification(window: &mut Window, notification: Notification, cx: &mut App) {

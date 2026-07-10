@@ -48,7 +48,7 @@ JSON-friendly CLI for scripts and agents.
 - HEVC by default, with H.264 available.
 - 30 FPS and 60 FPS recording.
 - Resolution controls for 720p, 1080p, 2K, 4K, and native capture.
-- Cursor capture, system audio capture, and Wrec-window hiding toggles.
+- Cursor capture, system audio capture, microphone capture, and Wrec-window hiding toggles.
 - Pause, resume, stop, queued jobs, and recording status.
 - JSON output for target discovery, job control, errors, metrics, and logs.
 - Local recording history and metrics stored separately from media files.
@@ -81,6 +81,7 @@ under `/usr/local/lib/wrec`, and places a managed wrapper at
 - Apple Silicon is the primary target.
 - Screen Recording permission for the app or terminal.
 - Audio Recording permission when system audio capture is enabled.
+- Microphone permission when microphone capture is enabled.
 
 ## Runtime Paths
 

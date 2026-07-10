@@ -78,6 +78,7 @@ pub struct RecordingOptions {
     pub output_dir: Option<PathBuf>,
     pub include_cursor: Option<bool>,
     pub include_system_audio: Option<bool>,
+    pub include_microphone: Option<bool>,
     pub hide_wrec: Option<bool>,
 }
 

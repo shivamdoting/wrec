@@ -30,6 +30,8 @@
 	<string>Wrec needs Screen Recording access to capture selected displays and windows.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Wrec needs Audio Recording access to capture system audio playing during screen recordings.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Wrec needs Microphone access to capture microphone input as a separate audio track alongside screen recordings when the Microphone toggle is on.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>Wrec needs access to save recordings when you choose a folder in Documents.</string>
 	<key>NSDownloadsFolderUsageDescription</key>

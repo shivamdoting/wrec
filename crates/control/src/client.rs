@@ -6,7 +6,7 @@ use crate::{
     },
     PROTOCOL_VERSION,
 };
-use domain::{CaptureTarget, ScreenRecordingPermissionStatus};
+use domain::{CaptureTarget, PermissionStatus};
 use serde_json::{json, Value};
 use std::{
     ffi::OsString,
@@ -160,16 +160,12 @@ impl DaemonClient {
         self.request_result("daemon.stop", json!({}))
     }
 
-    pub fn screen_recording_permission_status(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError> {
+    pub fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError> {
         let result = self.request_result("permission.status", json!({}))?;
         decode_result_field(result, "status", "permission_status_decode_failed")
     }
 
-    pub fn request_screen_recording_permission(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError> {
+    pub fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError> {
         let result = self.request_result("permission.request", json!({}))?;
         decode_result_field(result, "status", "permission_status_decode_failed")
     }

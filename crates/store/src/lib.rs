@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -86,6 +86,7 @@ pub struct RecordingRecord {
     pub fps: u32,
     pub include_cursor: bool,
     pub include_system_audio: bool,
+    pub include_microphone: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +265,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             fps INTEGER NOT NULL,
             include_cursor INTEGER NOT NULL,
             include_system_audio INTEGER NOT NULL DEFAULT 1,
+            include_microphone INTEGER NOT NULL DEFAULT 0,
             native_width INTEGER,
             native_height INTEGER,
             output_width INTEGER,
@@ -306,6 +308,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version == 1 {
         conn.execute(
             "ALTER TABLE recordings ADD COLUMN include_system_audio INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+
+    if (1..=2).contains(&version) {
+        conn.execute(
+            "ALTER TABLE recordings ADD COLUMN include_microphone INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -379,8 +388,9 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             resolution,
             fps,
             include_cursor,
-            include_system_audio
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            include_system_audio,
+            include_microphone
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(id) DO UPDATE SET
             started_at_ms = excluded.started_at_ms,
             status = excluded.status,
@@ -394,6 +404,7 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             fps = excluded.fps,
             include_cursor = excluded.include_cursor,
             include_system_audio = excluded.include_system_audio,
+            include_microphone = excluded.include_microphone,
             stopped_at_ms = NULL,
             duration_ms = NULL,
             file_size_bytes = NULL,
@@ -417,6 +428,7 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
             i64::from(recording.fps),
             bool_to_i64(recording.include_cursor),
             bool_to_i64(recording.include_system_audio),
+            bool_to_i64(recording.include_microphone),
         ],
     )?;
     Ok(())
@@ -603,6 +615,7 @@ mod tests {
             fps: 60,
             include_cursor: true,
             include_system_audio: true,
+            include_microphone: false,
         }
     }
 
@@ -724,16 +737,78 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        let audio: i64 = conn
+        let (audio, microphone): (i64, i64) = conn
             .query_row(
-                "SELECT include_system_audio FROM recordings WHERE id = 7",
+                "SELECT include_system_audio, include_microphone FROM recordings WHERE id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(audio, 1);
+        assert_eq!(microphone, 0);
+    }
+
+    #[test]
+    fn migrate_adds_microphone_column_to_v2_database() {
+        let db = TempDb::new("migrate-v2");
+        {
+            let conn = Connection::open(db.path()).expect("open raw connection");
+            conn.execute_batch(
+                "
+                CREATE TABLE recordings (
+                    id INTEGER PRIMARY KEY,
+                    started_at_ms INTEGER NOT NULL,
+                    stopped_at_ms INTEGER,
+                    status TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    target_kind TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    target_name TEXT NOT NULL,
+                    codec TEXT NOT NULL,
+                    quality TEXT NOT NULL,
+                    resolution TEXT NOT NULL,
+                    fps INTEGER NOT NULL,
+                    include_cursor INTEGER NOT NULL,
+                    include_system_audio INTEGER NOT NULL DEFAULT 1,
+                    native_width INTEGER,
+                    native_height INTEGER,
+                    output_width INTEGER,
+                    output_height INTEGER,
+                    duration_ms INTEGER,
+                    file_size_bytes INTEGER,
+                    error_message TEXT
+                );
+                INSERT INTO recordings (
+                    id, started_at_ms, status, output_path, target_kind, target_id,
+                    target_name, codec, quality, resolution, fps, include_cursor
+                ) VALUES (
+                    9, 1000, 'completed', '/tmp/old.mp4', 'display', 1,
+                    'Main', 'hevc', 'high', 'native', 60, 1
+                );
+                PRAGMA user_version = 2;
+                ",
+            )
+            .expect("create v2 schema");
+        }
+
+        drop(Store::open(db.path()).expect("open migrates v2 store"));
+
+        let conn = read_connection(&db);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let microphone: i64 = conn
+            .query_row(
+                "SELECT include_microphone FROM recordings WHERE id = 9",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
 
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(audio, 1);
+        assert_eq!(microphone, 0);
     }
 
     #[test]
@@ -748,7 +823,7 @@ mod tests {
         let row = conn
             .query_row(
                 "SELECT status, output_path, target_name, fps, include_cursor, \
-                 include_system_audio FROM recordings WHERE id = 1",
+                 include_system_audio, include_microphone FROM recordings WHERE id = 1",
                 [],
                 |row| {
                     Ok((
@@ -758,6 +833,7 @@ mod tests {
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 },
             )
@@ -769,6 +845,7 @@ mod tests {
         assert_eq!(row.3, 60);
         assert_eq!(row.4, 1);
         assert_eq!(row.5, 1);
+        assert_eq!(row.6, 0);
     }
 
     #[test]

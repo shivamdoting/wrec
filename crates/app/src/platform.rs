@@ -10,6 +10,8 @@ const INSTALLED_BIN: &str = "/usr/local/bin/wrec";
 const INSTALLED_CLI: &str = "/usr/local/lib/wrec/wrec";
 const INSTALLED_DAEMON: &str = "/usr/local/lib/wrec/daemon";
 const INSTALLED_CAPTURE_ENGINE: &str = "/usr/local/lib/wrec/capture-engine";
+const SKILL_CONTENT: &str = include_str!("../assets/skill/SKILL.md");
+const SKILL_RELATIVE_PATH: &str = ".claude/skills/wrec/SKILL.md";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CliInstallStatus {
@@ -26,6 +28,23 @@ impl CliInstallStatus {
             Self::Installed => "Installed",
             Self::NeedsUpdate => "Update available",
             Self::Conflict => "Path conflict",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SkillInstallStatus {
+    NotInstalled,
+    Installed,
+    NeedsUpdate,
+}
+
+impl SkillInstallStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "Not installed",
+            Self::Installed => "Installed",
+            Self::NeedsUpdate => "Update available",
         }
     }
 }
@@ -84,6 +103,32 @@ pub(crate) fn cli_install_command() -> Option<String> {
         Some(version) => format!("curl -fsSL {CLI_INSTALLER_URL} | WREC_VERSION={version} sh"),
         None => format!("curl -fsSL {CLI_INSTALLER_URL} | sh"),
     })
+}
+
+fn skill_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(SKILL_RELATIVE_PATH))
+}
+
+pub(crate) fn skill_install_status() -> SkillInstallStatus {
+    let Some(path) = skill_path() else {
+        return SkillInstallStatus::NotInstalled;
+    };
+    match fs::read_to_string(path) {
+        Ok(contents) if contents == SKILL_CONTENT => SkillInstallStatus::Installed,
+        Ok(_) => SkillInstallStatus::NeedsUpdate,
+        Err(_) => SkillInstallStatus::NotInstalled,
+    }
+}
+
+pub(crate) fn install_skill() -> std::io::Result<PathBuf> {
+    let path = skill_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found")
+    })?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, SKILL_CONTENT)?;
+    Ok(path)
 }
 
 fn current_app_bundle_path() -> Option<PathBuf> {

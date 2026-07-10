@@ -1,7 +1,5 @@
 use control::AgentError;
-use domain::{
-    CaptureTarget, RecorderEngine, RecorderError, RecorderEvent, ScreenRecordingPermissionStatus,
-};
+use domain::{CaptureTarget, PermissionStatus, RecorderEngine, RecorderError, RecorderEvent};
 use macos::MacosRecorder;
 use std::sync::mpsc;
 
@@ -9,12 +7,8 @@ pub(crate) trait RecordingRuntime: Clone + Send + Sync + 'static {
     type Engine: RecorderEngine + Send + 'static;
 
     fn list_targets(&self) -> Result<Vec<CaptureTarget>, AgentError>;
-    fn screen_recording_permission_status(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError>;
-    fn request_screen_recording_permission(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError>;
+    fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError>;
+    fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError>;
     fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine;
 }
 
@@ -34,18 +28,14 @@ impl RecordingRuntime for MacosRuntime {
         })
     }
 
-    fn screen_recording_permission_status(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError> {
+    fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError> {
         let (tx, _rx) = mpsc::channel();
         MacosRecorder::new(tx)
             .screen_recording_permission_status()
             .map_err(permission_error)
     }
 
-    fn request_screen_recording_permission(
-        &self,
-    ) -> Result<ScreenRecordingPermissionStatus, AgentError> {
+    fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError> {
         let (tx, _rx) = mpsc::channel();
         MacosRecorder::new(tx)
             .request_screen_recording_permission()
