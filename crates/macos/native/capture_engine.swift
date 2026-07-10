@@ -416,7 +416,7 @@ func run() async {
         Foundation.exit(13)
     }
 
-    if includeMicrophone && microphonePermissionDenied() {
+    if includeMicrophone && !microphonePermissionGranted() {
         fputs("capture-engine: permission denied: Microphone access is required. Grant it in System Settings > Privacy & Security > Microphone, or disable the microphone toggle.\n", stderr)
         Foundation.exit(13)
     }
@@ -582,15 +582,6 @@ func ensureScreenCapturePermission() -> Bool {
 
 func microphonePermissionGranted() -> Bool {
     AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-}
-
-func microphonePermissionDenied() -> Bool {
-    switch AVCaptureDevice.authorizationStatus(for: .audio) {
-    case .denied, .restricted:
-        return true
-    default:
-        return false
-    }
 }
 
 func requestMicrophonePermission() async -> Bool {
