@@ -767,7 +767,17 @@ mod tests {
 
     #[test]
     fn record_rejects_bad_values() {
-        assert!(parse_vec(&["record", "--fps", "24"]).is_err());
+        for args in [
+            vec!["record", "--fps", "0"],
+            vec!["record", "--fps", "24"],
+            vec!["record", "--fps", "-30"],
+            vec!["record", "--fps", "30.0"],
+            vec!["record", "--fps", "invalid"],
+            vec!["record", "--fps=120"],
+        ] {
+            let err = parse_vec(&args).unwrap_err();
+            assert!(err.contains("expected 30 or 60"), "{err}");
+        }
         assert!(parse_vec(&["record", "--codec", "av1"]).is_err());
         assert!(parse_vec(&["record", "--quality", "ultra"]).is_err());
         assert!(parse_vec(&["record", "--resolution", "8k"]).is_err());

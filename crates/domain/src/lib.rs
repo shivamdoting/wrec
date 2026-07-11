@@ -343,6 +343,22 @@ mod tests {
     }
 
     #[test]
+    fn frame_rate_deserialization_only_accepts_30_and_60() {
+        assert_eq!(
+            serde_json::from_str::<FrameRate>(r#""30""#).unwrap(),
+            FrameRate::Fps30
+        );
+        assert_eq!(
+            serde_json::from_str::<FrameRate>(r#""60""#).unwrap(),
+            FrameRate::Fps60
+        );
+
+        for value in [r#""0""#, r#""24""#, r#""120""#, "30", "60", r#""invalid""#] {
+            assert!(serde_json::from_str::<FrameRate>(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn preset_limits_cap_expensive_settings() {
         assert_eq!(Quality::Efficient.max_resolution(), Some(Resolution::R720p));
         assert_eq!(Quality::Balanced.max_resolution(), Some(Resolution::R1080p));

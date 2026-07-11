@@ -400,7 +400,10 @@ func run() async {
     }
 
     let outputPath = args[1]
-    let fps = Int32(args[2]) ?? 60
+    guard let fps = Int32(args[2]), fps == 30 || fps == 60 else {
+        fputs("capture-engine: invalid fps `\(args[2])` (expected 30 or 60)\n", stderr)
+        Foundation.exit(64)
+    }
     let includeCursor = args[3] == "true"
     let targetKind = args[4]
     let targetId = UInt32(args[5]) ?? 0
