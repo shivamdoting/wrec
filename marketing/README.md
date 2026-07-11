@@ -20,5 +20,5 @@ Do not use npm, pnpm, yarn, or npx in this project.
 - `src/pages/index.astro` is the minimal landing page.
 - `src/pages/docs.astro` documents the agent CLI contract and runtime architecture.
 
-The docs should stay aligned with `crates/app`, `crates/core`, and
+The docs should stay aligned with `crates/app`, `crates/domain`, and
 `crates/cli`.

@@ -41,7 +41,6 @@ impl RecordingStatus {
 #[derive(Debug, Clone, Copy)]
 pub enum EventLevel {
     Info,
-    Warn,
     Error,
 }
 
@@ -49,7 +48,6 @@ impl EventLevel {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Info => "info",
-            Self::Warn => "warn",
             Self::Error => "error",
         }
     }
@@ -57,7 +55,6 @@ impl EventLevel {
 
 #[derive(Debug, Clone, Copy)]
 pub enum EventSource {
-    App,
     Backend,
     CaptureEngine,
 }
@@ -65,7 +62,6 @@ pub enum EventSource {
 impl EventSource {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::App => "app",
             Self::Backend => "backend",
             Self::CaptureEngine => "capture_engine",
         }

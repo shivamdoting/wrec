@@ -7,7 +7,7 @@ rust-version.workspace = true
 build = "build.rs"
 
 [dependencies]
-domain = { package = "core", path = "../core" }
+domain = { path = "../domain" }
 anyhow.workspace = true
 tracing.workspace = true
 

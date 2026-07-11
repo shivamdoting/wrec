@@ -84,7 +84,7 @@ dependencies = [
  "anyhow",
  "config",
  "control",
- "core",
+ "domain",
  "futures",
  "gpui",
  "gpui-component",
@@ -480,16 +480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend"
-version = "0.1.1"
-dependencies = [
- "config",
- "core",
- "store",
- "tracing",
-]
-
-[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -826,8 +816,8 @@ name = "cli"
 version = "0.1.1"
 dependencies = [
  "control",
- "core",
  "ctrlc",
+ "domain",
  "serde_json",
 ]
 
@@ -959,7 +949,7 @@ dependencies = [
 name = "config"
 version = "0.1.1"
 dependencies = [
- "core",
+ "domain",
  "serde",
  "serde_json",
  "tracing",
@@ -979,7 +969,7 @@ dependencies = [
 name = "control"
 version = "0.1.1"
 dependencies = [
- "core",
+ "domain",
  "serde",
  "serde_json",
 ]
@@ -991,15 +981,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
 dependencies = [
  "unicode-segmentation",
-]
-
-[[package]]
-name = "core"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "serde",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1260,12 +1241,15 @@ dependencies = [
 name = "daemon"
 version = "0.1.1"
 dependencies = [
- "backend",
+ "config",
  "control",
- "core",
+ "domain",
  "macos",
+ "rusqlite",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -1391,6 +1375,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "domain"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3326,7 +3319,7 @@ name = "macos"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "core",
+ "domain",
  "objc2",
  "objc2-av-foundation",
  "objc2-core-foundation",
@@ -5545,15 +5538,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "store"
-version = "0.1.1"
-dependencies = [
- "rusqlite",
- "thiserror 1.0.69",
- "tracing",
-]
 
 [[package]]
 name = "str_indices"

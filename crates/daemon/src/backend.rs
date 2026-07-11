@@ -3,20 +3,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use config::{save_config, store_path, AppConfig};
+use crate::store::{
+    now_ms, CaptureDimensions, EventLevel, EventRecord, EventSource, MetricRecord, RecordingRecord,
+    Store,
+};
+use config::{store_path, AppConfig};
 use domain::{
     CaptureSourceKind, CaptureTarget, Codec, FrameRate, Quality, RecorderEvent, RecorderMetrics,
     RecorderSettings, Resolution,
-};
-use store::{
-    now_ms, CaptureDimensions, EventLevel, EventRecord, EventSource, MetricRecord, RecordingRecord,
-    Store,
 };
 
 #[derive(Debug, Default, Clone)]
 pub struct RecordingOverrides {
     pub source_kind: Option<CaptureSourceKind>,
-    pub target_id: Option<u64>,
     pub fps: Option<FrameRate>,
     pub codec: Option<Codec>,
     pub quality: Option<Quality>,
@@ -28,35 +27,21 @@ pub struct RecordingOverrides {
     pub hide_wrec: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ClientEventLevel {
-    Info,
-    Error,
-}
-
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
     Starting {
-        session_id: u64,
-        target: CaptureTarget,
-        settings: RecorderSettings,
         output_path: PathBuf,
     },
     Log {
-        session_id: Option<u64>,
         message: String,
-        marked_started: bool,
     },
     Metrics {
-        session_id: u64,
         metrics: RecorderMetrics,
     },
     Failed {
-        recording_id: Option<u64>,
         message: String,
     },
     Exited {
-        session_id: u64,
         success: bool,
         status: String,
         output_path: Option<PathBuf>,
@@ -88,14 +73,6 @@ impl WrecBackend {
         }
     }
 
-    pub fn active_session_id(&self) -> Option<u64> {
-        self.active_session_id
-    }
-
-    pub fn active_output_path(&self) -> Option<&Path> {
-        self.active_output_path.as_deref()
-    }
-
     pub fn handle_recorder_event(&mut self, event: &RecorderEvent) -> BackendEvent {
         match event {
             RecorderEvent::Starting {
@@ -117,9 +94,6 @@ impl WrecBackend {
                 );
 
                 BackendEvent::Starting {
-                    session_id: *session_id,
-                    target: target.clone(),
-                    settings: settings.clone(),
                     output_path: output_path.clone(),
                 }
             }
@@ -143,9 +117,7 @@ impl WrecBackend {
                 self.append_event(*session_id, source, EventLevel::Info, None, message.clone());
 
                 BackendEvent::Log {
-                    session_id: *session_id,
                     message: message.clone(),
-                    marked_started,
                 }
             }
             RecorderEvent::Metrics {
@@ -155,7 +127,6 @@ impl WrecBackend {
                 self.append_metric(*session_id, metrics);
 
                 BackendEvent::Metrics {
-                    session_id: *session_id,
                     metrics: metrics.clone(),
                 }
             }
@@ -179,7 +150,6 @@ impl WrecBackend {
                 self.active_output_path = None;
 
                 BackendEvent::Failed {
-                    recording_id,
                     message: message.clone(),
                 }
             }
@@ -212,7 +182,6 @@ impl WrecBackend {
                 self.active_output_path = None;
 
                 BackendEvent::Exited {
-                    session_id: *session_id,
                     success,
                     status: status.clone(),
                     output_path,
@@ -239,24 +208,6 @@ impl WrecBackend {
                 fields_json,
             });
         }
-    }
-
-    pub fn append_app_event(
-        &self,
-        recording_id: Option<u64>,
-        level: ClientEventLevel,
-        message: String,
-    ) {
-        self.append_event(
-            recording_id,
-            EventSource::App,
-            match level {
-                ClientEventLevel::Info => EventLevel::Info,
-                ClientEventLevel::Error => EventLevel::Error,
-            },
-            None,
-            message,
-        );
     }
 
     fn mark_recording_started(&self, session_id: u64) {
@@ -331,10 +282,7 @@ pub fn load_config() -> AppConfig {
     AppConfig::load()
 }
 
-pub fn persist_config(config: &AppConfig) -> std::io::Result<()> {
-    save_config(config)
-}
-
+#[cfg(test)]
 pub fn build_settings(
     saved: &RecorderSettings,
     overrides: &RecordingOverrides,

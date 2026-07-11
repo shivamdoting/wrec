@@ -1,11 +1,11 @@
+use crate::backend::{
+    build_settings_report, load_config, selected_target_id, BackendEvent, RecordingOverrides,
+};
 use crate::{
     jobs::JobRecord,
     paths::append_daemon_log,
     runtime::RecordingRuntime,
     target_resolution::{resolve_record_target, settings_for_target},
-};
-use backend::{
-    build_settings_report, load_config, selected_target_id, BackendEvent, RecordingOverrides,
 };
 use control::{
     daemon_log_path, job_events_path, now_ms, socket_path, wrec_home, AgentError, AgentWarning,
@@ -26,7 +26,7 @@ static TARGET_LIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) struct Coordinator<R: RecordingRuntime> {
     runtime: R,
-    backend: backend::WrecBackend,
+    backend: crate::backend::WrecBackend,
     jobs: BTreeMap<u64, JobRecord<R::Engine>>,
     queue: VecDeque<u64>,
     target_cache: Vec<CaptureTarget>,
@@ -39,7 +39,7 @@ impl<R: RecordingRuntime> Coordinator<R> {
     pub(crate) fn new(runtime: R) -> Self {
         Self {
             runtime,
-            backend: backend::WrecBackend::open(),
+            backend: crate::backend::WrecBackend::open(),
             jobs: BTreeMap::new(),
             queue: VecDeque::new(),
             target_cache: Vec::new(),
@@ -359,7 +359,6 @@ impl<R: RecordingRuntime> Coordinator<R> {
 fn recording_overrides(options: &RecordingOptions) -> RecordingOverrides {
     RecordingOverrides {
         source_kind: options.source_kind,
-        target_id: None,
         fps: options.fps,
         codec: options.codec,
         quality: options.quality,

@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 control = { path = "../control" }
-domain = { package = "core", path = "../core" }
+domain = { path = "../domain" }
 config = { path = "../config" }
 macos = { path = "../macos" }
 anyhow.workspace = true

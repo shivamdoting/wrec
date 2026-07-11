@@ -7,11 +7,14 @@ rust-version.workspace = true
 
 [dependencies]
 control = { path = "../control" }
-backend = { path = "../backend" }
-domain = { package = "core", path = "../core" }
+config = { path = "../config" }
+domain = { path = "../domain" }
 macos = { path = "../macos" }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+thiserror.workspace = true
+tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[bin]]

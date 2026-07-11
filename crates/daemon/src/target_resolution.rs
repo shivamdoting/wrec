@@ -1,4 +1,4 @@
-use backend::{capture_kind_arg, resolve_target};
+use crate::backend::{capture_kind_arg, resolve_target};
 use control::{AgentError, TargetSelector};
 use domain::{CaptureSourceKind, CaptureTarget, RecorderSettings};
 
