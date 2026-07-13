@@ -47,9 +47,6 @@ func emitFailure(_ message: String) {
 @MainActor
 final class MicIndicator {
     private var panel: NSPanel?
-    private var bars: [CALayer] = []
-    private var level: Float = 0
-    private var decayTimer: DispatchSourceTimer?
 
     // Automated-verification hook. "1" forces the pill without microphone
     // capture (production sharing behavior); "capturable" additionally skips
@@ -100,63 +97,18 @@ final class MicIndicator {
         if Self.testHook != "capturable" {
             panel.sharingType = .none
         }
-        let (view, bars) = Self.pillView()
-        panel.contentView = view
-        self.bars = bars
+        panel.contentView = Self.pillView()
         panel.orderFrontRegardless()
         self.panel = panel
-        startLevelDecay()
         logLine("mic indicator shown windowNumber=\(panel.windowNumber)")
     }
 
-    private var testTimer: DispatchSourceTimer?
-
-    func retainForTest(_ timer: DispatchSourceTimer) {
-        testTimer = timer
-    }
-
     func hide() {
-        testTimer?.cancel()
-        testTimer = nil
-        decayTimer?.cancel()
-        decayTimer = nil
         panel?.orderOut(nil)
         panel = nil
     }
 
-    /// Feed the peak level (0...1) of mic audio that was actually written to
-    /// the file. The bars animate only from real captured samples, so motion
-    /// is proof of capture; silence and pause settle back to idle.
-    func setLevel(_ newLevel: Float) {
-        level = max(level * 0.6, min(1, newLevel * 1.8))
-        applyBars()
-    }
-
-    private func startLevelDecay() {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 0.12, repeating: 0.12)
-        timer.setEventHandler { [weak self] in
-            guard let self, self.level > 0.01 else { return }
-            self.level *= 0.72
-            self.applyBars()
-        }
-        timer.resume()
-        decayTimer = timer
-    }
-
-    private static let barGains: [Float] = [0.5, 0.85, 1.0, 0.7, 0.45]
-
-    private func applyBars() {
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.1)
-        for (index, bar) in bars.enumerated() {
-            let height = CGFloat(3 + level * Self.barGains[index] * 13)
-            bar.bounds = CGRect(x: 0, y: 0, width: 2.5, height: height)
-        }
-        CATransaction.commit()
-    }
-
-    private static func pillView() -> (NSView, [CALayer]) {
+    private static func pillView() -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: pillWidth, height: pillHeight))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(white: 0.07, alpha: 0.9).cgColor
@@ -164,19 +116,10 @@ final class MicIndicator {
         view.layer?.borderWidth = 1
         view.layer?.borderColor = NSColor(white: 1, alpha: 0.15).cgColor
 
-        // Five level bars where the waveform glyph used to be; heights track
-        // the live mic level fed via setLevel.
-        var bars: [CALayer] = []
-        let barColor = NSColor(red: 0.9, green: 0.28, blue: 0.3, alpha: 1).cgColor
-        for index in 0..<barGains.count {
-            let bar = CALayer()
-            bar.backgroundColor = barColor
-            bar.cornerRadius = 1.25
-            bar.bounds = CGRect(x: 0, y: 0, width: 2.5, height: 3)
-            bar.position = CGPoint(x: 13 + CGFloat(index) * 4, y: pillHeight / 2)
-            view.layer?.addSublayer(bar)
-            bars.append(bar)
-        }
+        let icon = NSImageView(frame: NSRect(x: 12, y: (pillHeight - 16) / 2, width: 16, height: 16))
+        icon.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Microphone recording")
+        icon.contentTintColor = NSColor(red: 0.9, green: 0.28, blue: 0.3, alpha: 1)
+        view.addSubview(icon)
 
         let label = NSTextField(labelWithString: "Mic on")
         label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
@@ -185,7 +128,7 @@ final class MicIndicator {
         label.frame.origin = NSPoint(x: 36, y: (pillHeight - label.frame.height) / 2)
         view.addSubview(label)
 
-        return (view, bars)
+        return view
     }
 }
 
@@ -243,10 +186,6 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var metricsTimer: DispatchSourceTimer?
     private var lastPTS: CMTime?
     private var didReportWriterFailure = false
-    // Called on the recorder queue with the peak level of mic samples that
-    // were actually appended to the file; throttled to roughly 12 Hz.
-    var micLevelHandler: ((Float) -> Void)?
-    private var micLevelCounter = 0
     private let nativeWidth: Int
     private let nativeHeight: Int
     private let outputWidth: Int
@@ -435,70 +374,11 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if appendAudioSample(sampleBuffer, to: micInput, label: "microphone") {
             micSampleCount += 1
-            micLevelCounter += 1
-            if micLevelCounter % 2 == 0, let handler = micLevelHandler,
-                let level = Self.peakLevel(of: sampleBuffer)
-            {
-                handler(level)
-            }
         } else {
             droppedMicSampleCount += 1
         }
     }
 
-    // Peak of a strided subset of the buffer's PCM samples; cheap enough to
-    // run on the capture path.
-    private static func peakLevel(of sampleBuffer: CMSampleBuffer) -> Float? {
-        guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
-            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
-            let block = CMSampleBufferGetDataBuffer(sampleBuffer)
-        else {
-            return nil
-        }
-        var contiguousLength = 0
-        var pointer: UnsafeMutablePointer<CChar>?
-        guard
-            CMBlockBufferGetDataPointer(
-                block,
-                atOffset: 0,
-                lengthAtOffsetOut: &contiguousLength,
-                totalLengthOut: nil,
-                dataPointerOut: &pointer
-            ) == noErr,
-            let data = pointer, contiguousLength > 0
-        else {
-            return nil
-        }
-
-        var peak: Float = 0
-        let raw = UnsafeRawPointer(data)
-        // Stride whole frames and inspect every channel within each sampled
-        // frame, so interleaved multi-channel input cannot alias one channel.
-        let channels = max(1, Int(asbd.mChannelsPerFrame))
-        let frameStride = 16 * channels
-        if (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && asbd.mBitsPerChannel == 32 {
-            let count = contiguousLength / 4
-            let samples = raw.bindMemory(to: Float.self, capacity: count)
-            for frame in stride(from: 0, to: count, by: frameStride) {
-                for channel in 0..<channels where frame + channel < count {
-                    peak = max(peak, abs(samples[frame + channel]))
-                }
-            }
-        } else if (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
-            && asbd.mBitsPerChannel == 16
-        {
-            let count = contiguousLength / 2
-            let samples = raw.bindMemory(to: Int16.self, capacity: count)
-            for frame in stride(from: 0, to: count, by: frameStride) {
-                for channel in 0..<channels where frame + channel < count {
-                    peak = max(peak, abs(Float(samples[frame + channel])) / 32768)
-                }
-            }
-        } else {
-            return nil
-        }
-        return min(1, peak)
-    }
 
     private func appendAudioSample(_ sampleBuffer: CMSampleBuffer, to input: AVAssetWriterInput, label: String) -> Bool {
         guard didStart, let firstPTS else {
@@ -865,30 +745,6 @@ func run() async {
             includeSystemAudio: includeSystemAudio,
             includeMicrophone: includeMicrophone
         )
-        if wantsMicIndicator {
-            recorder.micLevelHandler = { level in
-                Task { @MainActor in
-                    micIndicator.setLevel(level)
-                }
-            }
-        }
-        // The test hook has no microphone; synthesize levels so animation is
-        // verifiable without mic TCC.
-        if MicIndicator.testHookEnabled && !includeMicrophone {
-            let synth = DispatchSource.makeTimerSource(queue: .main)
-            synth.schedule(deadline: .now() + 0.5, repeating: 0.09)
-            var tick = 0.0
-            synth.setEventHandler {
-                tick += 1
-                let level = Float(0.5 + 0.5 * sin(tick / 2)) * Float.random(in: 0.4...1)
-                Task { @MainActor in
-                    micIndicator.setLevel(level)
-                }
-            }
-            synth.resume()
-            micIndicator.retainForTest(synth)
-        }
-
         let stream = SCStream(filter: filter, configuration: streamConfig, delegate: recorder)
         try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: recorder.queue)
         if includeSystemAudio {
