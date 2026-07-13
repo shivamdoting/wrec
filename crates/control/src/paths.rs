@@ -6,11 +6,18 @@ use std::{
 const SOCKET_NAME: &str = "wrec.sock";
 const DAEMON_LOG_NAME: &str = "daemon.log";
 
+// Dev (debug-profile) builds run their own daemon under a separate home so a
+// dev daemon never fights the installed one for the socket.
+#[cfg(debug_assertions)]
+const HOME_DIR_NAME: &str = ".wrec-dev";
+#[cfg(not(debug_assertions))]
+const HOME_DIR_NAME: &str = ".wrec";
+
 pub fn wrec_home() -> PathBuf {
     std::env::var_os("WREC_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".wrec")))
-        .unwrap_or_else(|| PathBuf::from(".wrec"))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(HOME_DIR_NAME)))
+        .unwrap_or_else(|| PathBuf::from(HOME_DIR_NAME))
 }
 
 pub fn socket_path() -> PathBuf {
