@@ -5,7 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Keep app, CLI, and dev/release builds on one namespace so selected settings stay shared.
+// Dev (debug-profile) builds get their own data namespace so testing never
+// touches the installed app's store, config, or logs. App, CLI, and daemon
+// built with the same profile stay on one namespace.
+#[cfg(debug_assertions)]
+const APP_DATA_DIR_NAME: &str = "Wrec Dev";
+#[cfg(not(debug_assertions))]
 const APP_DATA_DIR_NAME: &str = "Wrec";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,8 +232,10 @@ fn legacy_config_paths() -> Vec<PathBuf> {
 #[cfg(target_os = "macos")]
 fn legacy_app_support_config_paths(home: &Path) -> Vec<PathBuf> {
     let app_support = home.join("Library").join("Application Support");
-    let mut names = vec!["Wrec Dev".to_string()];
+    // "Wrec Dev" is the live dev-build namespace, not a legacy source; a
+    // migration would delete the dev config out from under dev builds.
     let runtime_name = runtime_app_name();
+    let mut names = Vec::new();
     if runtime_name != APP_DATA_DIR_NAME && runtime_name != "Wrec Dev" {
         names.push(runtime_name);
     }
