@@ -1,7 +1,7 @@
 use std::{
     env,
     fmt::Write as _,
-    process::{Command, ExitCode},
+    process::{Command, ExitCode, ExitStatus},
 };
 
 #[derive(Debug, Default)]
@@ -24,10 +24,43 @@ struct TestCase {
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
+        Some("dev") => dev(),
         Some("testf") => testf(),
         _ => {
-            eprintln!("usage: cargo testf");
+            eprintln!("usage: cargo dev | cargo testf");
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn dev() -> ExitCode {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let daemon = Command::new(&cargo)
+        .args(["build", "-p", "daemon", "--bin", "daemon"])
+        .status();
+
+    if !command_succeeded(daemon, "build the daemon") {
+        return ExitCode::FAILURE;
+    }
+
+    let app = Command::new(cargo)
+        .args(["run", "-p", "app"])
+        .args(env::args_os().skip(2))
+        .status();
+
+    if command_succeeded(app, "run the app") {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn command_succeeded(status: std::io::Result<ExitStatus>, action: &str) -> bool {
+    match status {
+        Ok(status) => status.success(),
+        Err(err) => {
+            eprintln!("failed to {action}: {err}");
+            false
         }
     }
 }

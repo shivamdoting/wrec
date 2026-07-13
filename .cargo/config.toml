@@ -1,4 +1,4 @@
 [alias]
-dev = ["run", "-p", "app"]
-dive = ["run", "-p", "app"]
+dev = ["run", "-q", "-p", "xtask", "--", "dev"]
+dive = ["run", "-q", "-p", "xtask", "--", "dev"]
 testf = ["run", "-q", "-p", "xtask", "--", "testf"]

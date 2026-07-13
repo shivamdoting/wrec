@@ -42,12 +42,11 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Run From Source
 
-During Cargo development, the app and CLI can auto-start the daemon. Building it
-once first makes startup a little faster:
+During Cargo development, the app and CLI can auto-start the daemon. `cargo dev`
+builds the matching daemon before launching the app:
 
 ```bash
-cargo build -p daemon --bin daemon
-cargo run -p app
+cargo dev
 ```
 
 Run the CLI from source:
