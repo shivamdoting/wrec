@@ -48,6 +48,12 @@ func emitFailure(_ message: String) {
 final class MicIndicator {
     private var panel: NSPanel?
 
+    // Automated-verification hook. "1" forces the pill without microphone
+    // capture (production sharing behavior); "capturable" additionally skips
+    // the capture exclusion so screenshots can see what eyes see.
+    static let testHook = ProcessInfo.processInfo.environment["WREC_MIC_PILL_TEST"]
+    static let testHookEnabled = testHook == "1" || testHook == "capturable"
+
     static let pillWidth: CGFloat = 96
     static let pillHeight: CGFloat = 30
     static let bottomMargin: CGFloat = 24
@@ -61,8 +67,10 @@ final class MicIndicator {
             return
         }
         // .prohibited cannot create windows; .accessory still has no Dock
-        // icon or menu bar.
+        // icon or menu bar. This process never calls NSApplication.run(), so
+        // launching must be finished explicitly before windows can appear.
         NSApplication.shared.setActivationPolicy(.accessory)
+        NSApplication.shared.finishLaunching()
 
         let frame = screen.visibleFrame
         let origin = NSPoint(
@@ -84,12 +92,15 @@ final class MicIndicator {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         // Excluded from capture at the window-server level, so the pill stays
         // out of the recording even if the shareable-content snapshot races
-        // window registration and misses it.
-        panel.sharingType = .none
+        // window registration and misses it (the exclusion-list fallback
+        // alone is racy; independent QA caught it leaking a frame).
+        if Self.testHook != "capturable" {
+            panel.sharingType = .none
+        }
         panel.contentView = Self.pillView()
         panel.orderFrontRegardless()
         self.panel = panel
-        logLine("mic indicator shown")
+        logLine("mic indicator shown windowNumber=\(panel.windowNumber)")
     }
 
     func hide() {
@@ -643,7 +654,7 @@ func run() async {
     }
 
     let micIndicator = MicIndicator()
-    let wantsMicIndicator = includeMicrophone && showMicIndicator
+    let wantsMicIndicator = (includeMicrophone && showMicIndicator) || MicIndicator.testHookEnabled
 
     do {
         // The pill must exist before the shareable-content snapshot for
