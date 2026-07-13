@@ -19,7 +19,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+// First exec of a freshly built daemon can eat seconds in Gatekeeper
+// assessment and store migration before the socket appears.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(debug_assertions)]
 const CARGO_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -148,7 +150,10 @@ impl DaemonClient {
             code: "response_decode_failed".into(),
             message: format!("Could not decode IPC response: {err}"),
             recoverable: false,
-            next: "Inspect ~/.wrec/daemon.log and report this as a wrec IPC protocol bug.".into(),
+            next: format!(
+                "Inspect {} and report this as a wrec IPC protocol bug.",
+                daemon_log_path().display()
+            ),
         })
     }
 
@@ -256,17 +261,23 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
             code: "daemon_log_unavailable".into(),
             message: format!("Could not open {}: {err}", daemon_log_path().display()),
             recoverable: true,
-            next: "Check permissions for ~/.wrec or set WREC_HOME to a writable path.".into(),
+            next: format!(
+                "Check permissions for {} or set WREC_HOME to a writable path.",
+                wrec_home().display()
+            ),
         })?;
     let stderr = log.try_clone().map_err(|err| AgentError {
         code: "daemon_log_unavailable".into(),
         message: format!("Could not duplicate daemon log handle: {err}"),
         recoverable: true,
-        next: "Check permissions for ~/.wrec and try again.".into(),
+        next: format!(
+            "Check permissions for {} and try again.",
+            wrec_home().display()
+        ),
     })?;
     let launch = daemon_launch()?;
 
-    launch
+    let mut child = launch
         .command()
         .process_group(0)
         .stdin(Stdio::null())
@@ -275,9 +286,15 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
         .spawn()
         .map_err(|err| AgentError {
             code: "daemon_start_failed".into(),
-            message: format!("Could not start wrec daemon: {err}"),
+            message: format!(
+                "Could not start wrec daemon at {}: {err}",
+                launch.program.display()
+            ),
             recoverable: true,
-            next: "Run `wrec daemon serve` manually and inspect ~/.wrec/daemon.log.".into(),
+            next: format!(
+                "Run `wrec daemon serve` manually and inspect {}.",
+                daemon_log_path().display()
+            ),
         })?;
 
     let started = Instant::now();
@@ -289,15 +306,27 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
         thread::sleep(POLL_INTERVAL);
     }
 
+    // The timeout alone hides what actually happened; report the spawned
+    // process's fate so a silent death is distinguishable from a slow start.
+    let child_fate = match child.try_wait() {
+        Ok(Some(status)) => format!("the spawned daemon exited with {status}"),
+        Ok(None) => "the spawned daemon is still running but not reachable".to_string(),
+        Err(err) => format!("the spawned daemon could not be inspected: {err}"),
+    };
+
     Err(AgentError {
         code: "daemon_unreachable".into(),
         message: format!(
-            "wrec daemon did not become reachable at {} within {}s",
+            "wrec daemon ({}) did not become reachable at {} within {}s; {child_fate}",
+            launch.program.display(),
             socket_path().display(),
             launch.startup_timeout.as_secs()
         ),
         recoverable: true,
-        next: "Inspect ~/.wrec/daemon.log, then run `wrec daemon serve` manually if needed.".into(),
+        next: format!(
+            "Inspect {}, then run `wrec daemon serve` manually if needed.",
+            daemon_log_path().display()
+        ),
     })
 }
 
@@ -319,7 +348,7 @@ pub fn run_daemon_foreground() -> Result<(), AgentError> {
             code: "daemon_exited".into(),
             message: format!("wrec daemon exited with {status}"),
             recoverable: true,
-            next: "Inspect ~/.wrec/daemon.log and retry.".into(),
+            next: format!("Inspect {} and retry.", daemon_log_path().display()),
         })
     }
 }
@@ -398,7 +427,10 @@ fn protocol_mismatch(code: &str, err: serde_json::Error) -> AgentError {
         code: code.into(),
         message: format!("Could not decode daemon response: {err}"),
         recoverable: false,
-        next: "Inspect ~/.wrec/daemon.log and report this as a wrec IPC protocol bug.".into(),
+        next: format!(
+            "Inspect {} and report this as a wrec IPC protocol bug.",
+            daemon_log_path().display()
+        ),
     }
 }
 

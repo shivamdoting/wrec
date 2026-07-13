@@ -477,7 +477,7 @@ impl WrecApp {
             .w_full()
             .h(px(CONTROL_HEIGHT))
             .gap_3()
-            .child(field_label("Microphone", muted_foreground))
+            .child(field_label("Mic", muted_foreground))
             .child(
                 div()
                     .flex()
@@ -581,7 +581,7 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(row_label("Screen Recording"))
+                    .child(row_label("Screen Recording Access"))
                     .child(permission_state_button(
                         self.permission_status,
                         self.permission_busy,
@@ -595,7 +595,7 @@ impl WrecApp {
                     .justify_between()
                     .gap_3()
                     .min_h(px(CONTROL_HEIGHT))
-                    .child(row_label("Microphone"))
+                    .child(row_label("Microphone Access"))
                     .child(mic_permission_button(
                         "settings-microphone-state",
                         self.mic_permission_status,
@@ -603,9 +603,8 @@ impl WrecApp {
                         cx,
                     )),
             )
-            .child(switch_row(
+            .child(label_switch_row(
                 "Hide wrec",
-                if self.settings.hide_wrec { "On" } else { "Off" },
                 muted_foreground,
                 Switch::new("hide-window-switch")
                     .checked(self.settings.hide_wrec)
@@ -616,9 +615,8 @@ impl WrecApp {
                         this.set_hide_wrec(*checked, cx);
                     })),
             ))
-            .child(switch_row(
+            .child(label_switch_row(
                 "Logs",
-                if self.show_nerd_logs { "On" } else { "Off" },
                 muted_foreground,
                 Switch::new("logs-switch")
                     .checked(self.show_nerd_logs)

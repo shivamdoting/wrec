@@ -24,7 +24,7 @@ impl RecordingRuntime for MacosRuntime {
             code: "target_listing_failed".into(),
             message: err.to_string(),
             recoverable: true,
-            next: "Run `wrec targets --json` again; if this repeats, check Screen Recording permission and ~/.wrec/daemon.log.".into(),
+            next: format!("Run `wrec targets --json` again; if this repeats, check Screen Recording permission and {}.", control::daemon_log_path().display()),
         })
     }
 

@@ -144,7 +144,10 @@ pub fn generic_daemon_error() -> AgentError {
         code: "daemon_error".into(),
         message: "Daemon returned an error without details.".into(),
         recoverable: true,
-        next: "Retry the command or inspect ~/.wrec/daemon.log.".into(),
+        next: format!(
+            "Retry the command or inspect {}.",
+            crate::paths::daemon_log_path().display()
+        ),
     }
 }
 
