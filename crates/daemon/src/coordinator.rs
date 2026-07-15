@@ -491,6 +491,23 @@ fn run_job<R: RecordingRuntime>(
     rx: mpsc::Receiver<RecorderEvent>,
 ) {
     tracing::info!("job {job_id} starting");
+
+    if settings.include_microphone {
+        let runtime = lock_state(&state).map(|state| state.runtime.clone());
+        match runtime {
+            Ok(runtime) => {
+                if let Err(message) = ensure_microphone_permission(&state, job_id, &runtime) {
+                    finish_job_failed(&state, job_id, message);
+                    return;
+                }
+            }
+            Err(err) => {
+                finish_job_failed(&state, job_id, err.message);
+                return;
+            }
+        }
+    }
+
     let start_result = match lock_control(&engine, job_id) {
         Ok(mut engine) => engine.start(target, settings),
         Err(err) => {
@@ -650,6 +667,53 @@ fn finish_job_failed<R: RecordingRuntime>(
     }
 }
 
+/// Recording with the microphone needs mic access before the capture engine
+/// launches: the engine's start handshake times out in seconds, far shorter
+/// than a person needs to read and answer the system permission dialog.
+fn ensure_microphone_permission<R: RecordingRuntime>(
+    state: &SharedCoordinator<R>,
+    job_id: u64,
+    runtime: &R,
+) -> Result<(), String> {
+    let status = runtime
+        .microphone_permission_status()
+        .map_err(|err| err.message)?;
+    if status.is_granted() {
+        return Ok(());
+    }
+
+    append_job_message(
+        state,
+        job_id,
+        EventLevel::Info,
+        "microphone access not granted; approve the system dialog if one appears",
+    );
+    let status = runtime
+        .request_microphone_permission()
+        .map_err(|err| err.message)?;
+    if status.is_granted() {
+        append_job_message(state, job_id, EventLevel::Info, "microphone access granted");
+        return Ok(());
+    }
+
+    // macOS never re-shows the dialog once access is denied, so take the user
+    // to the settings pane instead of leaving them a URL to copy.
+    match runtime.open_microphone_settings() {
+        Ok(()) => Err(
+            "microphone access is denied. System Settings was opened at \
+            Privacy & Security > Microphone — enable the app that launched wrec \
+            (your terminal or Wrec), then retry, or record with --no-mic."
+                .into(),
+        ),
+        Err(_) => Err(
+            "microphone access is denied. Enable it in System Settings > Privacy & Security > Microphone \
+            (open \"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone\"), \
+            then retry, or record with --no-mic."
+                .into(),
+        ),
+    }
+}
+
 fn append_job_message<R: RecordingRuntime>(
     state: &SharedCoordinator<R>,
     job_id: u64,
@@ -788,7 +852,7 @@ mod tests {
     use super::*;
     use crate::test_support::{env_lock, isolate_env, FakeRuntime};
     use control::{JobSnapshot, RecordingOptions, TargetSelector};
-    use domain::CaptureSourceKind;
+    use domain::{CaptureSourceKind, PermissionStatus};
 
     #[test]
     fn queued_job_launches_after_active_job_stops() {
@@ -885,7 +949,84 @@ mod tests {
         wait_for_status(&state, job_id, JobStatus::Completed);
     }
 
+    #[test]
+    fn mic_job_skips_permission_request_when_already_granted() {
+        let _guard = env_lock();
+        isolate_env();
+        let runtime = FakeRuntime::new();
+        let state = Arc::new(Mutex::new(Coordinator::new(runtime.clone())));
+
+        let job_id = start_mic_job(state.clone()).id;
+        wait_for_status(&state, job_id, JobStatus::Recording);
+        assert_eq!(runtime.mic_requests(), 0);
+
+        Coordinator::job_stop(state.clone(), job_id).unwrap();
+        wait_for_status(&state, job_id, JobStatus::Completed);
+    }
+
+    #[test]
+    fn mic_job_records_after_permission_dialog_grants_access() {
+        let _guard = env_lock();
+        isolate_env();
+        let runtime = FakeRuntime::new();
+        runtime.set_mic_permission(PermissionStatus::Missing, PermissionStatus::Granted);
+        let state = Arc::new(Mutex::new(Coordinator::new(runtime.clone())));
+
+        let job_id = start_mic_job(state.clone()).id;
+        wait_for_status(&state, job_id, JobStatus::Recording);
+        assert_eq!(runtime.mic_requests(), 1);
+        assert!(job_messages(&state, job_id)
+            .iter()
+            .any(|message| message.contains("approve the system dialog")));
+
+        Coordinator::job_stop(state.clone(), job_id).unwrap();
+        wait_for_status(&state, job_id, JobStatus::Completed);
+    }
+
+    #[test]
+    fn mic_job_fails_with_settings_hint_when_permission_denied() {
+        let _guard = env_lock();
+        isolate_env();
+        let runtime = FakeRuntime::new();
+        runtime.set_mic_permission(PermissionStatus::Missing, PermissionStatus::Missing);
+        let state = Arc::new(Mutex::new(Coordinator::new(runtime.clone())));
+
+        let job_id = start_mic_job(state.clone()).id;
+        wait_for_status(&state, job_id, JobStatus::Failed);
+        assert_eq!(runtime.mic_requests(), 1);
+        assert_eq!(runtime.mic_settings_opens(), 1);
+        let messages = job_messages(&state, job_id);
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("System Settings was opened")));
+        assert!(messages.iter().any(|message| message.contains("--no-mic")));
+    }
+
     fn start_job(state: SharedCoordinator<FakeRuntime>) -> JobSnapshot {
+        start_job_with_options(
+            state,
+            RecordingOptions {
+                output_dir: Some(std::env::temp_dir()),
+                ..RecordingOptions::default()
+            },
+        )
+    }
+
+    fn start_mic_job(state: SharedCoordinator<FakeRuntime>) -> JobSnapshot {
+        start_job_with_options(
+            state,
+            RecordingOptions {
+                output_dir: Some(std::env::temp_dir()),
+                include_microphone: Some(true),
+                ..RecordingOptions::default()
+            },
+        )
+    }
+
+    fn start_job_with_options(
+        state: SharedCoordinator<FakeRuntime>,
+        options: RecordingOptions,
+    ) -> JobSnapshot {
         let value = Coordinator::record_start(
             state,
             StartRecordingParams {
@@ -893,10 +1034,7 @@ mod tests {
                     kind: CaptureSourceKind::Display,
                     id: 1,
                 }),
-                options: RecordingOptions {
-                    output_dir: Some(std::env::temp_dir()),
-                    ..RecordingOptions::default()
-                },
+                options,
                 duration_ms: None,
                 queue: true,
             },
@@ -904,6 +1042,18 @@ mod tests {
         .unwrap();
 
         serde_json::from_value(value.get("job").unwrap().clone()).unwrap()
+    }
+
+    fn job_messages(state: &SharedCoordinator<FakeRuntime>, job_id: u64) -> Vec<String> {
+        lock_state(state)
+            .unwrap()
+            .jobs
+            .get(&job_id)
+            .unwrap()
+            .events
+            .iter()
+            .map(|event| event.message.clone())
+            .collect()
     }
 
     fn wait_for_status(state: &SharedCoordinator<FakeRuntime>, job_id: u64, status: JobStatus) {
