@@ -860,6 +860,7 @@ mod platform {
         match String::from_utf8_lossy(&output.stdout).trim() {
             "granted" => Ok(PermissionStatus::Granted),
             "missing" => Ok(PermissionStatus::Missing),
+            "unknown" => Ok(PermissionStatus::Unknown),
             status => Err(RecorderError::Backend(format!(
                 "unknown {label} status: {status}"
             ))),
