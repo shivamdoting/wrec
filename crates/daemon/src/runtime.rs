@@ -9,6 +9,12 @@ pub(crate) trait RecordingRuntime: Clone + Send + Sync + 'static {
     fn list_targets(&self) -> Result<Vec<CaptureTarget>, AgentError>;
     fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError>;
     fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError>;
+    fn microphone_permission_status(&self) -> Result<PermissionStatus, AgentError>;
+    /// Pops the system microphone dialog when access was never asked for;
+    /// returns immediately when access is already decided.
+    fn request_microphone_permission(&self) -> Result<PermissionStatus, AgentError>;
+    /// Opens System Settings at Privacy & Security > Microphone.
+    fn open_microphone_settings(&self) -> Result<(), AgentError>;
     fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine;
 }
 
@@ -40,6 +46,18 @@ impl RecordingRuntime for MacosRuntime {
         MacosRecorder::new(tx)
             .request_screen_recording_permission()
             .map_err(permission_error)
+    }
+
+    fn microphone_permission_status(&self) -> Result<PermissionStatus, AgentError> {
+        macos::microphone_permission_status().map_err(permission_error)
+    }
+
+    fn request_microphone_permission(&self) -> Result<PermissionStatus, AgentError> {
+        macos::request_microphone_permission().map_err(permission_error)
+    }
+
+    fn open_microphone_settings(&self) -> Result<(), AgentError> {
+        macos::open_microphone_privacy_settings().map_err(permission_error)
     }
 
     fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine {

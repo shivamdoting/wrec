@@ -79,7 +79,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "config",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "control",
  "ctrlc",
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "domain",
  "serde",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "control"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "domain",
  "serde",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "config",
  "control",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3316,7 +3316,7 @@ dependencies = [
 
 [[package]]
 name = "macos"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "domain",
@@ -7416,7 +7416,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "y4m"

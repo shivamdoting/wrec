@@ -49,6 +49,10 @@ pub fn request_microphone_permission() -> Result<PermissionStatus> {
     platform::request_microphone_permission()
 }
 
+pub fn open_microphone_privacy_settings() -> Result<()> {
+    platform::open_microphone_privacy_settings()
+}
+
 impl RecorderEngine for MacosRecorder {
     fn list_targets(&self) -> Result<Vec<CaptureTarget>> {
         platform::list_targets()
@@ -248,6 +252,27 @@ mod platform {
             "microphone permission request",
             MIC_PERMISSION_REQUEST_TIMEOUT,
         )
+    }
+
+    /// macOS never re-shows the microphone dialog after a denial, so the
+    /// closest thing to asking again is putting the user on the exact
+    /// settings pane where access is granted.
+    pub fn open_microphone_privacy_settings() -> Result<()> {
+        let status = Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|err| {
+                RecorderError::Backend(format!("failed to open System Settings: {err}"))
+            })?;
+        if !status.success() {
+            return Err(RecorderError::Backend(format!(
+                "failed to open System Settings: open exited with {status}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn list_targets() -> Result<Vec<CaptureTarget>> {
@@ -835,6 +860,7 @@ mod platform {
         match String::from_utf8_lossy(&output.stdout).trim() {
             "granted" => Ok(PermissionStatus::Granted),
             "missing" => Ok(PermissionStatus::Missing),
+            "unknown" => Ok(PermissionStatus::Unknown),
             status => Err(RecorderError::Backend(format!(
                 "unknown {label} status: {status}"
             ))),
@@ -1012,6 +1038,10 @@ mod platform {
     }
 
     pub fn request_microphone_permission() -> Result<PermissionStatus> {
+        Err(RecorderError::Backend("wrec only supports macOS".into()))
+    }
+
+    pub fn open_microphone_privacy_settings() -> Result<()> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))
     }
 

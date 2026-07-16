@@ -37,6 +37,10 @@ pub(crate) struct FakeRuntime {
     targets: Arc<Vec<CaptureTarget>>,
     next_session_id: Arc<AtomicU64>,
     list_calls: Arc<AtomicU64>,
+    mic_status: Arc<Mutex<PermissionStatus>>,
+    mic_request_result: Arc<Mutex<PermissionStatus>>,
+    mic_requests: Arc<AtomicU64>,
+    mic_settings_opens: Arc<AtomicU64>,
 }
 
 pub(crate) struct FakeEngine {
@@ -55,11 +59,34 @@ impl FakeRuntime {
             }]),
             next_session_id: Arc::new(AtomicU64::new(100)),
             list_calls: Arc::new(AtomicU64::new(0)),
+            mic_status: Arc::new(Mutex::new(PermissionStatus::Granted)),
+            mic_request_result: Arc::new(Mutex::new(PermissionStatus::Granted)),
+            mic_requests: Arc::new(AtomicU64::new(0)),
+            mic_settings_opens: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub(crate) fn list_calls(&self) -> u64 {
         self.list_calls.load(Ordering::Relaxed)
+    }
+
+    /// `status` answers the preflight check; `request_result` answers the
+    /// follow-up request (the fake stand-in for the system dialog).
+    pub(crate) fn set_mic_permission(
+        &self,
+        status: PermissionStatus,
+        request_result: PermissionStatus,
+    ) {
+        *self.mic_status.lock().unwrap() = status;
+        *self.mic_request_result.lock().unwrap() = request_result;
+    }
+
+    pub(crate) fn mic_requests(&self) -> u64 {
+        self.mic_requests.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mic_settings_opens(&self) -> u64 {
+        self.mic_settings_opens.load(Ordering::Relaxed)
     }
 }
 
@@ -77,6 +104,20 @@ impl RecordingRuntime for FakeRuntime {
 
     fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError> {
         Ok(PermissionStatus::Granted)
+    }
+
+    fn microphone_permission_status(&self) -> Result<PermissionStatus, AgentError> {
+        Ok(*self.mic_status.lock().unwrap())
+    }
+
+    fn request_microphone_permission(&self) -> Result<PermissionStatus, AgentError> {
+        self.mic_requests.fetch_add(1, Ordering::Relaxed);
+        Ok(*self.mic_request_result.lock().unwrap())
+    }
+
+    fn open_microphone_settings(&self) -> Result<(), AgentError> {
+        self.mic_settings_opens.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine {

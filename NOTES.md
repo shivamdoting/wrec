@@ -29,13 +29,15 @@ Rust GPUI app / CLI / agents
 ```
 
 The capture engine accepts the selected display/window target, fps, cursor
-setting, system audio setting, codec, and quality mode from the daemon. It keeps
+setting, codec, quality mode, resolution, system audio setting, Wrec-window
+hiding, microphone setting, and mic-indicator setting from the daemon. It keeps
 ScreenCaptureKit queue depth low and drops samples when the writer is
 backpressured rather than allowing memory to grow.
 
 The app and CLI stay above the `control` crate. The daemon is the only process
-that owns target listing, permission requests, job queueing, recording state,
-store writes, and macOS recorder startup.
+that owns target listing, permission requests (screen recording and, before a
+microphone job starts, microphone access), job queueing, recording state, store
+writes, and macOS recorder startup.
 
 The next backend improvement is to keep AVAssetWriter, but reduce avoidable work
 around it:
