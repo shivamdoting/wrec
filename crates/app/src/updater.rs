@@ -55,13 +55,20 @@ pub(crate) struct ReadyUpdate {
 /// `scripts/preview-app-update.sh` sets all of this up with the dev build.
 /// Delete the files to restore real release-driven behavior.
 fn mock_latest() -> Option<String> {
-    let contents = std::fs::read_to_string(config::wrec_dir().join("mock-latest-version")).ok()?;
+    let contents = std::fs::read_to_string(mock_file("mock-latest-version")?).ok()?;
     parse_mock(&contents)
 }
 
 fn mock_archive() -> Option<PathBuf> {
-    let contents = std::fs::read_to_string(config::wrec_dir().join("mock-latest-archive")).ok()?;
+    let contents = std::fs::read_to_string(mock_file("mock-latest-archive")?).ok()?;
     parse_mock(&contents).map(PathBuf::from)
+}
+
+/// Dev (debug-profile) builds only, matching the data-dir namespace split:
+/// release builds must never let a user-writable file redirect or block
+/// real updates.
+fn mock_file(name: &str) -> Option<PathBuf> {
+    cfg!(debug_assertions).then(|| config::wrec_dir().join(name))
 }
 
 fn parse_mock(contents: &str) -> Option<String> {

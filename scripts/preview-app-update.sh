@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-9.9.9}"
-MOCK_DIR="$HOME/Library/Application Support/Wrec Dev"
+MOCK_DIR="${WREC_DATA_DIR:-$HOME/Library/Application Support/Wrec Dev}"
 ARCHIVE="$ROOT/dist/dev/wrec-app-mock-update.tar.gz"
 
 log() {
