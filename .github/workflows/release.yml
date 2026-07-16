@@ -13,6 +13,10 @@ on:
 
 permissions:
   contents: write
+  # Build-provenance attestations: verify any asset was built by this
+  # repo's CI with `gh attestation verify <file> --repo shivamhwp/wrec`.
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -150,6 +154,28 @@ jobs:
           hdiutil detach "$mount_dir"
           rmdir "$mount_dir"
 
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+
+          # Bare filenames, matching how the assets appear on the release,
+          # so `shasum -a 256 -c SHA256SUMS` works from a download folder.
+          {
+            (cd dist/release && shasum -a 256 ./*.dmg ./*.tar.gz | sed 's|\./||')
+            (cd dist/cli && shasum -a 256 ./*.tar.gz | sed 's|\./||')
+          } > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/release/*.dmg
+            dist/release/*.tar.gz
+            dist/cli/*.tar.gz
+            SHA256SUMS
+
       - name: Publish GitHub Release
         if: github.event_name == 'push'
         env:
@@ -161,6 +187,7 @@ jobs:
             dist/release/*.dmg \
             dist/release/*.tar.gz \
             dist/cli/*.tar.gz \
+            SHA256SUMS \
             --target "${{ steps.release.outputs.commit }}" \
             --title "$GITHUB_REF_NAME" \
             --notes "macOS build for $GITHUB_REF_NAME. Builds are not notarized: install the CLI with \`curl -fsSL https://wrec.app/install | sh\` to avoid the Gatekeeper warning. For the app, macOS blocks the first launch — clear the quarantine recursively with \`xattr -dr com.apple.quarantine /Applications/Wrec.app\` (the bundled helpers are quarantined separately) or approve it in System Settings > Privacy & Security." \
