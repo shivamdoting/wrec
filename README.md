@@ -68,7 +68,8 @@ curl -fsSL https://wrec.app/install | sh
 
 The CLI installer grabs the archive for your Mac, installs the runtime
 under `/usr/local/lib/wrec`, and places a managed wrapper at
-`/usr/local/bin/wrec`.
+`/usr/local/bin/wrec`. Update it later with `wrec update` (or check first
+with `wrec update --check`).
 
 ## Requirements
 

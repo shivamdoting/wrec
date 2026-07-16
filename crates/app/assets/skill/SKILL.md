@@ -12,6 +12,9 @@ state as the source of truth.
 If `wrec` is not on PATH, ask the user to install it:
 `curl -fsSL https://wrec.app/install | sh`
 
+Keep it current with `wrec update` (`wrec update --check --json` reports
+`update_available` without installing).
+
 ## Workflow
 
 1. Discover targets. Ids are stable only for the current list — refresh before

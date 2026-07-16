@@ -10,8 +10,16 @@ pub enum Command {
     Daemon(DaemonCommand),
     Jobs(JobsArgs),
     Job(JobCommand),
+    Update(UpdateArgs),
     Help,
     Version,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UpdateArgs {
+    pub check: bool,
+    pub force: bool,
+    pub json: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -106,6 +114,7 @@ pub fn usage() -> String {
      \u{20}\u{20}jobs                 List queued and recent recording jobs\n\
      \u{20}\u{20}job <action> <id>    Show, pause, resume, stop, cancel, or read logs\n\
      \u{20}\u{20}daemon <action>      Start/status/stop/serve the local coordinator\n\
+     \u{20}\u{20}update               Update the installed CLI to the latest release\n\
      \u{20}\u{20}list                 Alias for targets\n\
      \u{20}\u{20}record               Alias for record start\n\
      \u{20}\u{20}help                 Show this help\n\
@@ -116,6 +125,11 @@ pub fn usage() -> String {
      \n\
      list options:\n\
      \u{20}\u{20}--json               Print targets as JSON\n\
+     \n\
+     update options:\n\
+     \u{20}\u{20}--check              Report whether an update is available without installing\n\
+     \u{20}\u{20}--force              Reinstall the latest release even when up to date\n\
+     \u{20}\u{20}--json               Print the update result as JSON\n\
      \n\
      job options:\n\
      \u{20}\u{20}jobs --json\n\
@@ -177,10 +191,31 @@ where
         "daemon" => parse_daemon(args),
         "jobs" => parse_jobs(args),
         "job" => parse_job(args),
+        "update" => parse_update(args),
         "help" | "-h" | "--help" => Ok(Command::Help),
         "-V" | "--version" => Ok(Command::Version),
         other => Err(format!("unknown command `{other}`\n\n{}", usage())),
     }
+}
+
+fn parse_update<I>(args: I) -> Result<Command, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut update = UpdateArgs::default();
+    for arg in args {
+        match arg.as_str() {
+            "--check" => update.check = true,
+            "--force" => update.force = true,
+            "--json" => update.json = true,
+            "-h" | "--help" | "help" => return Ok(Command::Help),
+            other => return Err(format!("unknown update option `{other}`")),
+        }
+    }
+    if update.check && update.force {
+        return Err("--check and --force cannot be combined".into());
+    }
+    Ok(Command::Update(update))
 }
 
 fn parse_daemon<I>(args: I) -> Result<Command, String>
@@ -566,6 +601,31 @@ mod tests {
         assert_eq!(parse_vec(&["--help"]).unwrap(), Command::Help);
         assert_eq!(parse_vec(&["-V"]).unwrap(), Command::Version);
         assert_eq!(parse_vec(&["--version"]).unwrap(), Command::Version);
+    }
+
+    #[test]
+    fn parses_update_command() {
+        assert_eq!(
+            parse_vec(&["update"]).unwrap(),
+            Command::Update(UpdateArgs::default())
+        );
+        assert_eq!(
+            parse_vec(&["update", "--check", "--json"]).unwrap(),
+            Command::Update(UpdateArgs {
+                check: true,
+                force: false,
+                json: true
+            })
+        );
+        assert_eq!(
+            parse_vec(&["update", "--force"]).unwrap(),
+            Command::Update(UpdateArgs {
+                force: true,
+                ..UpdateArgs::default()
+            })
+        );
+        assert!(parse_vec(&["update", "--check", "--force"]).is_err());
+        assert!(parse_vec(&["update", "--nope"]).is_err());
     }
 
     #[test]
