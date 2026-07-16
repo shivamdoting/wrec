@@ -41,10 +41,30 @@ pub(crate) struct ReadyUpdate {
     pub(crate) old_bundle: PathBuf,
 }
 
+/// UI preview hook: put a version number in `<wrec data dir>/mock-latest-version`
+/// (e.g. `~/Library/Application Support/Wrec Dev/mock-latest-version`) and the
+/// About tab treats it as the latest release — higher than the build shows the
+/// update button, equal/lower shows up to date. Installing is refused while
+/// the mock is set; delete the file to restore real behavior.
+fn mock_latest() -> Option<String> {
+    let contents = std::fs::read_to_string(config::wrec_dir().join("mock-latest-version")).ok()?;
+    parse_mock(&contents)
+}
+
+fn parse_mock(contents: &str) -> Option<String> {
+    let version = contents.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
 /// The bundle this process runs from, when it is one the updater may replace:
 /// a packaged, non-dev `.app`. Dev bundles and bare Cargo binaries update
 /// through a rebuild instead.
 pub(crate) fn eligible_bundle() -> Result<PathBuf, String> {
+    // With the mock set, the update row stays active even in dev builds so
+    // the UI states can be previewed.
+    if mock_latest().is_some() {
+        return Ok(PathBuf::new());
+    }
     let bundle = std::env::current_exe()
         .ok()
         .and_then(|exe| {
@@ -66,12 +86,20 @@ pub(crate) fn eligible_bundle() -> Result<PathBuf, String> {
 
 /// Returns `Some(version)` when a newer release exists, `None` when current.
 pub(crate) fn check() -> Result<Option<String>, String> {
+    if let Some(mock) = mock_latest() {
+        return Ok(is_newer(&mock, CURRENT_VERSION).then_some(mock));
+    }
     eligible_bundle()?;
     let release = latest_release()?;
     Ok(is_newer(&release.version, CURRENT_VERSION).then_some(release.version))
 }
 
 pub(crate) fn download_and_apply() -> Result<ReadyUpdate, String> {
+    if mock_latest().is_some() {
+        return Err(
+            "mock-latest-version is set (UI preview); delete the file to run real updates".into(),
+        );
+    }
     let bundle = eligible_bundle()?;
     let release = latest_release()?;
     if !is_newer(&release.version, CURRENT_VERSION) {
@@ -393,6 +421,13 @@ mod tests {
     fn write_marker(bundle: &Path, contents: &str) {
         std::fs::create_dir_all(bundle).unwrap();
         std::fs::write(bundle.join("marker"), contents).unwrap();
+    }
+
+    #[test]
+    fn mock_contents_are_trimmed_and_empty_is_ignored() {
+        assert_eq!(parse_mock("0.3.0\n"), Some("0.3.0".to_string()));
+        assert_eq!(parse_mock("  v0.3.0  "), Some("v0.3.0".to_string()));
+        assert_eq!(parse_mock("\n  \n"), None);
     }
 
     #[test]
