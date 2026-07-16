@@ -21,9 +21,17 @@ pub(crate) enum AppUpdateState {
     Idle,
     Checking,
     UpToDate,
-    Available { version: String },
-    Updating,
-    Failed { message: String },
+    Available {
+        version: String,
+    },
+    Updating {
+        version: String,
+    },
+    /// A failed check; a failed install reverts to `Available` so the
+    /// button still offers the install.
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -83,13 +91,12 @@ pub(crate) fn download_and_apply() -> Result<ReadyUpdate, String> {
 /// Relaunches the swapped-in bundle once this process exits and removes the
 /// old bundle afterwards. Must be called right before quitting.
 pub(crate) fn relaunch_and_cleanup(update: &ReadyUpdate) {
-    let script = format!(
-        "sleep 1; open -n \"{}\"; sleep 5; rm -rf \"{}\"",
-        update.bundle.display(),
-        update.old_bundle.display()
-    );
+    // Paths are passed as positional parameters, never interpolated into the
+    // script, so a hostile install path cannot inject shell commands.
     let _ = Command::new("sh")
-        .args(["-c", &script])
+        .args(["-c", r#"sleep 1; open -n "$0"; sleep 5; rm -rf "$1""#])
+        .arg(&update.bundle)
+        .arg(&update.old_bundle)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -132,12 +139,15 @@ fn stage_and_swap(
     let new_bundle = find_app_bundle(&extracted_dir)?;
 
     // The daemon ships inside the bundle; stop it so the relaunched app
-    // starts a matching one. Refusals (active recording) surface here.
-    if let Err(err) = control::send_request("daemon.stop", serde_json::json!({})) {
-        if err.code == "daemon_busy" {
-            return Err(format!("{} {}", err.message, err.next));
+    // starts a matching one. A refusal (active or queued recording) arrives
+    // as a successful response carrying an error, not as Err — Err only
+    // means the daemon was unreachable, i.e. nothing to stop.
+    if let Ok(response) = control::send_request("daemon.stop", serde_json::json!({})) {
+        if let Some(err) = response.error {
+            if err.code == "daemon_busy" {
+                return Err(format!("{} {}", err.message, err.next));
+            }
         }
-        // Unreachable daemon just means there is nothing to stop.
     }
 
     let old_bundle = swap_bundles(bundle, &new_bundle)?;

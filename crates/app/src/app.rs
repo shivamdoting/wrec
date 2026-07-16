@@ -494,7 +494,7 @@ impl WrecApp {
         use crate::updater::AppUpdateState;
         if matches!(
             self.app_update,
-            AppUpdateState::Checking | AppUpdateState::Updating
+            AppUpdateState::Checking | AppUpdateState::Updating { .. }
         ) {
             return;
         }
@@ -509,14 +509,15 @@ impl WrecApp {
 
     pub(crate) fn install_app_update(&mut self, cx: &mut Context<Self>) {
         use crate::updater::AppUpdateState;
-        if matches!(self.app_update, AppUpdateState::Updating) {
-            return;
-        }
+        let version = match &self.app_update {
+            AppUpdateState::Available { version } => version.clone(),
+            _ => return,
+        };
         if !matches!(self.recorder_state, RecorderState::Idle) {
             self.push_log("app update blocked: finish the active recording first");
             return;
         }
-        self.app_update = AppUpdateState::Updating;
+        self.app_update = AppUpdateState::Updating { version };
         self.push_log("downloading app update");
         let app_events = self.app_events.clone();
         std::thread::spawn(move || {
@@ -1274,7 +1275,16 @@ impl WrecApp {
                     app_notification(format!("Update failed: {message}")),
                     cx,
                 );
-                self.app_update = crate::updater::AppUpdateState::Failed { message };
+                // Keep offering the install rather than degrading to a
+                // check-again state; the version is already known.
+                self.app_update = match &self.app_update {
+                    crate::updater::AppUpdateState::Updating { version } => {
+                        crate::updater::AppUpdateState::Available {
+                            version: version.clone(),
+                        }
+                    }
+                    _ => crate::updater::AppUpdateState::Failed { message },
+                };
             }
         }
     }

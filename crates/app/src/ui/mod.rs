@@ -848,9 +848,11 @@ impl WrecApp {
                         false,
                         "Download, verify, and relaunch into the new version".into(),
                     ),
-                    AppUpdateState::Updating => ("Updating…".into(), true, "Updating…".into()),
+                    AppUpdateState::Updating { .. } => {
+                        ("Updating…".into(), true, "Updating…".into())
+                    }
                     AppUpdateState::Failed { message } => {
-                        ("Retry update".into(), false, message.clone())
+                        ("Check again".into(), false, message.clone())
                     }
                 }
             };
