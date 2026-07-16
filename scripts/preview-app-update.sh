@@ -15,6 +15,14 @@ log() {
   printf '[wrec-preview-update] %s\n' "$*"
 }
 
+# `preview-app-update.sh clean` removes every trace of the mock and
+# restores real release-driven update behavior.
+if [ "${1:-}" = "clean" ]; then
+  rm -f "$MOCK_DIR/mock-latest-version" "$MOCK_DIR/mock-latest-archive" "$ARCHIVE"
+  log "Mock cleared; the app is back to real update behavior."
+  exit 0
+fi
+
 log "Packaging the dev app"
 "$ROOT/scripts/package-macos.sh"
 
