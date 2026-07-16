@@ -73,9 +73,7 @@ fn run(args: &UpdateArgs) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let work_dir = std::env::temp_dir().join(format!("wrec-update-{}", std::process::id()));
-    std::fs::create_dir_all(&work_dir)
-        .map_err(|err| format!("could not create {}: {err}", work_dir.display()))?;
+    let work_dir = exclusive_work_dir()?;
     let result = download_and_install(args, &release, &asset, &work_dir);
     let _ = std::fs::remove_dir_all(&work_dir);
     let installed = result?;
@@ -121,18 +119,19 @@ fn download_and_install(
     }
     download(&release.download_url, &archive)?;
 
-    if let Some(expected) = &release.sha256 {
-        let actual = sha256_of(&archive)?;
-        if &actual != expected {
-            return Err(format!(
-                "checksum mismatch for {asset}: expected {expected}, got {actual}; not installing"
-            ));
-        }
-        if !args.json {
-            println!("verified sha256 {expected}");
-        }
-    } else if !args.json {
-        println!("release asset published no digest; skipping checksum verification");
+    let Some(expected) = &release.sha256 else {
+        return Err(format!(
+            "release asset {asset} publishes no SHA-256 digest; refusing to install an unverifiable archive"
+        ));
+    };
+    let actual = sha256_of(&archive)?;
+    if &actual != expected {
+        return Err(format!(
+            "checksum mismatch for {asset}: expected {expected}, got {actual}; not installing"
+        ));
+    }
+    if !args.json {
+        println!("verified sha256 {expected}");
     }
 
     let installer = work_dir.join("install-cli.sh");
@@ -237,6 +236,24 @@ fn asset_name() -> Result<String, String> {
     }
 }
 
+/// A fresh, owner-only workspace whose creation fails rather than adopting an
+/// existing directory, so nothing can pre-place files we later trust.
+fn exclusive_work_dir() -> Result<std::path::PathBuf, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let dir = std::env::temp_dir().join(format!("wrec-update-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&dir)
+        .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(dir)
+}
+
 /// Treats an unparseable version pair as an update when the strings differ, so
 /// a rename of the tagging scheme never strands installed CLIs.
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -250,8 +267,12 @@ fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.trim_start_matches('v').splitn(3, '.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some((major, minor, patch))
+    // Ignore a pre-release suffix ("1-rc1" -> 1) so tags like 0.2.1-rc1
+    // compare by their numeric patch instead of falling into the
+    // strings-differ fallback, which could otherwise downgrade.
+    let patch = parts.next()?;
+    let digits: String = patch.chars().take_while(char::is_ascii_digit).collect();
+    Some((major, minor, digits.parse().ok()?))
 }
 
 fn sha256_of(path: &Path) -> Result<String, String> {
@@ -308,6 +329,20 @@ mod tests {
     fn unparseable_versions_update_when_different() {
         assert!(is_newer("2026.1", "0.2.0"));
         assert!(!is_newer("0.2.0", "0.2.0"));
+    }
+
+    #[test]
+    fn prerelease_suffixes_compare_by_numeric_patch() {
+        assert!(!is_newer("0.2.1-rc1", "0.2.2"));
+        assert!(is_newer("0.2.3-rc1", "0.2.2"));
+        assert_eq!(parse_version("0.2.1-rc1"), Some((0, 2, 1)));
+    }
+
+    #[test]
+    fn work_dir_creation_refuses_an_existing_directory() {
+        let dir = exclusive_work_dir().unwrap();
+        assert!(std::fs::create_dir(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
