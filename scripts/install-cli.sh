@@ -85,14 +85,21 @@ download_url() {
 }
 
 # Verifies the downloaded archive against the release's published SHA256SUMS
-# so nobody has to run shasum by hand. Fails closed on any mismatch; releases
-# that predate SHA256SUMS install with a loud warning.
+# so nobody has to run shasum by hand. Fails closed on any mismatch or fetch
+# failure; only a confirmed 404 (a release that predates SHA256SUMS) installs
+# with a loud warning.
 verify_archive() {
   sums="$tmp_dir/SHA256SUMS"
   sums_url="$(release_url SHA256SUMS)"
-  if ! curl -fsSL "$sums_url" -o "$sums" 2>/dev/null; then
+  http_status="$(curl -sSL -o "$sums" -w '%{http_code}' "$sums_url" 2>/dev/null)" || http_status="000"
+  if [ "$http_status" = "404" ]; then
     echo "warning: this release publishes no SHA256SUMS; skipping checksum verification" >&2
     return 0
+  fi
+  if [ "$http_status" != "200" ]; then
+    echo "error: could not fetch SHA256SUMS (HTTP $http_status); refusing to install an unverified archive" >&2
+    echo "Retry in a moment; if this repeats, download manually and verify against the release page." >&2
+    exit 1
   fi
 
   asset="$(asset_name)"
