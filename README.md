@@ -56,7 +56,9 @@ JSON-friendly CLI for scripts and agents.
 
 **The app** — download the latest macOS build from
 <a href="https://github.com/shivamhwp/wrec/releases" target="_blank" rel="noopener noreferrer">GitHub Releases</a>
-and drag it into `/Applications`.
+and drag it into `/Applications`. After that it updates itself in place:
+About → Check for updates (the update is digest-verified and relaunches
+without the Gatekeeper warning).
 
 **The CLI** — for terminals, scripts, and coding agents:
 

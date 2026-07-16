@@ -821,6 +821,42 @@ impl WrecApp {
         muted_foreground: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let update_eligible = crate::updater::eligible_bundle().is_ok();
+        let (update_label, update_disabled, update_tooltip): (String, bool, String) =
+            if !update_eligible {
+                (
+                    "Unavailable".into(),
+                    true,
+                    "Dev and source builds update by rebuilding".into(),
+                )
+            } else {
+                use crate::updater::AppUpdateState;
+                match &self.app_update {
+                    AppUpdateState::Idle => (
+                        "Check for updates".into(),
+                        false,
+                        "Check GitHub for a newer release".into(),
+                    ),
+                    AppUpdateState::Checking => ("Checking…".into(), true, "Checking…".into()),
+                    AppUpdateState::UpToDate => (
+                        "Up to date".into(),
+                        true,
+                        "You are on the latest release".into(),
+                    ),
+                    AppUpdateState::Available { version } => (
+                        format!("Update to {version}"),
+                        false,
+                        "Download, verify, and relaunch into the new version".into(),
+                    ),
+                    AppUpdateState::Updating { .. } => {
+                        ("Updating…".into(), true, "Updating…".into())
+                    }
+                    AppUpdateState::Failed { message } => {
+                        ("Check again".into(), false, message.clone())
+                    }
+                }
+            };
+
         div()
             .flex()
             .flex_col()
@@ -830,6 +866,34 @@ impl WrecApp {
                 env!("CARGO_PKG_VERSION"),
                 muted_foreground,
             ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .child(row_label("Updates"))
+                    .child(
+                        UiButton::new("app-update")
+                            .secondary()
+                            .compact()
+                            .h(px(CONTROL_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .icon(UiIcon::new(PhosphorIcon::Download).text_color(muted_foreground))
+                            .label(update_label)
+                            .tooltip(update_tooltip)
+                            .disabled(update_disabled)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                use crate::updater::AppUpdateState;
+                                match this.app_update {
+                                    AppUpdateState::Available { .. } => this.install_app_update(cx),
+                                    _ => this.check_for_app_update(cx),
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(
                 UiButton::new("open-github")
                     .secondary()

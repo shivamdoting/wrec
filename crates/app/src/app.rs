@@ -88,6 +88,8 @@ enum AppEvent {
     Paused(std::result::Result<JobSnapshot, String>),
     Resumed(std::result::Result<JobSnapshot, String>),
     Stopped(std::result::Result<JobSnapshot, String>),
+    UpdateChecked(std::result::Result<Option<String>, String>),
+    UpdateApplied(std::result::Result<crate::updater::ReadyUpdate, String>),
 }
 
 enum UiEvent {
@@ -112,6 +114,7 @@ pub(crate) struct WrecApp {
     pub(crate) status: String,
     pub(crate) cli_install_status: CliInstallStatus,
     pub(crate) skill_install_status: SkillInstallStatus,
+    pub(crate) app_update: crate::updater::AppUpdateState,
     pub(crate) active_tab: AppTab,
     pub(crate) last_recording_dir: Option<PathBuf>,
     pub(crate) show_nerd_logs: bool,
@@ -246,6 +249,7 @@ impl WrecApp {
             status: "Idle".to_string(),
             cli_install_status: crate::platform::cli_install_status(),
             skill_install_status: crate::platform::skill_install_status(),
+            app_update: crate::updater::AppUpdateState::Idle,
             active_tab: AppTab::General,
             last_recording_dir: None,
             show_nerd_logs: config.show_nerd_logs,
@@ -262,6 +266,9 @@ impl WrecApp {
         };
         app.refresh_permission_status(true, cx);
         app.refresh_mic_permission_status(cx);
+        if crate::updater::eligible_bundle().is_ok() {
+            app.check_for_app_update(cx);
+        }
         app
     }
 
@@ -479,6 +486,43 @@ impl WrecApp {
         std::thread::spawn(move || {
             let result = macos::request_microphone_permission().map_err(|err| err.to_string());
             let _ = app_events.unbounded_send(UiEvent::App(AppEvent::MicPermissionUpdated(result)));
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn check_for_app_update(&mut self, cx: &mut Context<Self>) {
+        use crate::updater::AppUpdateState;
+        if matches!(
+            self.app_update,
+            AppUpdateState::Checking | AppUpdateState::Updating { .. }
+        ) {
+            return;
+        }
+        self.app_update = AppUpdateState::Checking;
+        let app_events = self.app_events.clone();
+        std::thread::spawn(move || {
+            let result = crate::updater::check();
+            let _ = app_events.unbounded_send(UiEvent::App(AppEvent::UpdateChecked(result)));
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn install_app_update(&mut self, cx: &mut Context<Self>) {
+        use crate::updater::AppUpdateState;
+        let version = match &self.app_update {
+            AppUpdateState::Available { version } => version.clone(),
+            _ => return,
+        };
+        if !matches!(self.recorder_state, RecorderState::Idle) {
+            self.push_log("app update blocked: finish the active recording first");
+            return;
+        }
+        self.app_update = AppUpdateState::Updating { version };
+        self.push_log("downloading app update");
+        let app_events = self.app_events.clone();
+        std::thread::spawn(move || {
+            let result = crate::updater::download_and_apply();
+            let _ = app_events.unbounded_send(UiEvent::App(AppEvent::UpdateApplied(result)));
         });
         cx.notify();
     }
@@ -1206,6 +1250,41 @@ impl WrecApp {
                 cx.activate(true);
                 window.activate_window();
                 self.show_error(message, window, cx);
+            }
+            AppEvent::UpdateChecked(Ok(Some(version))) => {
+                self.push_log(format!("app update available: {version}"));
+                self.app_update = crate::updater::AppUpdateState::Available { version };
+            }
+            AppEvent::UpdateChecked(Ok(None)) => {
+                self.push_log("app is up to date");
+                self.app_update = crate::updater::AppUpdateState::UpToDate;
+            }
+            AppEvent::UpdateChecked(Err(message)) => {
+                self.push_log(format!("app update check failed: {message}"));
+                self.app_update = crate::updater::AppUpdateState::Failed { message };
+            }
+            AppEvent::UpdateApplied(Ok(update)) => {
+                self.push_log(format!("updated to {}; relaunching", update.version));
+                crate::updater::relaunch_and_cleanup(&update);
+                cx.quit();
+            }
+            AppEvent::UpdateApplied(Err(message)) => {
+                self.push_log(format!("app update failed: {message}"));
+                push_app_notification(
+                    window,
+                    app_notification(format!("Update failed: {message}")),
+                    cx,
+                );
+                // Keep offering the install rather than degrading to a
+                // check-again state; the version is already known.
+                self.app_update = match &self.app_update {
+                    crate::updater::AppUpdateState::Updating { version } => {
+                        crate::updater::AppUpdateState::Available {
+                            version: version.clone(),
+                        }
+                    }
+                    _ => crate::updater::AppUpdateState::Failed { message },
+                };
             }
         }
     }

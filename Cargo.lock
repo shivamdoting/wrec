@@ -91,6 +91,7 @@ dependencies = [
  "gpui_platform",
  "macos",
  "phosphor-svgs",
+ "serde_json",
  "tracing",
 ]
 

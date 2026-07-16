@@ -105,6 +105,18 @@ jobs:
       - name: Package CLI runtime
         run: ./scripts/package-cli-macos.sh release
 
+      - name: Archive app bundle for in-place updates
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            arm64) target="aarch64-apple-darwin" ;;
+            x86_64) target="x86_64-apple-darwin" ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+
+          tar -C dist/release -czf "dist/release/wrec-app-$target.tar.gz" "Wrec.app"
+
       - name: Verify artifacts
         run: |
           set -euo pipefail
@@ -117,10 +129,13 @@ jobs:
 
           dmg="dist/release/wrec-${{ steps.release.outputs.version }}.dmg"
           cli_archive="dist/cli/wrec-cli-$target.tar.gz"
+          app_archive="dist/release/wrec-app-$target.tar.gz"
 
           test -f "$dmg"
           test -f "$cli_archive"
+          test -f "$app_archive"
           codesign --verify --deep --strict --verbose=2 "dist/release/Wrec.app"
+          tar -tzf "$app_archive" | grep -qx 'Wrec.app/Contents/MacOS/wrec-app'
           tar -tzf "$cli_archive" | grep -qx 'wrec-cli/wrec'
           tar -tzf "$cli_archive" | grep -qx 'wrec-cli/daemon'
           tar -tzf "$cli_archive" | grep -qx 'wrec-cli/capture-engine'
@@ -144,6 +159,7 @@ jobs:
 
           gh release create "$GITHUB_REF_NAME" \
             dist/release/*.dmg \
+            dist/release/*.tar.gz \
             dist/cli/*.tar.gz \
             --target "${{ steps.release.outputs.commit }}" \
             --title "$GITHUB_REF_NAME" \

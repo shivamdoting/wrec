@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod platform;
 mod ui;
+mod updater;
 
 use app::{Hide, Minimize, Quit, WrecApp};
 use assets::{register_fonts, WrecAssets};
