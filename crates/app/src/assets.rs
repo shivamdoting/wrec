@@ -1,5 +1,4 @@
 use gpui::{App, AssetSource, SharedString};
-use gpui_component::IconNamed;
 use std::borrow::Cow;
 
 pub(crate) const GEIST_FONT_FAMILY: &str = "Geist";
@@ -18,6 +17,7 @@ pub(crate) fn register_fonts(cx: &mut App) {
 
 #[derive(Clone, Copy)]
 pub(crate) enum PhosphorIcon {
+    CaretDown,
     Clipboard,
     Download,
     FilmReel,
@@ -35,9 +35,10 @@ pub(crate) enum PhosphorIcon {
     Terminal,
 }
 
-impl IconNamed for PhosphorIcon {
-    fn path(self) -> SharedString {
+impl PhosphorIcon {
+    pub(crate) fn asset_path(self) -> SharedString {
         match self {
+            Self::CaretDown => "icons/chevron-down.svg",
             Self::Clipboard => "icons/phosphor/clipboard-text.svg",
             Self::Download => "icons/phosphor/download-simple.svg",
             Self::FilmReel => "icons/phosphor/film-reel.svg",

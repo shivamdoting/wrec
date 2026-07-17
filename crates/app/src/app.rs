@@ -1,10 +1,11 @@
 use crate::{
     platform::{choose_output_dir, open_path, CliInstallStatus, SkillInstallStatus},
     ui::{
-        app_notification, fps_disabled, fps_label, fps_options_for, push_app_notification,
-        resolution_disabled, resolution_label, resolution_options_for, target_key, AppTab,
-        ControlSelect, LimitedOption, LimitedSelect, TargetOption, TargetSelect, CODEC_OPTIONS,
-        QUALITY_OPTIONS, SOURCE_OPTIONS,
+        app_notification, fps_disabled, fps_label, fps_options_for,
+        kit::{PickerEvent, PickerState},
+        push_app_notification, resolution_disabled, resolution_label, resolution_options_for,
+        target_key, AppTab, ControlSelect, LimitedSelect, TargetOption, TargetSelect,
+        CODEC_OPTIONS, QUALITY_OPTIONS, SOURCE_OPTIONS,
     },
 };
 use config::{save_config as persist_config, wrec_dir, AppConfig};
@@ -22,8 +23,7 @@ use gpui_component::{
     button::ButtonVariant,
     dialog::DialogButtonProps,
     input::{InputEvent, InputState},
-    select::{SelectEvent, SelectState},
-    IndexPath, WindowExt as _,
+    WindowExt as _,
 };
 use std::{
     collections::VecDeque,
@@ -152,48 +152,13 @@ impl WrecApp {
             }
         });
 
-        let source_select = cx.new(|cx| {
-            SelectState::new(
-                SOURCE_OPTIONS.to_vec(),
-                Some(IndexPath::default()),
-                window,
-                cx,
-            )
-        });
-        let target_select =
-            cx.new(|cx| SelectState::new(Vec::<TargetOption>::new(), None, window, cx));
-        let codec_select = cx.new(|cx| {
-            SelectState::new(
-                CODEC_OPTIONS.to_vec(),
-                Some(IndexPath::default()),
-                window,
-                cx,
-            )
-        });
-        let quality_select = cx.new(|cx| {
-            SelectState::new(
-                QUALITY_OPTIONS.to_vec(),
-                Some(IndexPath::default()),
-                window,
-                cx,
-            )
-        });
-        let resolution_select = cx.new(|cx| {
-            SelectState::new(
-                resolution_options_for(settings.quality),
-                Some(IndexPath::default()),
-                window,
-                cx,
-            )
-        });
-        let fps_select = cx.new(|cx| {
-            SelectState::new(
-                fps_options_for(settings.quality),
-                Some(IndexPath::default()),
-                window,
-                cx,
-            )
-        });
+        let source_select = cx.new(|_| PickerState::new(SOURCE_OPTIONS.to_vec(), Some(0)));
+        let target_select = cx.new(|_| PickerState::new(Vec::<TargetOption>::new(), None));
+        let codec_select = cx.new(|_| PickerState::new(CODEC_OPTIONS.to_vec(), Some(0)));
+        let quality_select = cx.new(|_| PickerState::new(QUALITY_OPTIONS.to_vec(), Some(0)));
+        let resolution_select =
+            cx.new(|_| PickerState::new(resolution_options_for(settings.quality), Some(0)));
+        let fps_select = cx.new(|_| PickerState::new(fps_options_for(settings.quality), Some(0)));
         let output_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(settings.output_dir.display().to_string())
@@ -216,19 +181,19 @@ impl WrecApp {
             .detach();
 
         fps_select.update(cx, |select, cx| {
-            select.set_selected_value(&fps_label(settings.fps).into(), window, cx);
+            select.set_selected_value(fps_label(settings.fps), cx);
         });
         source_select.update(cx, |select, cx| {
-            select.set_selected_value(&source_label(settings.source).into(), window, cx);
+            select.set_selected_value(source_label(settings.source), cx);
         });
         codec_select.update(cx, |select, cx| {
-            select.set_selected_value(&codec_label(settings.codec).into(), window, cx);
+            select.set_selected_value(codec_label(settings.codec), cx);
         });
         quality_select.update(cx, |select, cx| {
-            select.set_selected_value(&quality_label(settings.quality).into(), window, cx);
+            select.set_selected_value(quality_label(settings.quality), cx);
         });
         resolution_select.update(cx, |select, cx| {
-            select.set_selected_value(&resolution_label(settings.resolution).into(), window, cx);
+            select.set_selected_value(resolution_label(settings.resolution), cx);
         });
 
         let mut app = Self {
@@ -275,19 +240,17 @@ impl WrecApp {
     fn on_source_select(
         &mut self,
         _: &Entity<ControlSelect>,
-        event: &SelectEvent<Vec<&'static str>>,
-        window: &mut Window,
+        event: &PickerEvent,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SelectEvent::Confirm(Some(value)) = event else {
-            return;
-        };
-        self.settings.source = match *value {
+        let PickerEvent::Confirm(value) = event;
+        self.settings.source = match value.as_ref() {
             "Window" => CaptureSourceKind::Window,
             _ => CaptureSourceKind::Display,
         };
         self.selected_target_key = None;
-        self.sync_target_select(window, cx);
+        self.sync_target_select(cx);
         self.push_log(format!("source: {value}"));
         self.save_config();
         cx.notify();
@@ -296,13 +259,11 @@ impl WrecApp {
     fn on_target_select(
         &mut self,
         _: &Entity<TargetSelect>,
-        event: &SelectEvent<Vec<TargetOption>>,
+        event: &PickerEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SelectEvent::Confirm(Some(value)) = event else {
-            return;
-        };
+        let PickerEvent::Confirm(value) = event;
         self.selected_target_key = Some(value.to_string());
         if let Some(target) = self.selected_target() {
             self.push_log(format!("target: {}", target.name));
@@ -314,14 +275,12 @@ impl WrecApp {
     fn on_codec_select(
         &mut self,
         _: &Entity<ControlSelect>,
-        event: &SelectEvent<Vec<&'static str>>,
+        event: &PickerEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SelectEvent::Confirm(Some(value)) = event else {
-            return;
-        };
-        self.settings.codec = match *value {
+        let PickerEvent::Confirm(value) = event;
+        self.settings.codec = match value.as_ref() {
             "H.264" => Codec::H264,
             _ => Codec::Hevc,
         };
@@ -333,20 +292,18 @@ impl WrecApp {
     fn on_quality_select(
         &mut self,
         _: &Entity<ControlSelect>,
-        event: &SelectEvent<Vec<&'static str>>,
-        window: &mut Window,
+        event: &PickerEvent,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SelectEvent::Confirm(Some(value)) = event else {
-            return;
-        };
-        self.settings.quality = match *value {
+        let PickerEvent::Confirm(value) = event;
+        self.settings.quality = match value.as_ref() {
             "Efficient" => Quality::Efficient,
             "High" => Quality::High,
             _ => Quality::Balanced,
         };
         self.push_log(format!("preset: {value}"));
-        self.apply_preset_limits(window, cx);
+        self.apply_preset_limits(cx);
         self.save_config();
         cx.notify();
     }
@@ -354,21 +311,19 @@ impl WrecApp {
     fn on_resolution_select(
         &mut self,
         _: &Entity<LimitedSelect>,
-        event: &SelectEvent<Vec<LimitedOption>>,
-        window: &mut Window,
+        event: &PickerEvent,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SelectEvent::Confirm(Some(value)) = event else {
-            return;
-        };
+        let PickerEvent::Confirm(value) = event;
         let resolution = resolution_from_label(value.as_ref());
         if resolution_disabled(self.settings.quality, resolution) {
-            self.sync_capture_selects(window, cx);
+            self.sync_capture_selects(cx);
             cx.notify();
             return;
         }
         self.settings.resolution = resolution;
-        self.apply_preset_limits(window, cx);
+        self.apply_preset_limits(cx);
         self.push_log(format!("resolution: {value}"));
         self.save_config();
         cx.notify();
@@ -377,20 +332,18 @@ impl WrecApp {
     fn on_fps_select(
         &mut self,
         _: &Entity<LimitedSelect>,
-        event: &SelectEvent<Vec<LimitedOption>>,
-        window: &mut Window,
+        event: &PickerEvent,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SelectEvent::Confirm(Some(value)) = event else {
-            return;
-        };
+        let PickerEvent::Confirm(value) = event;
         let fps = fps_from_label(value.as_ref());
         if fps_disabled(self.settings.quality, fps) {
-            self.sync_capture_selects(window, cx);
+            self.sync_capture_selects(cx);
             cx.notify();
             return;
         }
-        self.set_fps(fps, window, cx);
+        self.set_fps(fps, cx);
     }
 
     fn on_output_input(
@@ -414,9 +367,9 @@ impl WrecApp {
         }
     }
 
-    fn set_fps(&mut self, fps: FrameRate, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_fps(&mut self, fps: FrameRate, cx: &mut Context<Self>) {
         self.settings.fps = fps;
-        self.apply_preset_limits(window, cx);
+        self.apply_preset_limits(cx);
         self.push_log(format!("fps: {}", fps.as_u32()));
         self.save_config();
         cx.notify();
@@ -740,7 +693,7 @@ impl WrecApp {
         cx.notify();
     }
 
-    fn sync_target_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_target_select(&mut self, cx: &mut Context<Self>) {
         let options = self
             .targets
             .iter()
@@ -756,37 +709,33 @@ impl WrecApp {
 
         self.selected_target_key = selected_key.clone();
         self.target_select.update(cx, |select, cx| {
-            select.set_items(options, window, cx);
+            select.set_items(options, cx);
             if let Some(key) = selected_key {
-                select.set_selected_value(&key.into(), window, cx);
+                select.set_selected_value(&key, cx);
             } else {
-                select.set_selected_index(None, window, cx);
+                select.set_selected_index(None, cx);
             }
         });
     }
 
-    fn sync_capture_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_capture_selects(&mut self, cx: &mut Context<Self>) {
         self.codec_select.update(cx, |select, cx| {
-            select.set_selected_value(&codec_label(self.settings.codec).into(), window, cx);
+            select.set_selected_value(codec_label(self.settings.codec), cx);
         });
         self.quality_select.update(cx, |select, cx| {
-            select.set_selected_value(&quality_label(self.settings.quality).into(), window, cx);
+            select.set_selected_value(quality_label(self.settings.quality), cx);
         });
         self.resolution_select.update(cx, |select, cx| {
-            select.set_items(resolution_options_for(self.settings.quality), window, cx);
-            select.set_selected_value(
-                &resolution_label(self.settings.resolution).into(),
-                window,
-                cx,
-            );
+            select.set_items(resolution_options_for(self.settings.quality), cx);
+            select.set_selected_value(resolution_label(self.settings.resolution), cx);
         });
         self.fps_select.update(cx, |select, cx| {
-            select.set_items(fps_options_for(self.settings.quality), window, cx);
-            select.set_selected_value(&fps_label(self.settings.fps).into(), window, cx);
+            select.set_items(fps_options_for(self.settings.quality), cx);
+            select.set_selected_value(fps_label(self.settings.fps), cx);
         });
     }
 
-    fn apply_preset_limits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_preset_limits(&mut self, cx: &mut Context<Self>) {
         let before = (self.settings.resolution, self.settings.fps);
         self.settings = self.settings.clone().with_preset_limits();
         let after = (self.settings.resolution, self.settings.fps);
@@ -799,7 +748,7 @@ impl WrecApp {
                 self.settings.fps.as_u32()
             ));
         }
-        self.sync_capture_selects(window, cx);
+        self.sync_capture_selects(cx);
     }
 
     pub(crate) fn selected_target(&self) -> Option<CaptureTarget> {
@@ -1050,7 +999,7 @@ impl WrecApp {
                     }
                     PermissionStatus::Missing => {
                         self.targets.clear();
-                        self.sync_target_select(window, cx);
+                        self.sync_target_select(cx);
                         self.status = "Screen Recording permission needed".to_string();
                         self.push_log("Screen Recording permission missing");
                     }
@@ -1146,7 +1095,7 @@ impl WrecApp {
             AppEvent::TargetsLoaded(Ok(targets)) => {
                 let count = targets.len();
                 self.targets = targets;
-                self.sync_target_select(window, cx);
+                self.sync_target_select(cx);
                 self.recorder_state = RecorderState::Idle;
                 let message = format!("{count} capture targets loaded");
                 self.status = "Idle".to_string();
