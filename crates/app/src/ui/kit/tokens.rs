@@ -11,9 +11,10 @@
 use gpui::{hsla, point, px, rgb, App, BoxShadow, Global, Hsla};
 
 /// Corner radius for controls (buttons, switches, select triggers).
-pub(crate) const RADIUS: f32 = 5.;
+/// Zero: everything is sharp-cornered.
+pub(crate) const RADIUS: f32 = 0.;
 /// Corner radius for floating surfaces (menus, tooltips).
-pub(crate) const RADIUS_MENU: f32 = 7.;
+pub(crate) const RADIUS_MENU: f32 = 0.;
 
 /// The colors a mode must define; everything else in [`Tokens`] is derived.
 struct BasePalette {

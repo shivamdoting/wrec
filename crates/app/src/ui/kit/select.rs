@@ -245,7 +245,6 @@ impl<T: PickerItem> RenderOnce for Picker<T> {
                                     div()
                                         .flex_none()
                                         .size(px(5.))
-                                        .rounded(px(1.))
                                         .when(is_selected, |this| this.bg(t.accent)),
                                 )
                                 .child(div().flex_1().min_w(px(0.)).truncate().child(item.label()));

@@ -1023,7 +1023,6 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
                         .flex_none()
                         .w(px(2.))
                         .h(px(12.))
-                        .rounded(px(1.))
                         .when(item.active, |this| this.bg(t.accent)),
                 )
                 .child(kit_icon(
@@ -1037,14 +1036,14 @@ fn sidebar_nav_row(item: WrecSidebarNavItem, cx: &mut Context<WrecApp>) -> impl 
                         .min_w(px(0.))
                         .truncate()
                         .font_family(GEIST_MONO_FONT_FAMILY)
-                        .text_size(px(11.))
+                        .text_size(px(12.))
                         .font_weight(if item.active {
                             FontWeight::SEMIBOLD
                         } else {
                             FontWeight::MEDIUM
                         })
                         .text_color(if item.active { t.ink } else { t.ink_muted })
-                        .child(item.label.to_uppercase()),
+                        .child(item.label),
                 ),
         )
         .on_click(move |event, window, cx| {
@@ -1170,19 +1169,19 @@ fn field_label(label: &'static str, color: Hsla) -> Div {
     div().w(px(FIELD_LABEL_WIDTH)).flex_none().child(
         div()
             .font_family(GEIST_MONO_FONT_FAMILY)
-            .text_size(px(11.))
+            .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(color)
-            .child(label.to_uppercase()),
+            .child(label),
     )
 }
 
 fn row_label(label: &'static str) -> Div {
     div()
         .font_family(GEIST_MONO_FONT_FAMILY)
-        .text_size(px(11.))
+        .text_size(px(12.))
         .font_weight(FontWeight::MEDIUM)
-        .child(label.to_uppercase())
+        .child(label)
 }
 
 fn labeled_control_row(label: &'static str, color: Hsla, control: impl IntoElement) -> Div {

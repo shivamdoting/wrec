@@ -197,7 +197,7 @@ impl RenderOnce for KitButton {
                         .text_size(px(self.text_size))
                         .font_weight(FontWeight::MEDIUM)
                         .whitespace_nowrap()
-                        .child(label.to_uppercase()),
+                        .child(label),
                 )
             })
     }

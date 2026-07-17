@@ -77,7 +77,6 @@ impl RenderOnce for KitSwitch {
             .flex_none()
             .w(px(TRACK_W))
             .h(px(TRACK_H))
-            .rounded(px(4.))
             .bg(track)
             .child(
                 div()
@@ -85,7 +84,6 @@ impl RenderOnce for KitSwitch {
                     .top(px(INSET))
                     .left(px(thumb_x))
                     .size(px(THUMB))
-                    .rounded(px(2.))
                     .bg(thumb),
             );
 
