@@ -45,11 +45,16 @@ fn dev() -> ExitCode {
 
     // The GUI shell is Swift now; the debug daemon we just built is picked up
     // via WREC_DAEMON_BIN so the shell drives this checkout's engine.
-    let daemon_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .join("target/debug/daemon");
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("workspace root")
+                .join("target")
+        });
+    let daemon_bin = target_dir.join("debug/daemon");
     let app = Command::new("swift")
         .args(["run", "--package-path", "apps/mac", "wrec-app"])
         .env("WREC_DAEMON_BIN", daemon_bin)

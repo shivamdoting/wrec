@@ -34,7 +34,6 @@ enum IPCError: Error, CustomStringConvertible {
 actor DaemonClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
-    private var ensured = false
 
     init() {
         encoder = JSONEncoder()
@@ -45,11 +44,11 @@ actor DaemonClient {
 
     // MARK: - Public API (mirrors control::DaemonClient)
 
+    /// Every ensure re-validates the protocol version, matching the Rust
+    /// client — the daemon can be swapped underneath us by an update.
     func ensure() throws {
-        if ensured, (try? status()) != nil { return }
         if let status = try? status() {
             try checkProtocol(status)
-            ensured = true
             return
         }
         try spawnDaemon()
@@ -57,7 +56,6 @@ actor DaemonClient {
         while Date() < deadline {
             if let status = try? status() {
                 try checkProtocol(status)
-                ensured = true
                 return
             }
             usleep(100_000)
@@ -280,11 +278,9 @@ actor DaemonClient {
             }
         }
         let installed = "/usr/local/lib/wrec/daemon"
-        if fm.isExecutableFile(atPath: installed) {
-            return DaemonLaunch(
-                binary: installed,
-                captureEnginePath: "/usr/local/lib/wrec/capture-engine"
-            )
+        let installedEngine = "/usr/local/lib/wrec/capture-engine"
+        if fm.isExecutableFile(atPath: installed), fm.isExecutableFile(atPath: installedEngine) {
+            return DaemonLaunch(binary: installed, captureEnginePath: installedEngine)
         }
         return nil
     }

@@ -106,6 +106,33 @@ struct RecorderSettings: Codable, Equatable, Sendable {
     var hideWrec: Bool
     var showMicIndicator: Bool
 
+    enum CodingKeys: String, CodingKey {
+        case source, fps, codec, quality, resolution
+        case outputDir, includeCursor, includeSystemAudio, includeMicrophone
+        case hideWrec, showMicIndicator
+    }
+
+    /// Mirrors the Rust struct's `#[serde(default)]` fields so configs
+    /// written by older versions still load instead of being discarded.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        source = try container.decode(CaptureSourceKind.self, forKey: .source)
+        fps = try container.decode(FrameRate.self, forKey: .fps)
+        codec = try container.decode(Codec.self, forKey: .codec)
+        quality = try container.decode(Quality.self, forKey: .quality)
+        resolution =
+            try container.decodeIfPresent(Resolution.self, forKey: .resolution) ?? .r1080p
+        outputDir = try container.decode(String.self, forKey: .outputDir)
+        includeCursor = try container.decode(Bool.self, forKey: .includeCursor)
+        includeSystemAudio =
+            try container.decodeIfPresent(Bool.self, forKey: .includeSystemAudio) ?? true
+        includeMicrophone =
+            try container.decodeIfPresent(Bool.self, forKey: .includeMicrophone) ?? false
+        hideWrec = try container.decodeIfPresent(Bool.self, forKey: .hideWrec) ?? true
+        showMicIndicator =
+            try container.decodeIfPresent(Bool.self, forKey: .showMicIndicator) ?? true
+    }
+
     static func defaults() -> RecorderSettings {
         RecorderSettings(
             source: .display,

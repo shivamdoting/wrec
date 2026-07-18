@@ -257,8 +257,12 @@ fi
 if [[ ! -f "$SWIFT_BIN_DIR/$BIN_NAME" ]]; then
   die "Could not find compiled app binary at $SWIFT_BIN_DIR/$BIN_NAME"
 fi
-if [[ ! -d "$SWIFT_BIN_DIR/wrec-mac_wrec-app.bundle" ]]; then
-  die "Could not find Swift resource bundle at $SWIFT_BIN_DIR/wrec-mac_wrec-app.bundle"
+# SwiftPM derives the resource-bundle name from package/target names and may
+# sanitize them differently across toolchains — discover it instead of
+# hard-coding.
+SWIFT_RESOURCE_BUNDLE="$(find "$SWIFT_BIN_DIR" -maxdepth 1 -name "*.bundle" -type d | head -n 1)"
+if [[ -z "$SWIFT_RESOURCE_BUNDLE" ]]; then
+  die "Could not find Swift resource bundle under $SWIFT_BIN_DIR"
 fi
 if [[ ! -f "$TARGET_DIR/$PROFILE_DIR/$DAEMON_BIN_NAME" ]]; then
   die "Could not find compiled daemon binary at $TARGET_DIR/$PROFILE_DIR/$DAEMON_BIN_NAME"
@@ -276,7 +280,7 @@ run mkdir -p "$MACOS" "$RESOURCES"
 
 log "Copying executables and metadata"
 run cp "$SWIFT_BIN_DIR/$BIN_NAME" "$MACOS/$BIN_NAME"
-run cp -R "$SWIFT_BIN_DIR/wrec-mac_wrec-app.bundle" "$RESOURCES/wrec-mac_wrec-app.bundle"
+run cp -R "$SWIFT_RESOURCE_BUNDLE" "$RESOURCES/$(basename "$SWIFT_RESOURCE_BUNDLE")"
 run cp "$TARGET_DIR/$PROFILE_DIR/$DAEMON_BIN_NAME" "$MACOS/$DAEMON_BIN_NAME"
 run cp "$CAPTURE_ENGINE" "$MACOS/capture-engine"
 run cp "$ROOT/packaging/macos/Info.plist" "$INFO_PLIST"

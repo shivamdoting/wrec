@@ -76,13 +76,16 @@ final class RecorderModel {
         Task { await bootstrap() }
     }
 
-    var selectedTarget: CaptureTarget? {
-        guard let key = selectedTargetKey else { return targets.first }
-        return targets.first { $0.key == key } ?? targets.first
-    }
-
     var visibleTargets: [CaptureTarget] {
         targets.filter { $0.kind == settings.source }
+    }
+
+    /// Selection is always within the current source kind — switching
+    /// Display/Window must never leave a hidden target armed.
+    var selectedTarget: CaptureTarget? {
+        let visible = visibleTargets
+        guard let key = selectedTargetKey else { return visible.first }
+        return visible.first { $0.key == key } ?? visible.first
     }
 
     var canRecord: Bool {
@@ -199,11 +202,15 @@ final class RecorderModel {
         to phase: RecorderPhase,
         _ op: @escaping @Sendable () async throws -> JobSnapshot
     ) {
+        let previous = self.phase
         self.phase = phase
         Task {
             do {
                 apply(try await op())
             } catch {
+                // Roll the optimistic phase back so the transport doesn't
+                // stay disabled after a failed pause/resume/stop.
+                if self.phase == phase { self.phase = previous }
                 show(toast: "\(error)")
             }
         }
@@ -214,11 +221,22 @@ final class RecorderModel {
     private func startPolling(_ jobId: UInt64) {
         pollTask?.cancel()
         pollTask = Task { [daemon] in
+            // ~5s of consecutive failures means the daemon died or dropped
+            // the job; fail the session instead of spinning forever.
+            var consecutiveFailures = 0
             while !Task.isCancelled {
                 guard let job = try? await daemon.showJob(jobId) else {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 10 {
+                        self.finishSession()
+                        self.phase = .failed("lost contact with the recording daemon")
+                        self.show(toast: "Lost contact with the recording daemon")
+                        return
+                    }
                     try? await Task.sleep(for: .milliseconds(500))
                     continue
                 }
+                consecutiveFailures = 0
                 self.apply(job)
                 if job.status.isTerminal { break }
                 try? await Task.sleep(for: .milliseconds(500))
@@ -294,15 +312,21 @@ final class RecorderModel {
 
     // MARK: - Quit
 
-    /// Stop any live job first; the daemon finalizes the file on its own, so
-    /// terminating right after the stop request is safe.
+    /// Stop any live job first and give the daemon a moment to reach a
+    /// terminal state so the file is finalized, then quit regardless — the
+    /// user asked to leave, and the daemon is a separate process.
     func quit() {
-        if let jobId = activeJobId {
-            Task {
-                _ = try? await daemon.stopJob(jobId)
-                NSApp.terminate(nil)
+        guard let jobId = activeJobId else {
+            NSApp.terminate(nil)
+            return
+        }
+        phase = .stopping
+        Task {
+            _ = try? await daemon.stopJob(jobId)
+            for _ in 0..<8 {
+                if let job = try? await daemon.showJob(jobId), job.status.isTerminal { break }
+                try? await Task.sleep(for: .milliseconds(500))
             }
-        } else {
             NSApp.terminate(nil)
         }
     }
