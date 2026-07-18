@@ -245,6 +245,14 @@ final class RecorderModel {
     }
 
     private func apply(_ job: JobSnapshot) {
+        // Metrics first: terminal branches below clear the session (including
+        // metrics), and nothing may repopulate them afterwards or the next
+        // recording briefly flashes the previous session's numbers.
+        if let latest = job.latestMetrics, latest != metrics {
+            metrics = latest
+            metricsText = Self.format(metrics: latest)
+        }
+
         switch job.status {
         case .queued, .starting: phase = .starting
         case .recording: phase = .recording
@@ -266,10 +274,6 @@ final class RecorderModel {
             finishSession()
         }
 
-        if let latest = job.latestMetrics, latest != metrics {
-            metrics = latest
-            metricsText = Self.format(metrics: latest)
-        }
         menuBarText = Self.menuBarText(phase: phase, metrics: metrics)
     }
 
