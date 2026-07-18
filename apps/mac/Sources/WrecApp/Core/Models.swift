@@ -112,6 +112,27 @@ struct RecorderSettings: Codable, Equatable, Sendable {
         case hideWrec, showMicIndicator
     }
 
+    // The custom Decodable init below suppresses the synthesized memberwise
+    // initializer; `defaults()` needs it back.
+    init(
+        source: CaptureSourceKind, fps: FrameRate, codec: Codec, quality: Quality,
+        resolution: Resolution, outputDir: String, includeCursor: Bool,
+        includeSystemAudio: Bool, includeMicrophone: Bool, hideWrec: Bool,
+        showMicIndicator: Bool
+    ) {
+        self.source = source
+        self.fps = fps
+        self.codec = codec
+        self.quality = quality
+        self.resolution = resolution
+        self.outputDir = outputDir
+        self.includeCursor = includeCursor
+        self.includeSystemAudio = includeSystemAudio
+        self.includeMicrophone = includeMicrophone
+        self.hideWrec = hideWrec
+        self.showMicIndicator = showMicIndicator
+    }
+
     /// Mirrors the Rust struct's `#[serde(default)]` fields so configs
     /// written by older versions still load instead of being discarded.
     init(from decoder: Decoder) throws {
