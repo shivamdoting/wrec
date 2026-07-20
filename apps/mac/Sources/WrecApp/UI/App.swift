@@ -49,7 +49,9 @@ struct WrecApp: App {
 @MainActor
 enum UIPreview {
     static func openIfRequested(model: RecorderModel) {
-        guard ProcessInfo.processInfo.environment["WREC_UI_PREVIEW"] == "1" else { return }
+        guard let mode = ProcessInfo.processInfo.environment["WREC_UI_PREVIEW"],
+            mode == "1" || mode == "settings"
+        else { return }
         DispatchQueue.main.async {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 320, height: 640),
@@ -58,12 +60,20 @@ enum UIPreview {
                 defer: false
             )
             window.title = "wrec preview"
-            window.contentView = NSHostingView(rootView: PopoverView(model: model))
+            window.contentView =
+                mode == "settings"
+                ? NSHostingView(
+                    rootView: SettingsGeneralPreview(model: model).frame(width: 440))
+                : NSHostingView(rootView: PopoverView(model: model))
             window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             // Pin to a known spot: 40pt from the screen's top-left.
             if let screen = NSScreen.main {
                 let top = screen.frame.maxY - 40
                 window.setFrameTopLeftPoint(NSPoint(x: 40, y: top))
+            }
+            if mode == "settings" {
+                window.setContentSize(NSSize(width: 440, height: 520))
             }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -102,20 +112,35 @@ struct StatusItemFrameReporter: NSViewRepresentable {
 }
 #endif
 
-/// The menu bar item: the wrec rectangle, plus the live timer while
-/// recording. `menuBarText` is precomputed in the model and changes at most
-/// once a second, so this view re-renders only on real state changes.
+/// The menu bar item: the wrec mark, plus the live timer while recording.
+/// `menuBarText` is precomputed in the model and changes at most once a
+/// second, so this view re-renders only on real state changes.
 struct MenuBarLabel: View {
     let model: RecorderModel
 
     var body: some View {
         HStack(spacing: 4) {
-            Rectangle()
-                .frame(width: 12, height: 12)
+            Image(nsImage: WrecMark.menuBarImage)
             if !model.menuBarText.isEmpty {
                 Text(model.menuBarText)
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
             }
         }
     }
+}
+
+/// The wrec mark: a plain filled rectangle, full icon height. It must be a
+/// template NSImage — a SwiftUI shape in a `MenuBarExtra` label paints
+/// literal black and disappears against a dark menu bar; a template image is
+/// recolored by the system for whichever appearance the bar has.
+enum WrecMark {
+    @MainActor static let menuBarImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+            NSColor.black.setFill()
+            rect.fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }

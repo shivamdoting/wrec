@@ -11,16 +11,13 @@ struct PopoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HeaderRow(model: model)
-            Divider()
 
             if !model.screenPermission.isGranted {
                 PermissionBanner(model: model)
-                Divider()
             }
 
-            TransportSection(model: model)
-            Divider()
             ConfigSection(model: model)
+            TransportSection(model: model)
 
             if let toast = model.toast {
                 Divider()
@@ -46,9 +43,7 @@ private struct HeaderRow: View {
         HStack(spacing: 8) {
             Text("WREC")
                 .font(.pixel(13))
-            Circle()
-                .fill(model.phase.isActiveSession ? Theme.red : Color.secondary.opacity(0.4))
-                .frame(width: 6, height: 6)
+                .foregroundStyle(model.phase.isActiveSession ? Theme.red : Color.primary)
             Spacer()
             SettingsLink {
                 Image(systemName: "gearshape")
@@ -181,28 +176,15 @@ private struct ConfigSection: View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
             GridRow {
                 FieldLabel("SOURCE")
-                Picker("", selection: sourceBinding) {
-                    ForEach(CaptureSourceKind.allCases, id: \.self) { kind in
-                        Text(kind.label).tag(kind)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                Segmented(
+                    options: CaptureSourceKind.allCases.map(\.label),
+                    selection: sourceBinding
+                )
             }
             GridRow {
                 FieldLabel("TARGET")
-                HStack(spacing: 4) {
-                    PopUp(options: model.visibleTargets.map(\.name), selection: targetBinding)
-                        .frame(maxWidth: .infinity)
-                    Button {
-                        Task { await model.refreshTargets() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .imageScale(.small)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Refresh targets")
-                }
+                PopUp(options: model.visibleTargets.map(\.name), selection: targetBinding)
+                    .frame(maxWidth: .infinity)
             }
             GridRow {
                 FieldLabel("FORMAT")
@@ -225,23 +207,12 @@ private struct ConfigSection: View {
                 }
             }
             GridRow {
-                FieldLabel("CURSOR")
-                toggle(\.includeCursor)
-            }
-            GridRow {
                 FieldLabel("AUDIO")
-                toggle(\.includeSystemAudio)
-            }
-            GridRow {
-                FieldLabel("MIC")
                 HStack(spacing: 6) {
+                    toggle(\.includeSystemAudio)
+                    Spacer(minLength: 0)
+                    FieldLabel("MICROPHONE", width: nil)
                     toggle(\.includeMicrophone)
-                    if model.settings.includeMicrophone, !model.micPermission.isGranted {
-                        Button("Grant") {
-                            Task { await model.requestMicPermission() }
-                        }
-                        .controlSize(.mini)
-                    }
                 }
             }
         }
@@ -251,10 +222,14 @@ private struct ConfigSection: View {
         .padding(.vertical, 12)
     }
 
-    private var sourceBinding: Binding<CaptureSourceKind> {
+    private var sourceBinding: Binding<Int> {
         Binding(
-            get: { model.settings.source },
-            set: { value in model.update { $0.source = value } }
+            get: { CaptureSourceKind.allCases.firstIndex(of: model.settings.source) ?? 0 },
+            set: { index in
+                let kinds = CaptureSourceKind.allCases
+                guard kinds.indices.contains(index) else { return }
+                model.update { $0.source = kinds[index] }
+            }
         )
     }
 
@@ -285,7 +260,7 @@ private struct ConfigSection: View {
                 }
             )
         )
-        .frame(width: 140)
+        .frame(maxWidth: .infinity)
     }
 
     private func toggle(_ keyPath: WritableKeyPath<RecorderSettings, Bool>) -> some View {
@@ -301,6 +276,56 @@ private struct ConfigSection: View {
     }
 }
 
+/// `NSSegmentedControl` bridged for the same reason as `PopUp`: SwiftUI's
+/// segmented picker hugs its labels and centers in the column instead of
+/// adopting the column width.
+private struct Segmented: NSViewRepresentable {
+    let options: [String]
+    @Binding var selection: Int
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(
+            labels: options,
+            trackingMode: .selectOne,
+            target: context.coordinator,
+            action: #selector(Coordinator.changed(_:))
+        )
+        control.segmentDistribution = .fillEqually
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.selection = $selection
+        if control.segmentCount == options.count {
+            for (index, label) in options.enumerated() {
+                control.setLabel(label, forSegment: index)
+            }
+        }
+        if options.indices.contains(selection) {
+            control.selectedSegment = selection
+        }
+        control.controlSize = controlSize.nsControlSize
+        control.font = .systemFont(ofSize: NSFont.systemFontSize(for: controlSize.nsControlSize))
+        control.isEnabled = isEnabled
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator($selection) }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<Int>
+
+        init(_ selection: Binding<Int>) { self.selection = selection }
+
+        @objc func changed(_ sender: NSSegmentedControl) {
+            selection.wrappedValue = sender.selectedSegment
+        }
+    }
+}
+
 /// `NSPopUpButton` bridged by hand because SwiftUI's menu `Picker` sizes its
 /// bezel to the widest menu item and ignores proposed widths — the config
 /// rows need every popup to adopt the column width so their edges align.
@@ -308,6 +333,7 @@ private struct PopUp: NSViewRepresentable {
     let options: [String]
     @Binding var selection: Int
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
 
     func makeNSView(context: Context) -> NSPopUpButton {
         let button = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -331,6 +357,8 @@ private struct PopUp: NSViewRepresentable {
         if options.indices.contains(selection) {
             button.selectItem(at: selection)
         }
+        button.controlSize = controlSize.nsControlSize
+        button.font = .menuFont(ofSize: NSFont.systemFontSize(for: controlSize.nsControlSize))
         button.isEnabled = isEnabled
     }
 
@@ -347,16 +375,32 @@ private struct PopUp: NSViewRepresentable {
     }
 }
 
+extension ControlSize {
+    fileprivate var nsControlSize: NSControl.ControlSize {
+        switch self {
+        case .mini: .mini
+        case .small: .small
+        case .large, .extraLarge: .large
+        default: .regular
+        }
+    }
+}
+
 private struct FieldLabel: View {
     let text: String
+    let width: CGFloat?
 
-    init(_ text: String) { self.text = text }
+    init(_ text: String, width: CGFloat? = 58) {
+        self.text = text
+        self.width = width
+    }
 
     var body: some View {
         Text(text)
             .font(.pixel(10))
             .foregroundStyle(.secondary)
+            .fixedSize()
             .gridColumnAlignment(.leading)
-            .frame(width: 58, alignment: .leading)
+            .frame(width: width, alignment: .leading)
     }
 }
