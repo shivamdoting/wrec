@@ -311,7 +311,7 @@ final class RecorderModel {
             selectedTargetKey: selectedTargetKey,
             showNerdLogs: showNerdLogs
         )
-        Task.detached(priority: .utility) { ConfigStore.save(config) }
+        ConfigStore.save(config)
     }
 
     // MARK: - Quit
@@ -324,11 +324,24 @@ final class RecorderModel {
             NSApp.terminate(nil)
             return
         }
+        pollTask?.cancel()
+        pollTask = nil
         phase = .stopping
-        Task {
-            _ = try? await daemon.stopJob(jobId)
-            for _ in 0..<8 {
-                if let job = try? await daemon.showJob(jobId), job.status.isTerminal { break }
+        // Use a separate short-timeout client so a cancelled in-flight poll
+        // cannot leave quit queued behind the normal 10-second socket timeout.
+        let quitDaemon = DaemonClient(timeoutSeconds: 1)
+        Task { [quitDaemon] in
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            var consecutiveFailures = 0
+            _ = try? await quitDaemon.stopJob(jobId)
+            while ContinuousClock.now < deadline {
+                if let job = try? await quitDaemon.showJob(jobId) {
+                    consecutiveFailures = 0
+                    if job.status.isTerminal { break }
+                } else {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 4 { break }
+                }
                 try? await Task.sleep(for: .milliseconds(500))
             }
             NSApp.terminate(nil)
@@ -353,7 +366,7 @@ final class RecorderModel {
         var text = String(
             format: "%d:%02d  %.1f MB  %.1f Mbps",
             metrics.elapsedSecs / 60, metrics.elapsedSecs % 60,
-            mb, metrics.estimatedBitrateMbps
+            mb, Double(metrics.estimatedBitrateMbps)
         )
         if let frames = metrics.frames {
             text += String(format: "  %d f", frames)

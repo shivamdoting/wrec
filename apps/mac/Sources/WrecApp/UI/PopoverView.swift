@@ -30,7 +30,10 @@ struct PopoverView: View {
             }
         }
         .frame(width: 320)
-        .task { await model.refreshTargets() }
+        .task {
+            await model.refreshMicPermission()
+            await model.refreshTargets()
+        }
     }
 }
 
@@ -99,7 +102,7 @@ private struct TransportSection: View {
                 }
                 RecordButton(model: model)
             }
-            if model.phase.isActiveSession, !model.metricsText.isEmpty {
+            if model.showNerdLogs, model.phase.isActiveSession, !model.metricsText.isEmpty {
                 Text(model.metricsText)
                     .font(.pixel(11))
                     .foregroundStyle(.secondary)
@@ -213,6 +216,11 @@ private struct ConfigSection: View {
                     Spacer(minLength: 0)
                     FieldLabel("MICROPHONE", width: nil)
                     toggle(\.includeMicrophone)
+                        .onChange(of: model.settings.includeMicrophone) { _, enabled in
+                            if enabled, !model.micPermission.isGranted {
+                                Task { await model.requestMicPermission() }
+                            }
+                        }
                 }
             }
         }
