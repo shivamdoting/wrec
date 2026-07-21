@@ -197,14 +197,30 @@ actor DaemonClient {
         }
         guard ok else { throw IPCError.unreachable("socket path too long") }
 
-        var connected: Int32
-        repeat {
-            connected = withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-                }
+        var connected = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
-        } while connected < 0 && errno == EINTR
+        }
+        if connected < 0, errno == EINTR {
+            // A signal interrupted the wait, but the attempt continues in the
+            // kernel — a second connect() would fail with EISCONN. Per
+            // connect(2), wait for writability and read the outcome instead.
+            var pollFd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            var ready: Int32
+            repeat {
+                ready = poll(&pollFd, 1, Int32(timeoutSeconds * 1000))
+            } while ready < 0 && errno == EINTR
+            guard ready >= 0 else { throw IPCError.unreachable("poll(): \(errnoString())") }
+            guard ready > 0 else { throw IPCError.unreachable("connect(): timed out") }
+            var soError: Int32 = 0
+            var soErrorLen = socklen_t(MemoryLayout<Int32>.size)
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soErrorLen)
+            guard soError == 0 else {
+                throw IPCError.unreachable("connect(): \(String(cString: strerror(soError)))")
+            }
+            connected = 0
+        }
         guard connected == 0 else { throw IPCError.unreachable("connect(): \(errnoString())") }
 
         var written = 0
