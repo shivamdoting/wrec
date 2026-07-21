@@ -13,22 +13,12 @@ const APP_DATA_DIR_NAME: &str = "Wrec Dev";
 #[cfg(not(debug_assertions))]
 const APP_DATA_DIR_NAME: &str = "Wrec";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub settings: RecorderSettings,
     pub selected_target_key: Option<String>,
     #[serde(default)]
     pub show_nerd_logs: bool,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            settings: RecorderSettings::default(),
-            selected_target_key: None,
-            show_nerd_logs: false,
-        }
-    }
 }
 
 impl AppConfig {

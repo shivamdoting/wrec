@@ -108,6 +108,7 @@ dependencies = [
  "config",
  "control",
  "domain",
+ "libc",
  "macos",
  "rusqlite",
  "serde",

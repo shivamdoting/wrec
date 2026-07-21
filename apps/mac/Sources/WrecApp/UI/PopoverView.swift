@@ -32,6 +32,9 @@ struct PopoverView: View {
         .frame(width: 320)
         .task {
             await model.refreshMicPermission()
+            // Screen Recording can be granted directly in System Settings;
+            // without a re-check the "access needed" banner never clears.
+            await model.refreshScreenPermission(requestIfNeeded: false)
             await model.refreshTargets()
         }
     }
@@ -349,7 +352,8 @@ private struct Segmented: NSViewRepresentable {
 
         init(_ selection: Binding<Int>) { self.selection = selection }
 
-        @objc func changed(_ sender: NSSegmentedControl) {
+        // AppKit only fires control actions on the main thread.
+        @MainActor @objc func changed(_ sender: NSSegmentedControl) {
             selection.wrappedValue = sender.selectedSegment
         }
     }
@@ -411,7 +415,8 @@ private struct PopUp: NSViewRepresentable {
 
         init(_ selection: Binding<Int>) { self.selection = selection }
 
-        @objc func changed(_ sender: NSPopUpButton) {
+        // AppKit only fires control actions on the main thread.
+        @MainActor @objc func changed(_ sender: NSPopUpButton) {
             selection.wrappedValue = sender.indexOfSelectedItem
         }
     }

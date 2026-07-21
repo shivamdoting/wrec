@@ -925,12 +925,21 @@ func listTargets() async {
             if isWrecWindow(window, parentPID: getppid()) {
                 continue
             }
-            let appName = window.owningApplication?.applicationName ?? "App"
-            let title = window.title ?? "Window"
-            let name = "\(appName) — \(title)".replacingOccurrences(of: "\t", with: " ")
-            if window.frame.width >= 64 && window.frame.height >= 64 {
-                print("window\t\(window.windowID)\t\(name)")
-            }
+            // Layer 0 is the normal app-window layer; everything else is
+            // window-server chrome (wallpaper, backstops, underbelly) that
+            // makes no sense as a recording target.
+            guard window.windowLayer == 0 else { continue }
+            guard window.frame.width >= 64 && window.frame.height >= 64 else { continue }
+            let appName = (window.owningApplication?.applicationName ?? "")
+                .replacingOccurrences(of: "\t", with: " ")
+            let title = (window.title ?? "").replacingOccurrences(of: "\t", with: " ")
+            // "app — title", degrading to whichever half exists; an empty
+            // half would render a dangling dash in every target picker. The
+            // daemon matches `--app` against the text before " — ", which
+            // still holds when the title half is absent.
+            let name = [appName, title].filter { !$0.isEmpty }.joined(separator: " — ")
+            guard !name.isEmpty else { continue }
+            print("window\t\(window.windowID)\t\(name)")
         }
     } catch {
         fputs("capture-engine: list error: \(error)\n", stderr)

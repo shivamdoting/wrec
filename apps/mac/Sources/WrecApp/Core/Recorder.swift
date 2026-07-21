@@ -137,6 +137,13 @@ final class RecorderModel {
         case .notDetermined: micPermission = .unknown
         default: micPermission = .missing
         }
+        // A persisted mic preference without the permission behind it (revoked
+        // in System Settings, config migrated to another machine) would render
+        // the toggle off — making the clearing branch unreachable — while
+        // `canRecord` stays false. Reconcile so config never outruns TCC.
+        if !micPermission.isGranted && settings.includeMicrophone {
+            update { $0.includeMicrophone = false }
+        }
     }
 
     func requestMicPermission() async {
@@ -237,6 +244,10 @@ final class RecorderModel {
                     continue
                 }
                 consecutiveFailures = 0
+                // A cancel that landed while `showJob` was in flight must not
+                // deliver a stale snapshot (it could flip .stopping back to
+                // .recording after the session was torn down).
+                if Task.isCancelled { return }
                 self.apply(job)
                 if job.status.isTerminal { break }
                 try? await Task.sleep(for: .milliseconds(500))

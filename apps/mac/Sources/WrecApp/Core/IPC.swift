@@ -307,11 +307,16 @@ actor DaemonClient {
                 return DaemonLaunch(binary: sibling, captureEnginePath: engine)
             }
         }
+        // The installed daemon is a release build serving `~/.wrec`; a debug
+        // shell polls `~/.wrec-dev` and would never see it come up — it'd
+        // just orphan a release daemon and time out.
+        #if !DEBUG
         let installed = "/usr/local/lib/wrec/daemon"
         let installedEngine = "/usr/local/lib/wrec/capture-engine"
         if fm.isExecutableFile(atPath: installed), fm.isExecutableFile(atPath: installedEngine) {
             return DaemonLaunch(binary: installed, captureEnginePath: installedEngine)
         }
+        #endif
         return nil
     }
 }

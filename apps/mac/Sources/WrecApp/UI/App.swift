@@ -85,6 +85,9 @@ enum UIPreview {
                 print(
                     "WREC_PREVIEW_FRAME cocoa=\(frame) cg_top_left=(\(frame.origin.x),\(screenH - frame.maxY)) size=(\(frame.width)x\(frame.height))"
                 )
+                // Stdout is block-buffered when redirected to a file/pipe —
+                // exactly how test drivers consume this line.
+                fflush(stdout)
             }
         }
     }
@@ -103,6 +106,9 @@ struct StatusItemFrameReporter: NSViewRepresentable {
                 print(
                     "WREC_STATUSITEM_FRAME cocoa=\(frame) cg_center=(\(frame.midX),\(screenH - frame.midY))"
                 )
+                // Stdout is block-buffered when redirected to a file/pipe —
+                // exactly how test drivers consume this line.
+                fflush(stdout)
             }
         }
         return view

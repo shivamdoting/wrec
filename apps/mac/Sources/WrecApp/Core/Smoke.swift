@@ -11,6 +11,17 @@ enum Smoke {
         ProcessInfo.processInfo.environment["WREC_SMOKE"] == "1"
     }
 
+    /// Every exit stops the daemon the run spawned; a leaked daemon would
+    /// outlive CI jobs and shadow later runs on the same WREC_HOME.
+    private static func finish(_ code: Int32, _ daemon: DaemonClient) async -> Never {
+        do {
+            try await daemon.stopDaemon()
+        } catch {
+            print("smoke: warning: daemon left running (stop failed: \(error))")
+        }
+        exit(code)
+    }
+
     static func run() async -> Never {
         setbuf(stdout, nil)
         let daemon = DaemonClient()
@@ -24,14 +35,14 @@ enum Smoke {
 
             guard permission.isGranted else {
                 print("smoke: PASS (stopping before record: no screen permission)")
-                exit(0)
+                await finish(0, daemon)
             }
 
             let targets = try await daemon.listTargets()
             print("smoke: \(targets.count) targets")
             guard let display = targets.first(where: { $0.kind == .display }) else {
                 print("smoke: PASS (no display target)")
-                exit(0)
+                await finish(0, daemon)
             }
 
             var settings = RecorderSettings.defaults()
@@ -56,18 +67,18 @@ enum Smoke {
                     )
                     guard snapshot.status == .completed else {
                         print("smoke: FAIL (job did not complete)")
-                        exit(1)
+                        await finish(1, daemon)
                     }
                     print("smoke: PASS")
-                    exit(0)
+                    await finish(0, daemon)
                 }
                 try await Task.sleep(for: .milliseconds(500))
             }
             print("smoke: FAIL (job never reached terminal state)")
-            exit(1)
+            await finish(1, daemon)
         } catch {
             print("smoke: FAIL \(error)")
-            exit(1)
+            await finish(1, daemon)
         }
     }
 }

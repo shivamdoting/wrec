@@ -23,10 +23,10 @@ can_write_apps_dir() {
 }
 
 run_root() {
-  if [ "$(id -u)" -eq 0 ]; then
+  # Pick the executor by permission up front; retrying a failed command under
+  # sudo would prompt for a password and run its side effects twice.
+  if [ "$(id -u)" -eq 0 ] || can_write_apps_dir; then
     "$@"
-  elif can_write_apps_dir && "$@"; then
-    return 0
   else
     sudo "$@"
   fi

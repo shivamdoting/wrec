@@ -9,6 +9,7 @@ rust-version.workspace = true
 control = { path = "../control" }
 config = { path = "../config" }
 domain = { path = "../domain" }
+libc = "0.2"
 macos = { path = "../macos" }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }

@@ -105,9 +105,15 @@ enum Updater {
         let newBundle = try findAppBundle(in: extracted)
         try verifyReplacementBundle(newBundle, replacing: bundle)
 
-        // The daemon must be idle; a daemon_busy error aborts the update.
-        try await daemon.ensure()
-        try await daemon.stopDaemon()
+        // Stop a running daemon so its binaries can be swapped. No daemon is
+        // nothing to stop; only an active recording (daemon_busy) aborts.
+        do {
+            try await daemon.stopDaemon()
+        } catch IPCError.unreachable {
+            // Already stopped.
+        } catch let IPCError.daemon(err) where err.code != "daemon_busy" {
+            // Anything short of an active recording won't block the swap.
+        }
 
         let oldBundle = try swapBundles(current: bundle, replacement: newBundle)
         return ReadyUpdate(version: release.version, bundle: bundle, oldBundle: oldBundle)
@@ -162,14 +168,22 @@ enum Updater {
         return Release(version: version, assetURL: asset.browserDownloadUrl, sha256: sha)
     }
 
-    private static func isNewer(_ candidate: String, than current: String) -> Bool {
-        let a = candidate.split(separator: ".").compactMap { Int($0) }
-        let b = current.split(separator: ".").compactMap { Int($0) }
-        if a.count == 3, b.count == 3 {
+    static func isNewer(_ candidate: String, than current: String) -> Bool {
+        if let a = parseVersion(candidate), let b = parseVersion(current) {
             for (x, y) in zip(a, b) where x != y { return x > y }
             return false
         }
         return candidate != current
+    }
+
+    /// `x.y.z` with trailing junk tolerated per component (`0.3.0-rc1` →
+    /// `[0, 3, 0]`), so a suffixed tag equal to or older than the installed
+    /// version is never offered as an update on every launch.
+    private static func parseVersion(_ raw: String) -> [Int]? {
+        let parts = raw.split(separator: ".", maxSplits: 2).map { Int($0.prefix(while: \.isNumber)) }
+        guard parts.count == 3 else { return nil }
+        let numbers = parts.compactMap { $0 }
+        return numbers.count == 3 ? numbers : nil
     }
 
     // MARK: - Verify / swap
