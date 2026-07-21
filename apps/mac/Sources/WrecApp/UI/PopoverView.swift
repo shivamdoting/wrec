@@ -32,10 +32,13 @@ struct PopoverView: View {
         .frame(width: 320)
         .task {
             await model.refreshMicPermission()
-            // Screen Recording can be granted directly in System Settings;
-            // without a re-check the "access needed" banner never clears.
-            await model.refreshScreenPermission(requestIfNeeded: false)
-            await model.refreshTargets()
+            // Re-check screen permission only while ungranted — that's the
+            // only state where the banner needs to clear, and it keeps the
+            // normal open free of daemon round trips.
+            if !model.screenPermission.isGranted {
+                await model.refreshScreenPermission(requestIfNeeded: false)
+            }
+            await model.refreshTargetsIfStale()
         }
     }
 }
@@ -49,7 +52,7 @@ private struct HeaderRow: View {
         HStack(spacing: 8) {
             Text("WREC")
                 .font(.pixel(13))
-                .foregroundStyle(model.phase.isActiveSession ? Theme.red : Color.primary)
+                .foregroundStyle(Color.primary)
             Spacer()
             SettingsLink {
                 Image(systemName: "gearshape")
@@ -235,6 +238,9 @@ private struct ConfigSection: View {
                 let kinds = CaptureSourceKind.allCases
                 guard kinds.indices.contains(index) else { return }
                 model.update { $0.source = kinds[index] }
+                // Window lists rot fast; freshen (TTL-guarded, silent) the
+                // moment the user switches onto them.
+                Task { await model.refreshTargetsIfStale() }
             }
         )
     }

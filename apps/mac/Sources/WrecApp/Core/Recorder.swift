@@ -66,6 +66,9 @@ final class RecorderModel {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var activeJobId: UInt64?
     @ObservationIgnored private var toastDismissTask: Task<Void, Never>?
+    @ObservationIgnored private var lastTargetsRefresh: Date = .distantPast
+    @ObservationIgnored private var targetsRefreshInFlight = false
+    @ObservationIgnored private var screenWatcher: Task<Void, Never>?
 
     init() {
         let config = ConfigStore.load()
@@ -97,11 +100,21 @@ final class RecorderModel {
 
     private func bootstrap() async {
         await refreshMicPermission()
+        // When granted, this also runs the first target sweep (they're
+        // empty at launch) — no second one needed here.
         await refreshScreenPermission(requestIfNeeded: false)
-        if screenPermission.isGranted {
-            await refreshTargets()
-        }
         await adoptRunningJob()
+
+        // Displays are the one target class that changes without the user
+        // touching wrec; refresh on plug/unplug instead of on every open.
+        screenWatcher = Task { [weak self] in
+            let changes = NotificationCenter.default
+                .notifications(named: NSApplication.didChangeScreenParametersNotification)
+                .map { _ in () }
+            for await _ in changes {
+                await self?.refreshTargets()
+            }
+        }
     }
 
     /// If a daemon is already recording (e.g. started from the CLI, or the
@@ -162,14 +175,33 @@ final class RecorderModel {
 
     func refreshTargets() async {
         guard screenPermission.isGranted else { return }
-        if phase == .idle { phase = .loadingTargets }
+        // Bootstrap and the permission refresh race to populate an empty
+        // list; one engine sweep is enough (MainActor makes this race-free).
+        guard !targetsRefreshInFlight else { return }
+        targetsRefreshInFlight = true
+        defer { targetsRefreshInFlight = false }
+        // Busy only when there is nothing to render yet. A refresh over a
+        // cached list swaps the contents in place; entering a busy phase
+        // here made every popover open flicker disabled → enabled.
+        if targets.isEmpty, phase == .idle { phase = .loadingTargets }
         do {
             try await daemon.ensure()
             targets = try await daemon.listTargets()
+            lastTargetsRefresh = Date()
         } catch {
             show(toast: "\(error)")
         }
         if phase == .loadingTargets { phase = .idle }
+    }
+
+    /// Freshness without per-open cost: window lists rot fast, display
+    /// lists basically never. Called on popover open and on switching the
+    /// source to Window; the TTL keeps segment toggling and rapid re-opens
+    /// from spawning a capture engine each time.
+    func refreshTargetsIfStale() async {
+        guard settings.source == .window else { return }
+        guard Date().timeIntervalSince(lastTargetsRefresh) > 15 else { return }
+        await refreshTargets()
     }
 
     // MARK: - Transport
