@@ -36,7 +36,7 @@ enum SkillInstallStatus: Equatable {
 }
 
 enum Platform {
-    static let githubURL = URL(string: "https://github.com/shivamhwp/wrec")!
+    static let githubURL = URL(string: "https://github.com/shivamdoting/wrec")!
     private static let managedMarker = "# managed by wrec"
     private static let installedBin = "/usr/local/bin/wrec"
     private static let installedLib = "/usr/local/lib/wrec"

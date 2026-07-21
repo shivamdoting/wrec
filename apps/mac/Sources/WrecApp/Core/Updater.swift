@@ -51,7 +51,7 @@ enum UpdaterError: Error, CustomStringConvertible {
 
 enum Updater {
     private static var repo: String {
-        ProcessInfo.processInfo.environment["WREC_REPO"] ?? "shivamhwp/wrec"
+        ProcessInfo.processInfo.environment["WREC_REPO"] ?? "shivamdoting/wrec"
     }
 
     static var currentVersion: String { Bundle.main.shortVersion }
