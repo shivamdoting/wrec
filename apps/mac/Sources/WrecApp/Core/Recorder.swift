@@ -364,7 +364,7 @@ final class RecorderModel {
     /// user asked to leave, and the daemon is a separate process.
     func quit() {
         guard let jobId = activeJobId else {
-            NSApp.terminate(nil)
+            terminate()
             return
         }
         pollTask?.cancel()
@@ -387,8 +387,13 @@ final class RecorderModel {
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
-            NSApp.terminate(nil)
+            terminate()
         }
+    }
+
+    private func terminate() {
+        ConfigStore.flush()
+        NSApp.terminate(nil)
     }
 
     // MARK: - Toasts

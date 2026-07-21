@@ -1,10 +1,13 @@
 // config.json persistence, wire-compatible with the Rust `config` crate
-// (snake_case keys, pretty-printed). Writes are debounced-by-nature: the model
-// saves on discrete user actions only, never on a timer.
+// (snake_case keys, pretty-printed). Writes share one utility queue so disk I/O
+// stays off the main actor and rapid user actions still reach disk in order.
 
+import Dispatch
 import Foundation
 
 enum ConfigStore {
+    private static let saveQueue = DispatchQueue(label: "app.wrec.config-store", qos: .utility)
+
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -39,13 +42,21 @@ enum ConfigStore {
         return config
     }
 
-    @discardableResult
-    static func save(_ config: AppConfig) -> Bool {
+    static func save(_ config: AppConfig) {
         save(config, to: WrecPaths.configPath())
     }
 
+    static func save(_ config: AppConfig, to path: URL) {
+        saveQueue.async { _ = write(config, to: path) }
+    }
+
+    /// Wait for queued writes only when the process is about to terminate.
+    static func flush() {
+        saveQueue.sync {}
+    }
+
     @discardableResult
-    static func save(_ config: AppConfig, to path: URL) -> Bool {
+    private static func write(_ config: AppConfig, to path: URL) -> Bool {
         do {
             let dir = path.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -64,7 +75,7 @@ enum ConfigStore {
                 let config = try? decoder.decode(AppConfig.self, from: data)
             else { continue }
 
-            if save(config, to: currentPath) {
+            if write(config, to: currentPath) {
                 do {
                     try FileManager.default.removeItem(at: legacyPath)
                 } catch {

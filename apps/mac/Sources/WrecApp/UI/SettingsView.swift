@@ -197,6 +197,7 @@ private final class UpdateModel {
             do {
                 let ready = try await Updater.downloadAndApply(release, daemon: daemon)
                 Updater.relaunchAndCleanup(ready)
+                ConfigStore.flush()
                 NSApp.terminate(nil)
             } catch {
                 state = .failed("\(error)")
