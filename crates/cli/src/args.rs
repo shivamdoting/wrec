@@ -226,7 +226,9 @@ where
     let Some(action) = args.next() else {
         return Ok(Command::Daemon(DaemonCommand::Status { json: false }));
     };
-    let json = parse_json_tail(args, "daemon")?;
+    let Some(json) = parse_json_tail(args, "daemon")? else {
+        return Ok(Command::Help);
+    };
     match action.as_str() {
         "start" => Ok(Command::Daemon(DaemonCommand::Start { json })),
         "status" => Ok(Command::Daemon(DaemonCommand::Status { json })),
@@ -241,9 +243,10 @@ fn parse_jobs<I>(args: I) -> Result<Command, String>
 where
     I: Iterator<Item = String>,
 {
-    Ok(Command::Jobs(JobsArgs {
-        json: parse_json_tail(args, "jobs")?,
-    }))
+    let Some(json) = parse_json_tail(args, "jobs")? else {
+        return Ok(Command::Help);
+    };
+    Ok(Command::Jobs(JobsArgs { json }))
 }
 
 fn parse_job<I>(args: I) -> Result<Command, String>
@@ -261,7 +264,9 @@ where
         return Err(format!("missing job id for `job {action}`"));
     };
     let id = parse_u64(&id, "job id")?;
-    let json = parse_json_tail(args, "job")?;
+    let Some(json) = parse_json_tail(args, "job")? else {
+        return Ok(Command::Help);
+    };
     match action.as_str() {
         "show" => Ok(Command::Job(JobCommand::Show { id, json })),
         "logs" => Ok(Command::Job(JobCommand::Logs { id, json })),
@@ -419,7 +424,8 @@ where
     Ok(Command::Record(out))
 }
 
-fn parse_json_tail<I>(args: I, command: &str) -> Result<bool, String>
+/// `None` means a trailing `-h`/`--help` asked for help.
+fn parse_json_tail<I>(args: I, command: &str) -> Result<Option<bool>, String>
 where
     I: Iterator<Item = String>,
 {
@@ -427,13 +433,11 @@ where
     for arg in args {
         match arg.as_str() {
             "--json" => json = true,
-            "-h" | "--help" => {
-                return Err(format!("use `wrec {command} --help` from top-level help"))
-            }
+            "-h" | "--help" | "help" => return Ok(None),
             other => return Err(format!("unknown option for `{command}`: {other}")),
         }
     }
-    Ok(json)
+    Ok(Some(json))
 }
 
 fn set_target(current: &mut Option<&'static str>, flag: &'static str) -> Result<(), String> {
@@ -601,6 +605,20 @@ mod tests {
         assert_eq!(parse_vec(&["--help"]).unwrap(), Command::Help);
         assert_eq!(parse_vec(&["-V"]).unwrap(), Command::Version);
         assert_eq!(parse_vec(&["--version"]).unwrap(), Command::Version);
+    }
+
+    #[test]
+    fn trailing_help_shows_help() {
+        assert_eq!(parse_vec(&["jobs", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse_vec(&["jobs", "-h"]).unwrap(), Command::Help);
+        assert_eq!(
+            parse_vec(&["daemon", "status", "--help"]).unwrap(),
+            Command::Help
+        );
+        assert_eq!(
+            parse_vec(&["job", "stop", "1", "--help"]).unwrap(),
+            Command::Help
+        );
     }
 
     #[test]

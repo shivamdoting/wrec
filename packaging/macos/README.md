@@ -7,15 +7,25 @@ Wrec*.app/
   Contents/
     Info.plist
     MacOS/
-      wrec-app
+      wrec-app          # SwiftUI menu bar shell (built from apps/mac)
       daemon
       capture-engine
     Resources/
+      wrec-mac_wrec-app.bundle   # Swift resources (fonts, SKILL.md)
 ```
 
+`wrec-app` is the native SwiftUI shell built with `swift build` from
+`apps/mac`; the app is a menu bar item (`LSUIElement`), not a windowed app.
 The packaged app resolves `daemon` beside its executable. The daemon resolves
 `capture-engine` beside its executable at runtime. Cargo development still falls
 back to the capture-engine path emitted by `crates/macos/build.rs`.
+
+Smoke-test any built shell headlessly (drives daemon spawn, targets, a real
+2-second recording) with:
+
+```bash
+WREC_SMOKE=1 "dist/dev/Wrec Dev.app/Contents/MacOS/wrec-app"
+```
 
 For contributor/dev packaging:
 

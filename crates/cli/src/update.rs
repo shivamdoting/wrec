@@ -11,7 +11,7 @@ use crate::args::UpdateArgs;
 /// update path and the install path can never disagree.
 const INSTALLER: &str = include_str!("../../../scripts/install-cli.sh");
 
-const DEFAULT_REPO: &str = "shivamhwp/wrec";
+const DEFAULT_REPO: &str = "shivamdoting/wrec";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn update(args: UpdateArgs) -> ExitCode {

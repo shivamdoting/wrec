@@ -7,3 +7,6 @@
 *.log
 .env
 .vercel
+
+# Swift package build artifacts
+apps/mac/.build

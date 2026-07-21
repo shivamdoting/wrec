@@ -3,7 +3,7 @@ the goal is a screen recorder app which is super super efficient and has very lo
 
 Current Status
 
-we are using rust + gpui + a little bit of swift.
+we are using rust for the engine (daemon, capture pipeline, CLI) + a native SwiftUI menu bar shell (`apps/mac`) for the GUI. the shell talks to the daemon over the same Unix-socket JSON protocol the CLI uses; it never captures anything itself.
 
 thoughts from the author (shivam)
 i(shivam,me) want to write this to you(agent). we are building this together.

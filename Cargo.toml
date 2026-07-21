@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "crates/app",
   "crates/cli",
   "crates/config",
   "crates/control",
@@ -22,12 +21,6 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# UI
-# GPUI is developed inside the Zed repository.
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 
 # macOS/native bindings foundation. The capture/encode bridge will use these plus
 # small Objective-C/Swift shims where the Rust bindings are painful or unstable.

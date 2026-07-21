@@ -33,26 +33,44 @@ fn main() -> ExitCode {
     }
 }
 
+/// One command to a running dev app: package the full bundle (daemon,
+/// capture-engine, Swift shell — the packaging script builds all three),
+/// then relaunch it. The bundled app is the only reliable dev vehicle: it
+/// gets the menu-bar Info.plist (LSUIElement) and a stable TCC identity for
+/// the Screen Recording permission.
 fn dev() -> ExitCode {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let daemon = Command::new(&cargo)
-        .args(["build", "-p", "daemon", "--bin", "daemon"])
+    let root = workspace_root();
+
+    // A still-running previous instance would swallow the `open` below.
+    let _ = Command::new("pkill")
+        .args(["-f", "Wrec Dev.app/Contents/MacOS/wrec-app"])
         .status();
 
-    if !command_succeeded(daemon, "build the daemon") {
+    let package = Command::new(root.join("scripts/package-macos.sh"))
+        .current_dir(&root)
+        .status();
+    if !command_succeeded(package, "package the dev app") {
         return ExitCode::FAILURE;
     }
 
-    let app = Command::new(cargo)
-        .args(["run", "-p", "app"])
-        .args(env::args_os().skip(2))
-        .status();
-
-    if command_succeeded(app, "run the app") {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    let app_path = root.join("dist/dev/Wrec Dev.app");
+    let open = Command::new("open").arg(&app_path).status();
+    if !command_succeeded(open, "open the dev app") {
+        return ExitCode::FAILURE;
     }
+
+    println!("wrec dev is running: look for the record glyph in the menu bar.");
+    println!("app: {}", app_path.display());
+    println!("daemon log: ~/.wrec-dev/daemon.log");
+    ExitCode::SUCCESS
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .to_path_buf()
 }
 
 fn command_succeeded(status: std::io::Result<ExitStatus>, action: &str) -> bool {

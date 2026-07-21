@@ -10,7 +10,10 @@ use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::{UnixListener, UnixStream},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
@@ -18,6 +21,31 @@ use std::{
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+static TERMINATED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_terminate(_signal: libc::c_int) {
+    TERMINATED.store(true, Ordering::SeqCst);
+}
+
+/// `kill <pid>` must stop the daemon like `wrec daemon stop` does. The
+/// spawning shell may also hand us a mask with SIGTERM blocked (observed under
+/// automation harnesses), so clear it before installing the handler.
+fn install_signal_handlers() {
+    unsafe {
+        let mut empty: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+        libc::signal(
+            libc::SIGTERM,
+            on_terminate as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            on_terminate as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t,
+        );
+    }
+}
 
 pub fn serve_forever() -> Result<(), String> {
     let home = wrec_home();
@@ -39,6 +67,7 @@ pub fn serve_forever() -> Result<(), String> {
     }
 
     tracing::info!("daemon starting");
+    install_signal_handlers();
     let listener = UnixListener::bind(&socket)
         .map_err(|err| format!("failed to bind {}: {err}", socket.display()))?;
     listener
@@ -46,7 +75,7 @@ pub fn serve_forever() -> Result<(), String> {
         .map_err(|err| format!("failed to configure {}: {err}", socket.display()))?;
     let state = Arc::new(Mutex::new(Coordinator::new(MacosRuntime)));
 
-    while !Coordinator::shutdown_requested(&state) {
+    while !TERMINATED.load(Ordering::SeqCst) && !Coordinator::shutdown_requested(&state) {
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let state = state.clone();

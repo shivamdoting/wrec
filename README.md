@@ -34,12 +34,13 @@ JSON-friendly CLI for scripts and agents.
 
 > [!NOTE]
 > Wrec is still early public software. Release builds are not notarized, so
-> macOS blocks the first launch of the app. Clear the quarantine recursively
-> (the nested helpers are quarantined separately) and reopen:
+> macOS blocks the first launch of an app downloaded with a browser. The
+> install script below is not affected (and neither is the CLI); if you drag
+> the app in from a browser download instead, clear the quarantine
+> recursively (the nested helpers are quarantined separately) and reopen:
 > ```bash
 > xattr -dr com.apple.quarantine /Applications/Wrec.app
 > ```
-> The CLI (installer below) is not affected by the warning.
 
 ## Features
 
@@ -56,11 +57,20 @@ JSON-friendly CLI for scripts and agents.
 
 ## Install
 
-**The app** — download the latest macOS build from
+**The app**:
+
+```bash
+curl -fsSL https://wrec.app/install-app | sh
+```
+
+The installer downloads the latest release, verifies its checksum, and
+installs it into `/Applications` with no Gatekeeper warning (curl downloads
+are never quarantined). You can also download the build from
 <a href="https://github.com/shivamdoting/wrec/releases" target="_blank" rel="noopener noreferrer">GitHub Releases</a>
-and drag it into `/Applications`. After that it updates itself in place:
-About → Check for updates (the update is digest-verified and relaunches
-without the Gatekeeper warning).
+and drag it into `/Applications` yourself — see the quarantine note above.
+Either way the app then updates itself in place: About → Check for updates
+(the update is digest-verified and relaunches without the Gatekeeper
+warning).
 
 **The CLI** — for terminals, scripts, and coding agents:
 
