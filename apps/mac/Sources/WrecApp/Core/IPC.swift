@@ -207,15 +207,25 @@ actor DaemonClient {
             // kernel — a second connect() would fail with EISCONN. Per
             // connect(2), wait for writability and read the outcome instead.
             var pollFd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            // One deadline spans every retry, so a stream of signals cannot
+            // stretch the wait past the configured timeout.
+            let deadline = DispatchTime.now() + .seconds(timeoutSeconds)
             var ready: Int32
             repeat {
-                ready = poll(&pollFd, 1, Int32(timeoutSeconds * 1000))
+                let now = DispatchTime.now()
+                let remainingMs =
+                    now >= deadline
+                    ? 0
+                    : Int32(clamping: (deadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000)
+                ready = poll(&pollFd, 1, remainingMs)
             } while ready < 0 && errno == EINTR
             guard ready >= 0 else { throw IPCError.unreachable("poll(): \(errnoString())") }
             guard ready > 0 else { throw IPCError.unreachable("connect(): timed out") }
             var soError: Int32 = 0
             var soErrorLen = socklen_t(MemoryLayout<Int32>.size)
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soErrorLen)
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soErrorLen) == 0 else {
+                throw IPCError.unreachable("getsockopt(SO_ERROR): \(errnoString())")
+            }
             guard soError == 0 else {
                 throw IPCError.unreachable("connect(): \(String(cString: strerror(soError)))")
             }
