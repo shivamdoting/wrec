@@ -11,6 +11,7 @@
 //   and keeps every syscall off the main thread by construction.
 
 import Darwin
+import Dispatch
 import Foundation
 
 enum IPCError: Error, CustomStringConvertible {
@@ -34,81 +35,97 @@ enum IPCError: Error, CustomStringConvertible {
 actor DaemonClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let ioQueue = DispatchQueue(label: "dev.wrec.daemon-client", qos: .userInitiated)
+    private let timeoutSeconds: Int
+    private var ensureTask: Task<Void, Error>?
 
-    init() {
+    init(timeoutSeconds: Int = 10) {
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
+        self.timeoutSeconds = timeoutSeconds
     }
 
     // MARK: - Public API (mirrors control::DaemonClient)
 
     /// Every ensure re-validates the protocol version, matching the Rust
     /// client — the daemon can be swapped underneath us by an update.
-    func ensure() throws {
-        if let status = try? status() {
+    func ensure() async throws {
+        if let ensureTask {
+            try await ensureTask.value
+            return
+        }
+
+        let task = Task { try await performEnsure() }
+        ensureTask = task
+        defer { ensureTask = nil }
+        try await task.value
+    }
+
+    private func performEnsure() async throws {
+        if let status = try? await status() {
             try checkProtocol(status)
             return
         }
         try spawnDaemon()
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
-            if let status = try? status() {
+            if let status = try? await status() {
                 try checkProtocol(status)
                 return
             }
-            usleep(100_000)
+            try await Task.sleep(for: .milliseconds(100))
         }
         throw IPCError.unreachable("daemon did not come up within 10s")
     }
 
-    func status() throws -> DaemonStatus {
-        try request("daemon.status", EmptyParams())
+    func status() async throws -> DaemonStatus {
+        try await request("daemon.status", EmptyParams())
     }
 
-    func stopDaemon() throws {
+    func stopDaemon() async throws {
         struct StopResult: Decodable { let stopping: Bool }
-        let _: StopResult = try request("daemon.stop", EmptyParams())
+        let _: StopResult = try await request("daemon.stop", EmptyParams())
     }
 
-    func screenPermissionStatus() throws -> PermissionStatus {
-        let result: PermissionResult = try request("permission.status", EmptyParams())
+    func screenPermissionStatus() async throws -> PermissionStatus {
+        let result: PermissionResult = try await request("permission.status", EmptyParams())
         return result.status
     }
 
-    func requestScreenPermission() throws -> PermissionStatus {
-        let result: PermissionResult = try request("permission.request", EmptyParams())
+    func requestScreenPermission() async throws -> PermissionStatus {
+        let result: PermissionResult = try await request("permission.request", EmptyParams())
         return result.status
     }
 
-    func listTargets() throws -> [CaptureTarget] {
-        let result: TargetsResult = try request("targets.list", EmptyParams())
+    func listTargets() async throws -> [CaptureTarget] {
+        let result: TargetsResult = try await request("targets.list", EmptyParams())
         return result.targets
     }
 
-    func startRecording(_ params: StartRecordingParams) throws -> JobSnapshot {
-        let result: JobResult = try request("record.start", params)
+    func startRecording(_ params: StartRecordingParams) async throws -> JobSnapshot {
+        let result: JobResult = try await request("record.start", params)
         return result.job
     }
 
-    func showJob(_ id: UInt64) throws -> JobSnapshot {
-        let result: JobResult = try request("job.show", JobIdParams(jobId: id))
+    func showJob(_ id: UInt64) async throws -> JobSnapshot {
+        let result: JobResult = try await request("job.show", JobIdParams(jobId: id))
         return result.job
     }
 
-    func pauseJob(_ id: UInt64) throws -> JobSnapshot {
-        let result: JobResult = try request("job.pause", JobIdParams(jobId: id))
+    func pauseJob(_ id: UInt64) async throws -> JobSnapshot {
+        let result: JobResult = try await request("job.pause", JobIdParams(jobId: id))
         return result.job
     }
 
-    func resumeJob(_ id: UInt64) throws -> JobSnapshot {
-        let result: JobResult = try request("job.resume", JobIdParams(jobId: id))
+    func resumeJob(_ id: UInt64) async throws -> JobSnapshot {
+        let result: JobResult = try await request("job.resume", JobIdParams(jobId: id))
         return result.job
     }
 
-    func stopJob(_ id: UInt64) throws -> JobSnapshot {
-        let result: JobResult = try request("job.stop", JobIdParams(jobId: id))
+    func stopJob(_ id: UInt64) async throws -> JobSnapshot {
+        let result: JobResult = try await request("job.stop", JobIdParams(jobId: id))
         return result.job
     }
 
@@ -126,12 +143,23 @@ actor DaemonClient {
         let error: AgentError?
     }
 
-    private func request<P: Encodable, R: Decodable>(_ method: String, _ params: P) throws -> R {
+    private func request<P: Encodable, R: Decodable>(
+        _ method: String,
+        _ params: P
+    ) async throws -> R {
         let id = UInt64(Date().timeIntervalSince1970 * 1000)
-        var payload = try encoder.encode(RequestEnvelope(id: id, method: method, params: params))
-        payload.append(0x0A)
+        var encodedPayload = try encoder.encode(
+            RequestEnvelope(id: id, method: method, params: params)
+        )
+        encodedPayload.append(0x0A)
+        let payload = encodedPayload
 
-        let line = try roundTrip(payload)
+        let line = try await withCheckedThrowingContinuation { continuation in
+            ioQueue.async { [timeoutSeconds] in
+                continuation.resume(
+                    with: Result { try Self.roundTrip(payload, timeoutSeconds: timeoutSeconds) })
+            }
+        }
         let envelope = try decode(ResponseEnvelope<R>.self, from: line)
         if envelope.ok, let result = envelope.result { return result }
         if let error = envelope.error { throw IPCError.daemon(error) }
@@ -147,12 +175,12 @@ actor DaemonClient {
     }
 
     /// One connection, one line out, one line back.
-    private func roundTrip(_ payload: Data) throws -> Data {
+    private static func roundTrip(_ payload: Data, timeoutSeconds: Int) throws -> Data {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw IPCError.unreachable("socket(): \(errnoString())") }
         defer { close(fd) }
 
-        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
@@ -180,6 +208,7 @@ actor DaemonClient {
         try payload.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
             while written < bytes.count {
                 let n = write(fd, bytes.baseAddress! + written, bytes.count - written)
+                if n < 0, errno == EINTR { continue }
                 guard n > 0 else { throw IPCError.unreachable("write(): \(errnoString())") }
                 written += n
             }
@@ -189,6 +218,7 @@ actor DaemonClient {
         var buffer = [UInt8](repeating: 0, count: 16384)
         while true {
             let n = read(fd, &buffer, buffer.count)
+            if n < 0, errno == EINTR { continue }
             if n < 0 { throw IPCError.unreachable("read(): \(errnoString())") }
             if n == 0 { break }
             if let newline = buffer[0..<n].firstIndex(of: 0x0A) {

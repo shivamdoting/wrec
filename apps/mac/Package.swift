@@ -15,6 +15,7 @@ let package = Package(
                 .copy("Resources/DepartureMono-Regular.otf"),
                 .copy("Resources/SKILL.md"),
             ]
-        )
+        ),
+        .testTarget(name: "WrecAppTests", dependencies: ["wrec-app"]),
     ]
 )

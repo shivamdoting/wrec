@@ -12,11 +12,22 @@ import Foundation
 enum CaptureSourceKind: String, Codable, CaseIterable, Sendable {
     case display, window
 
+    init(from decoder: Decoder) throws {
+        self = try decodeRawValue(
+            from: decoder,
+            aliases: ["Display": .display, "Window": .window]
+        )
+    }
+
     var label: String { self == .display ? "Display" : "Window" }
 }
 
 enum Codec: String, Codable, CaseIterable, Sendable {
     case hevc, h264
+
+    init(from decoder: Decoder) throws {
+        self = try decodeRawValue(from: decoder, aliases: ["Hevc": .hevc, "H264": .h264])
+    }
 
     var label: String { self == .hevc ? "HEVC" : "H.264" }
 }
@@ -25,11 +36,25 @@ enum FrameRate: String, Codable, CaseIterable, Sendable {
     case fps30 = "30"
     case fps60 = "60"
 
+    init(from decoder: Decoder) throws {
+        self = try decodeRawValue(
+            from: decoder,
+            aliases: ["Fps30": .fps30, "Fps60": .fps60]
+        )
+    }
+
     var label: String { rawValue + " FPS" }
 }
 
 enum Quality: String, Codable, CaseIterable, Sendable {
     case efficient, balanced, high
+
+    init(from decoder: Decoder) throws {
+        self = try decodeRawValue(
+            from: decoder,
+            aliases: ["Efficient": .efficient, "Balanced": .balanced, "High": .high]
+        )
+    }
 
     var label: String { rawValue.capitalized }
 
@@ -54,6 +79,19 @@ enum Resolution: String, Codable, CaseIterable, Sendable {
     case r2k = "2k"
     case r4k = "4k"
 
+    init(from decoder: Decoder) throws {
+        self = try decodeRawValue(
+            from: decoder,
+            aliases: [
+                "Native": .native,
+                "R720p": .r720p,
+                "R1080p": .r1080p,
+                "R2k": .r2k,
+                "R4k": .r4k,
+            ]
+        )
+    }
+
     var label: String {
         switch self {
         case .native: "Original"
@@ -74,6 +112,19 @@ enum Resolution: String, Codable, CaseIterable, Sendable {
         case .native: 4
         }
     }
+}
+
+private func decodeRawValue<Value>(
+    from decoder: Decoder,
+    aliases: [String: Value]
+) throws -> Value where Value: RawRepresentable, Value.RawValue == String {
+    let container = try decoder.singleValueContainer()
+    let rawValue = try container.decode(String.self)
+    if let value = Value(rawValue: rawValue) ?? aliases[rawValue] { return value }
+    throw DecodingError.dataCorruptedError(
+        in: container,
+        debugDescription: "Invalid \(Value.self) value: \(rawValue)"
+    )
 }
 
 enum PermissionStatus: String, Codable, Sendable {

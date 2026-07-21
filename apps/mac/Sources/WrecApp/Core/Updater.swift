@@ -103,6 +103,7 @@ enum Updater {
         try FileManager.default.createDirectory(at: extracted, withIntermediateDirectories: true)
         try run("/usr/bin/tar", "-xzf", archive.path, "-C", extracted.path)
         let newBundle = try findAppBundle(in: extracted)
+        try verifyReplacementBundle(newBundle, replacing: bundle)
 
         // The daemon must be idle; a daemon_busy error aborts the update.
         try await daemon.ensure()
@@ -200,6 +201,54 @@ enum Updater {
             if fm.fileExists(atPath: exe.path) { return candidate }
         }
         throw UpdaterError.message("archive contains no wrec app bundle")
+    }
+
+    /// Reject malformed or differently identified bundles before the daemon
+    /// is stopped. Ad-hoc releases have no Team ID; once releases use a
+    /// Developer ID, the replacement must carry that same identity.
+    static func verifyReplacementBundle(_ replacement: URL, replacing current: URL) throws {
+        try run("/usr/bin/codesign", "--verify", "--deep", "--strict", replacement.path)
+
+        let currentMetadata = try codesignMetadata(for: current)
+        let replacementMetadata = try codesignMetadata(for: replacement)
+        guard let currentIdentifier = currentMetadata["Identifier"],
+            replacementMetadata["Identifier"] == currentIdentifier
+        else {
+            throw UpdaterError.message("update bundle has a different signing identifier")
+        }
+
+        if let currentTeam = teamIdentifier(in: currentMetadata),
+            teamIdentifier(in: replacementMetadata) != currentTeam
+        {
+            throw UpdaterError.message("update bundle is signed by a different developer team")
+        }
+    }
+
+    private static func codesignMetadata(for bundle: URL) throws -> [String: String] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["-d", "--verbose=4", bundle.path]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw UpdaterError.message("could not inspect update bundle signature")
+        }
+
+        return String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .reduce(into: [:]) { metadata, line in
+                let parts = line.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 { metadata[String(parts[0])] = String(parts[1]) }
+            }
+    }
+
+    private static func teamIdentifier(in metadata: [String: String]) -> String? {
+        guard let value = metadata["TeamIdentifier"], value != "not set" else { return nil }
+        return value
     }
 
     /// Stage with ditto (preserves signature), then two atomic same-dir

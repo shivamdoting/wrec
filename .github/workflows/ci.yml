@@ -60,6 +60,7 @@ jobs:
           cargo fmt --check
           cargo check
           cargo test
+          swift test --package-path apps/mac
 
   marketing:
     name: Marketing checks

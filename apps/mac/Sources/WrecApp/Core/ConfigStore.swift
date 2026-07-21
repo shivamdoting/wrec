@@ -19,27 +19,85 @@ enum ConfigStore {
     }()
 
     static func load() -> AppConfig {
-        guard let data = try? Data(contentsOf: WrecPaths.configPath()),
-            var config = try? decoder.decode(AppConfig.self, from: data)
-        else {
-            return AppConfig(
-                settings: .defaults(),
-                selectedTargetKey: nil,
-                showNerdLogs: false
-            )
+        load(currentPath: WrecPaths.configPath(), legacyPaths: legacyConfigPaths())
+    }
+
+    static func load(currentPath: URL, legacyPaths: [URL]) -> AppConfig {
+        var config: AppConfig
+        if let data = try? Data(contentsOf: currentPath),
+            let current = try? decoder.decode(AppConfig.self, from: data)
+        {
+            config = current
+        } else if !FileManager.default.fileExists(atPath: currentPath.path),
+            let legacy = loadLegacyConfig(currentPath: currentPath, legacyPaths: legacyPaths)
+        {
+            config = legacy
+        } else {
+            config = defaults()
         }
         config.settings.applyPresetLimits()
         return config
     }
 
-    static func save(_ config: AppConfig) {
+    @discardableResult
+    static func save(_ config: AppConfig) -> Bool {
+        save(config, to: WrecPaths.configPath())
+    }
+
+    @discardableResult
+    static func save(_ config: AppConfig, to path: URL) -> Bool {
         do {
-            let dir = WrecPaths.dataDir()
+            let dir = path.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let data = try encoder.encode(config)
-            try data.write(to: WrecPaths.configPath(), options: .atomic)
+            try data.write(to: path, options: .atomic)
+            return true
         } catch {
             NSLog("wrec: config save failed: \(error)")
+            return false
         }
+    }
+
+    private static func loadLegacyConfig(currentPath: URL, legacyPaths: [URL]) -> AppConfig? {
+        for legacyPath in legacyPaths {
+            guard let data = try? Data(contentsOf: legacyPath),
+                let config = try? decoder.decode(AppConfig.self, from: data)
+            else { continue }
+
+            if save(config, to: currentPath) {
+                do {
+                    try FileManager.default.removeItem(at: legacyPath)
+                } catch {
+                    NSLog("wrec: migrated config but could not remove \(legacyPath.path): \(error)")
+                }
+            }
+            return config
+        }
+        return nil
+    }
+
+    private static func legacyConfigPaths() -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var paths: [URL] = []
+        if let runtimeName = Platform.currentAppBundle()?
+            .deletingPathExtension().lastPathComponent,
+            runtimeName != "Wrec", runtimeName != "Wrec Dev"
+        {
+            let support = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            paths.append(support.appending(path: runtimeName).appending(path: "config.json"))
+        }
+        paths.append(home.appending(path: ".wrec/config.json"))
+        paths.append(home.appending(path: ".config/wrec/config.json"))
+        paths.append(home.appending(path: ".config/wrec.json"))
+        return paths
+    }
+
+    private static func defaults() -> AppConfig {
+        AppConfig(
+            settings: .defaults(),
+            selectedTargetKey: nil,
+            showNerdLogs: false
+        )
     }
 }
