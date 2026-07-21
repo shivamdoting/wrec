@@ -196,8 +196,10 @@ private final class UpdateModel {
         Task {
             do {
                 let ready = try await Updater.downloadAndApply(release, daemon: daemon)
-                Updater.relaunchAndCleanup(ready)
+                // Settle config on disk before the relaunch script starts its
+                // one-second clock, so the new app never loads a stale file.
                 ConfigStore.flush()
+                Updater.relaunchAndCleanup(ready)
                 NSApp.terminate(nil)
             } catch {
                 state = .failed("\(error)")

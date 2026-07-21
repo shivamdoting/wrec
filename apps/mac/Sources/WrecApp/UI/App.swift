@@ -9,8 +9,17 @@
 import AppKit
 import SwiftUI
 
+/// Flush queued config writes on every graceful exit — quit, update
+/// relaunch, logout — so no path can terminate with a save still queued.
+private final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        ConfigStore.flush()
+    }
+}
+
 @main
 struct WrecApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model: RecorderModel
 
     init() {

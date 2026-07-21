@@ -55,7 +55,6 @@ enum ConfigStore {
         saveQueue.sync {}
     }
 
-    @discardableResult
     private static func write(_ config: AppConfig, to path: URL) -> Bool {
         do {
             let dir = path.deletingLastPathComponent()
