@@ -215,12 +215,7 @@ private struct ConfigSection: View {
                     toggle(\.includeSystemAudio)
                     Spacer(minLength: 0)
                     FieldLabel("MICROPHONE", width: nil)
-                    toggle(\.includeMicrophone)
-                        .onChange(of: model.settings.includeMicrophone) { _, enabled in
-                            if enabled, !model.micPermission.isGranted {
-                                Task { await model.requestMicPermission() }
-                            }
-                        }
+                    micToggle
                 }
             }
         }
@@ -269,6 +264,32 @@ private struct ConfigSection: View {
             )
         )
         .frame(maxWidth: .infinity)
+    }
+
+    /// Shows on only when mic permission is actually granted. Toggling on
+    /// without permission triggers the system prompt (or System Settings if
+    /// previously denied) and only sticks if access was granted.
+    private var micToggle: some View {
+        Toggle(
+            "",
+            isOn: Binding(
+                get: { model.settings.includeMicrophone && model.micPermission.isGranted },
+                set: { value in
+                    guard value else {
+                        model.update { $0.includeMicrophone = false }
+                        return
+                    }
+                    Task {
+                        await model.requestMicPermission()
+                        if model.micPermission.isGranted {
+                            model.update { $0.includeMicrophone = true }
+                        }
+                    }
+                }
+            )
+        )
+        .toggleStyle(.switch)
+        .labelsHidden()
     }
 
     private func toggle(_ keyPath: WritableKeyPath<RecorderSettings, Bool>) -> some View {
