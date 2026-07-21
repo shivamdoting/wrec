@@ -45,6 +45,13 @@ jobs:
             exit 0
           fi
 
+          # One greeting per PR, no matter how many times it gets reopened.
+          prior=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body')
+          if grep -qF "wrec-greeting-marker" <<<"$prior"; then
+            echo "already greeted; staying quiet."
+            exit 0
+          fi
+
           # A PR carrying are-you-not.md means an agent read AGENTS.md and
           # obeyed it — proof the diff was assembled end-to-end by AI.
           canary=""
@@ -54,6 +61,7 @@ jobs:
           fi
 
           cat > /tmp/greeting.md <<'EOF'
+          <!-- wrec-greeting-marker -->
           ![you are using AI to make this PR, are you not](https://raw.githubusercontent.com/shivamdoting/wrec/main/.github/assets/are-you-not.png)
 
           That's fine — we do too. The rule isn't "no AI", it's **no unaccountable AI**. No matter the tools you use, you are the person responsible for the changes. If you push slop, you'll be banned from the repo.
