@@ -85,8 +85,9 @@ struct ConfigCompatibilityTests {
 
         for quality in Quality.allCases {
             config.settings.quality = quality
-            #expect(ConfigStore.save(config, to: current))
+            ConfigStore.save(config, to: current)
         }
+        ConfigStore.flush()
 
         let loaded = ConfigStore.load(currentPath: current, legacyPaths: [])
         #expect(loaded.settings.quality == Quality.allCases.last)

@@ -218,8 +218,8 @@ enum Updater {
     }
 
     /// Reject malformed or differently identified bundles before the daemon
-    /// is stopped. Ad-hoc releases have no Team ID; once releases use a
-    /// Developer ID, the replacement must carry that same identity.
+    /// is stopped. Ad-hoc releases fall back to the signing identifier; a
+    /// Developer ID-signed app also pins replacements to its Apple team.
     static func verifyReplacementBundle(_ replacement: URL, replacing current: URL) throws {
         try run("/usr/bin/codesign", "--verify", "--deep", "--strict", replacement.path)
 
@@ -231,10 +231,21 @@ enum Updater {
             throw UpdaterError.message("update bundle has a different signing identifier")
         }
 
-        if let currentTeam = teamIdentifier(in: currentMetadata),
-            teamIdentifier(in: replacementMetadata) != currentTeam
-        {
-            throw UpdaterError.message("update bundle is signed by a different developer team")
+        if let currentTeam = teamIdentifier(in: currentMetadata) {
+            guard currentTeam.count == 10,
+                currentTeam.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber) })
+            else {
+                throw UpdaterError.message("installed app has an invalid developer team identifier")
+            }
+            let requirement =
+                "=anchor apple generic and certificate leaf[subject.OU] = \"\(currentTeam)\""
+            do {
+                try run(
+                    "/usr/bin/codesign", "--verify", "--deep", "--strict",
+                    "--test-requirement", requirement, replacement.path)
+            } catch {
+                throw UpdaterError.message("update bundle is not signed by the expected developer team")
+            }
         }
     }
 

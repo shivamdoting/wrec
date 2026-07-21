@@ -197,10 +197,39 @@ actor DaemonClient {
         }
         guard ok else { throw IPCError.unreachable("socket path too long") }
 
-        let connected = withUnsafePointer(to: &addr) { ptr in
+        var connected = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
                 connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
+        }
+        if connected < 0, errno == EINTR {
+            // A signal interrupted the wait, but the attempt continues in the
+            // kernel — a second connect() would fail with EISCONN. Per
+            // connect(2), wait for writability and read the outcome instead.
+            var pollFd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            // One deadline spans every retry, so a stream of signals cannot
+            // stretch the wait past the configured timeout.
+            let deadline = DispatchTime.now() + .seconds(timeoutSeconds)
+            var ready: Int32
+            repeat {
+                let now = DispatchTime.now()
+                let remainingMs =
+                    now >= deadline
+                    ? 0
+                    : Int32(clamping: (deadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000)
+                ready = poll(&pollFd, 1, remainingMs)
+            } while ready < 0 && errno == EINTR
+            guard ready >= 0 else { throw IPCError.unreachable("poll(): \(errnoString())") }
+            guard ready > 0 else { throw IPCError.unreachable("connect(): timed out") }
+            var soError: Int32 = 0
+            var soErrorLen = socklen_t(MemoryLayout<Int32>.size)
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soErrorLen) == 0 else {
+                throw IPCError.unreachable("getsockopt(SO_ERROR): \(errnoString())")
+            }
+            guard soError == 0 else {
+                throw IPCError.unreachable("connect(): \(String(cString: strerror(soError)))")
+            }
+            connected = 0
         }
         guard connected == 0 else { throw IPCError.unreachable("connect(): \(errnoString())") }
 
