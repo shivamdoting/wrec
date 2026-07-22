@@ -70,6 +70,10 @@ body {
   overflow-x: hidden;
 }
 
+.docs-page article {
+  padding-top: 40px;
+}
+
 .docs-page a {
   color: var(--page-link);
   text-decoration: none;
@@ -209,7 +213,7 @@ body {
 
 .docs-page .docs-nav-link:hover,
 .docs-page .docs-nav-link[data-current="true"] {
-  color: var(--docs-foreground);
+  color: var(--page-fg);
 }
 
 .docs-page pre,
@@ -355,6 +359,10 @@ body {
 
   .docs-page main {
     padding: 0;
+  }
+
+  .docs-page article {
+    padding-top: 28px;
   }
 
   .docs-page h1 {
