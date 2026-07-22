@@ -2,13 +2,14 @@
 
 :root {
   color-scheme: light;
+  --wrec-red: #c62828;
   --page-bg: #fff;
   --page-fg: #050505;
   --page-muted: #333;
   --page-subtle: #555;
   --page-line: color-mix(in srgb, #ddd 70%, transparent);
   --page-soft-bg: #f6f8fa;
-  --page-link: #c62828;
+  --page-link: var(--wrec-red);
   --page-button-border: color-mix(in srgb, #bbb 70%, transparent);
   --dropdown-open-dur: 250ms;
   --dropdown-close-dur: 150ms;
@@ -33,7 +34,7 @@
   --page-subtle: #a3a3a3;
   --page-line: color-mix(in srgb, #2b2b2b 70%, transparent);
   --page-soft-bg: #111;
-  --page-link: #e05252;
+  --page-link: var(--wrec-red);
   --page-button-border: color-mix(in srgb, #4a4a4a 70%, transparent);
 }
 
@@ -62,7 +63,7 @@ body {
 
 .theme-toggle:hover,
 .theme-toggle:focus-visible {
-  color: #c62828;
+  color: var(--wrec-red);
 }
 
 .docs-page {
@@ -511,7 +512,7 @@ body {
 :root {
   --bench-good: #0a8a0a;
   --bench-warning: #9a6a00;
-  --bench-critical: #c62828;
+  --bench-critical: var(--wrec-red);
   /* NES-style stepped-corner border: a 5x5 SVG whose plus-shaped pixel
      cluster becomes the corners via border-image slicing. Colors are baked
      into the data URI, so each theme carries its own pair. */
@@ -522,7 +523,7 @@ body {
 :root[data-theme="dark"] {
   --bench-good: #17c964;
   --bench-warning: #fab219;
-  --bench-critical: #e05252;
+  --bench-critical: var(--wrec-red);
   --bench-px: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='5' height='5'%3E%3Cpath d='M2 1h1v1h-1zM1 2h1v1h-1zM3 2h1v1h-1zM2 3h1v1h-1z' fill='%23f7f7f7' fill-opacity='.7'/%3E%3C/svg%3E");
   --bench-px-dim: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='5' height='5'%3E%3Cpath d='M2 1h1v1h-1zM1 2h1v1h-1zM3 2h1v1h-1zM2 3h1v1h-1z' fill='%234a4a4a' fill-opacity='.7'/%3E%3C/svg%3E");
 }

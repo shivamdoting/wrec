@@ -33,22 +33,7 @@ import "../styles/global.css";
           <a href="/docs">docs</a>
         </span>
       </header>
-      <svg
-        class="home-word home-word-horizontal"
-        viewBox="2 -55.2 247.9 56.4"
-        preserveAspectRatio="none"
-        aria-hidden="true"
-      >
-        <text x="0" y="0" font-size="100">wrec</text>
-      </svg>
-      <svg
-        class="home-word home-word-vertical"
-        viewBox="-1.2 2 56.4 247.9"
-        preserveAspectRatio="none"
-        aria-hidden="true"
-      >
-        <text x="0" y="0" font-size="100" transform="rotate(90)">wrec</text>
-      </svg>
+      <div class="home-logo" aria-hidden="true">wrec</div>
     </main>
   </body>
 </html>
@@ -61,7 +46,7 @@ import "../styles/global.css";
     flex-direction: column;
     padding: 0 16px;
     box-sizing: border-box;
-    background: #c62828;
+    background: var(--wrec-red);
     font-family: var(--font-departure), monospace;
   }
 
@@ -95,32 +80,19 @@ import "../styles/global.css";
     text-decoration: underline;
   }
 
-  .home-word {
+  .home-logo {
     flex: 1;
     min-height: 0;
     width: 100%;
     max-width: 1000px;
     margin: 0 auto;
-    display: block;
-  }
-
-  .home-word text {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-family: var(--font-departure), monospace;
-    font-weight: 400;
-    fill: #0d0d0d;
-  }
-
-  .home-word-vertical {
-    display: none;
-  }
-
-  @media (max-width: 700px) and (orientation: portrait) {
-    .home-word-horizontal {
-      display: none;
-    }
-
-    .home-word-vertical {
-      display: block;
-    }
+    font-size: clamp(3rem, 8vw, 6rem);
+    font-weight: 700;
+    line-height: 1;
+    color: #0d0d0d;
   }
 </style>
