@@ -33,6 +33,7 @@ type CliOptions = {
   duration: string;
   durationMs: number;
   wrecBin: string;
+  autoBuild: boolean;
   againstBin?: string;
   sampleIntervalMs: number;
 };
@@ -145,6 +146,9 @@ const stimulusTitle = "wrec-bench-stimulus";
 
 const main = async () => {
   const options = parseArgs(Bun.argv.slice(2));
+  if (options.autoBuild) {
+    await buildCandidate();
+  }
   const generatedAt = new Date().toISOString();
   const git = await gitMetadata();
   const id = `${slugDate(generatedAt)}-${shortSha(git.commit)}`;
@@ -241,11 +245,18 @@ const parseArgs = (args: string[]): CliOptions => {
   let suite: SuiteName = "smoke";
   let duration: string | undefined;
   let wrecBin = Bun.env.WREC_BIN ?? path.join(repoRoot, "target", "release", "wrec");
+  // A candidate the caller never pointed at is built fresh before the run;
+  // an explicit --wrec/WREC_BIN is benchmarked exactly as given.
+  let wrecExplicit = Boolean(Bun.env.WREC_BIN);
   let againstBin: string | undefined;
   let sampleIntervalMs = 250;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === "smoke" || arg === "release") {
+      suite = arg;
+      continue;
+    }
     const [flag, inlineValue] = arg.split("=", 2);
     const value = inlineValue ?? args[index + 1];
 
@@ -260,6 +271,7 @@ const parseArgs = (args: string[]): CliOptions => {
       if (!inlineValue) index += 1;
     } else if (flag === "--wrec") {
       wrecBin = path.resolve(requireValue(flag, value));
+      wrecExplicit = true;
       if (!inlineValue) index += 1;
     } else if (flag === "--against") {
       againstBin = path.resolve(requireValue(flag, value));
@@ -278,22 +290,36 @@ const parseArgs = (args: string[]): CliOptions => {
     duration: resolvedDuration,
     durationMs: parseDurationMs(resolvedDuration),
     wrecBin: path.resolve(wrecBin),
+    autoBuild: !wrecExplicit,
     againstBin,
     sampleIntervalMs,
   };
 };
 
+const buildCandidate = async () => {
+  console.log("building candidate: cargo build --release -p cli -p daemon");
+  const result = await runProcess(
+    ["cargo", "build", "--release", "-p", "cli", "-p", "daemon"],
+    repoRoot,
+    Bun.env,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`cargo build failed:\n${result.stderr || result.stdout}`);
+  }
+};
+
 const printHelp = () => {
   console.log(`wrec ground-truth performance benchmark
 
-Usage:
-  bun run bench -- --suite smoke --duration 5s --wrec ../target/release/wrec
-  bun run bench -- --suite release --against /path/to/reference/wrec
+Usage (from the repo root):
+  bun run bench                        # smoke: one ungated 5s recording
+  bun run bench release                # gated release profiles
+  bun run bench release --against /path/to/reference/wrec
 
 Options:
-  --suite smoke|release       smoke runs one ungated recording; release runs gated profiles
+  smoke | release             suite to run (default: smoke); --suite <name> also works
   --duration <time>           override profile duration, e.g. 5s, 15s, 1m
-  --wrec <path>               candidate wrec binary (default: ../target/release/wrec)
+  --wrec <path>               candidate binary (default: target/release/wrec, built automatically)
   --against <path>            reference wrec binary for interleaved A/B regression gates
   --sample-interval-ms <n>    ps sampler interval (default: 250)
   -h, --help                  show this help

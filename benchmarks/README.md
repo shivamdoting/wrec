@@ -15,18 +15,20 @@ treats the encoded `.mov` as the source of truth.
 
 ## Quick Start
 
-Build wrec, then run the smoke suite:
+From the repo root:
 
 ```sh
-cargo build --release -p cli
-cd benchmarks
-bun run bench -- --suite smoke --duration 5s --wrec ../target/release/wrec
+bun run bench                 # smoke suite; builds target/release/wrec first
+bun run bench release         # gated release profiles
 ```
+
+The candidate binary is built automatically (`cargo build --release -p cli -p
+daemon`) unless `--wrec` or `WREC_BIN` points at a specific one.
 
 Open the generated report:
 
 ```sh
-open index.html
+open benchmarks/index.html
 ```
 
 The smoke suite runs one balanced HEVC recording against the stimulus window and
@@ -37,15 +39,13 @@ does not apply release gates. It is meant for local sanity checks and CI plumbin
 Run the release suite against one binary:
 
 ```sh
-bun run bench -- --suite release --wrec ../target/release/wrec
+bun run bench release
 ```
 
 Run an interleaved A/B gate against a reference binary:
 
 ```sh
-bun run bench -- --suite release \
-  --wrec ../target/release/wrec \
-  --against /path/to/reference/wrec
+bun run bench release --against /path/to/reference/wrec
 ```
 
 Release profiles:
@@ -117,14 +117,14 @@ thermal limits, or with high load are marked inconclusive rather than trusted.
 ## Options
 
 ```sh
-bun run bench -- --help
+bun run bench --help
 ```
 
 Useful options:
 
 ```sh
-bun run bench -- --suite smoke --duration 5s
-bun run bench -- --suite release --duration 20s
-bun run bench -- --sample-interval-ms 250
-bun run bench -- --wrec ../target/release/wrec --against /tmp/wrec-ref/wrec
+bun run bench --duration 5s
+bun run bench release --duration 20s
+bun run bench release --sample-interval-ms 250
+bun run bench release --wrec target/release/wrec --against /tmp/wrec-ref/wrec
 ```
