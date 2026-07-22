@@ -87,7 +87,7 @@ body {
 }
 
 .docs-page article {
-  padding-top: 40px;
+  padding-top: 20px;
 }
 
 .docs-page a {
@@ -459,7 +459,7 @@ body {
   }
 
   .docs-page article {
-    padding-top: 28px;
+    padding-top: 20px;
   }
 
   .docs-page h1 {
@@ -560,7 +560,7 @@ body {
   align-items: center;
   gap: 14px;
   padding: 18px 0 16px;
-  margin-bottom: 20px;
+  margin-bottom: 8px;
 }
 
 .bench-brand {
