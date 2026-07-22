@@ -80,6 +80,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Test benchmark release policy
+        run: bun run bench:test
+
       - name: Install dependencies
         working-directory: docs
         run: bun install --frozen-lockfile

@@ -102,6 +102,9 @@ jobs:
           cargo test
           swift test --package-path apps/mac
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
       # CI runners have no Screen Recording permission, so the bench runs on a
       # real Mac before tagging (`bun run bench release --against <previous>`)
       # and commits its summary to benchmarks/results/. This step refuses to
@@ -110,39 +113,9 @@ jobs:
       # commit is the benchmarks/ directory itself.
       - name: Verify release bench
         id: bench
-        run: |
-          set -euo pipefail
-
-          release_commit="${{ steps.release.outputs.commit }}"
-          picked=""
-          for file in $(ls -r benchmarks/results/*.json 2>/dev/null); do
-            suite=$(jq -r '.suite' "$file")
-            status=$(jq -r '.status' "$file")
-            dirty=$(jq -r '.git.dirty' "$file")
-            benched=$(jq -r '.git.commit' "$file")
-
-            [[ "$suite" == "release" && "$status" == "pass" && "$dirty" == "false" ]] || continue
-            git cat-file -e "$benched" 2>/dev/null || continue
-            git merge-base --is-ancestor "$benched" "$release_commit" || continue
-
-            non_bench_diff=$(git diff --name-only "$benched" "$release_commit" -- . ':!benchmarks' | head -5)
-            if [[ -n "$non_bench_diff" ]]; then
-              echo "skipping $file: code changed since benched commit $benched:"
-              echo "$non_bench_diff"
-              continue
-            fi
-
-            picked="$file"
-            break
-          done
-
-          if [[ -z "$picked" ]]; then
-            echo "::error::No passing release bench found for this code. Run 'bun run bench release --against <previous wrec>' on a Mac, commit benchmarks/results/, then tag."
-            exit 1
-          fi
-
-          echo "using bench summary: $picked"
-          echo "summary=$picked" >> "$GITHUB_OUTPUT"
+        run: >-
+          bun benchmarks/src/verify-release.ts
+          --release-commit "${{ steps.release.outputs.commit }}"
 
       # The rendered UI lives at wrec.app/benchmarks; releases carry the data.
       - name: Publish bench artifacts

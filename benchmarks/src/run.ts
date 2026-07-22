@@ -26,6 +26,7 @@ import {
   type VariantName,
   type RunResult,
 } from "./gates";
+import { benchmarkExitCode, nullableNumber } from "./benchmark-values";
 import { writeSummary } from "./summary";
 
 type CliOptions = {
@@ -253,6 +254,7 @@ const main = async () => {
     console.log(`summary: ${summaryPath}`);
     console.log("view: wrec.app/benchmarks (or `bun run dev` in docs/) after committing the summary");
   }
+  process.exitCode = benchmarkExitCode(result.suite, result.status);
 };
 
 const parseArgs = (args: string[]): CliOptions => {
@@ -1412,10 +1414,6 @@ const percentile = (values: number[], percent: number) => {
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percent / 100) * sorted.length) - 1));
   return sorted[index];
-};
-const nullableNumber = (value: unknown) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
 };
 const isRecord = <K extends string, V>(value: unknown): value is Record<K, V> =>
   typeof value === "object" && value !== null;

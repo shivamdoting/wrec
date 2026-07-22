@@ -43,16 +43,23 @@ does not apply release gates. It is meant for local sanity checks and CI plumbin
 
 ## Release Gate
 
-Run the release suite against one binary:
+Before creating a version tag, run the local release check from a clean checkout
+on a Mac with Screen Recording permission:
+
+```sh
+bun run release:check --against /path/to/previous-release/wrec
+```
+
+This builds the candidate from the current checkout, runs the complete interleaved
+A/B suite, and validates the resulting summary against `HEAD`. A failed or
+inconclusive run exits non-zero. Commit the new file in `results/` before creating
+the version tag; the release workflow runs the same verifier and refuses to
+publish without it.
+
+For budget-only investigation outside the release process, run:
 
 ```sh
 bun run bench release
-```
-
-Run an interleaved A/B gate against a reference binary:
-
-```sh
-bun run bench release --against /path/to/reference/wrec
 ```
 
 Release profiles:

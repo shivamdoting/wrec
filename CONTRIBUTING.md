@@ -91,6 +91,17 @@ bun run bench release         # gated release profiles
 Results land in `benchmarks/results/`; the site renders them at
 `/benchmarks` (`cd docs && bun run dev`).
 
+Before creating any `v*` tag, run the enforced local A/B release check from a
+clean checkout on a Mac with Screen Recording permission:
+
+```bash
+bun run release:check --against /path/to/previous-release/wrec
+```
+
+Only a passing run exits successfully. Commit the generated benchmark summary,
+then create the version tag; the release workflow validates the same summary
+against the tagged commit before packaging.
+
 ## Packaging
 
 Create a local dev app:
