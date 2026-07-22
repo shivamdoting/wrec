@@ -593,14 +593,6 @@ body {
   color: var(--page-bg);
 }
 
-.bench-nav-link[data-current="true"] {
-  border-image: none;
-  border-color: var(--wrec-red);
-  background: var(--page-link);
-  color: #050505;
-}
-
-.bench-nav-link[data-current="true"],
 .bench-nav-link:hover,
 .bench-nav-link:focus-visible {
   clip-path: polygon(
@@ -617,6 +609,14 @@ body {
     0 2px,
     4px 2px
   );
+}
+
+.bench-nav-link[data-current="true"] {
+  border-image: none;
+  background: var(--page-link);
+  background-clip: padding-box;
+  color: #050505;
+  clip-path: none;
 }
 
 .bench-theme-toggle {
