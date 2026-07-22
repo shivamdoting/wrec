@@ -593,7 +593,8 @@ body {
 }
 
 .bench-nav-link[data-current="true"] {
-  border-image: var(--bench-px) 2 stretch;
+  border-image: none;
+  border-color: var(--wrec-red);
   background: var(--page-link);
   color: #050505;
 }
