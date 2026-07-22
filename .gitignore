@@ -1,6 +1,9 @@
 /target
 /dist
-/benchmarks
+/benchmarks/runs/
+/benchmarks/.tmp/
+/benchmarks/node_modules/
+/benchmarks/index.html
 .DS_Store
 *.mov
 *.mp4

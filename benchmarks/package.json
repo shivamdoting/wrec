@@ -1,0 +1,11 @@
+{
+  "name": "wrec-local-benchmarks",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.12",
+  "scripts": {
+    "bench": "bun run src/run.ts",
+    "report": "bun run src/report.ts"
+  },
+  "devDependencies": {}
+}
