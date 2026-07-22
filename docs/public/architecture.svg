@@ -16,7 +16,7 @@
     <path d="M212 130 C 200 146, 172 150, 156 164" fill="none" stroke="#efe7ef" stroke-width="1.8" marker-end="url(#arrow)" />
     <path d="M268 130 C 280 146, 308 150, 324 164" fill="none" stroke="#efe7ef" stroke-width="1.8" marker-end="url(#arrow)" />
     <rect x="68" y="166" width="168" height="42" rx="2" fill="none" stroke="#efe7ef" stroke-width="1.5" />
-    <text x="152" y="192" text-anchor="middle" font-size="16" fill="#f3e8f3">wrec-app (GPUI)</text>
+    <text x="152" y="192" text-anchor="middle" font-size="16" fill="#f3e8f3">wrec-app (SwiftUI)</text>
     <rect x="256" y="166" width="148" height="42" rx="2" fill="none" stroke="#efe7ef" stroke-width="1.5" />
     <text x="330" y="192" text-anchor="middle" font-size="16" fill="#f3e8f3">wrec CLI</text>
   </g>

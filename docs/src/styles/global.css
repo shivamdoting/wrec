@@ -55,7 +55,7 @@ body {
 .docs-page {
   --docs-foreground: color-mix(in srgb, var(--page-fg) 70%, transparent);
   margin: 0;
-  padding: 0 24px 64px;
+  padding: 0 16px 64px;
   background: var(--page-bg);
   color: var(--docs-foreground);
   font-family: var(--font-departure), monospace;
@@ -64,7 +64,7 @@ body {
 }
 
 .docs-page main {
-  max-width: 800px;
+  max-width: 1000px;
   margin: 0 auto;
   padding: 0;
   overflow-x: hidden;
@@ -435,7 +435,7 @@ body {
 
 .bench-page {
   margin: 0;
-  padding: 0 24px 64px;
+  padding: 0 16px 64px;
   background: var(--page-bg);
   color: var(--page-fg);
   font-family: var(--font-departure), monospace;

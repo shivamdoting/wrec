@@ -31,11 +31,12 @@ const architectureNotes = [
 
 <DocsLayout title="wrec architecture" current="architecture">
   <p>
-    Two thin clients — the GPUI app (<code>wrec-app</code>) and the
-    <code>wrec</code> CLI — talk to a local daemon over a Unix socket. The daemon
-    owns all recording state and drives a native Swift capture engine that does the
-    actual pixel work: ScreenCaptureKit hands frames straight to AVAssetWriter, which
-    writes the hardware-encoded <code>.mov</code>. Rust never touches frames.
+    Two thin clients — the native SwiftUI menu-bar app (<code>wrec-app</code>)
+    and the <code>wrec</code> CLI — talk to a local Rust daemon over the same Unix-socket
+    JSON protocol. The daemon owns all recording state and drives a native Swift capture
+    engine that does the actual pixel work: ScreenCaptureKit hands frames straight
+    to AVAssetWriter, which writes the hardware-encoded <code>.mov</code>. Rust
+    never touches frames.
   </p>
 
   <img

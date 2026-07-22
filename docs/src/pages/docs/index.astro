@@ -6,17 +6,17 @@ const curlInstall = `curl -fsSL https://wrec.app/install | sh`;
 
 const quarantine = `xattr -dr com.apple.quarantine /Applications/Wrec.app`;
 
-const runFromSource = `cargo build -p daemon --bin daemon   # optional, makes first start faster
-cargo run -p app                     # the GPUI app
-cargo run -p cli -- targets --json   # the CLI`;
+const runFromSource = `cargo dev                              # package and launch the SwiftUI menu-bar app
+cargo run -p cli -- targets --json   # run the agent-friendly CLI`;
 ---
 
 <DocsLayout title="wrec docs" current="docs">
   <p>The most efficient screen recorder for mac.</p>
   <p>
     Wrec records displays or windows with a native ScreenCaptureKit pipeline,
-    writes hardware-encoded <code>.mov</code> files, and gives you both a small GPUI
-    app and a JSON-friendly <code>wrec</code> CLI built for scripts and coding agents.
+    writes hardware-encoded <code>.mov</code> files, and gives you both a native SwiftUI
+    menu-bar app and a JSON-friendly <code>wrec</code> CLI built for scripts and coding
+    agents.
   </p>
   <p>
     Automating wrec? The <a href="/docs/agents">agent docs</a> are the operating contract.
@@ -57,7 +57,7 @@ cargo run -p cli -- targets --json   # the CLI`;
   <p>
     The app is downloadable from
     <a
-      href="https://github.com/shivamhwp/wrec/releases"
+      href="https://github.com/shivamdoting/wrec/releases"
       target="_blank"
       rel="noopener noreferrer">GitHub Releases</a
     >. Release builds are not notarized yet, so macOS blocks the first launch of
@@ -86,10 +86,9 @@ cargo run -p cli -- targets --json   # the CLI`;
   <h2>Run it from source</h2>
   <CodeBlock code={runFromSource} label="Copy commands" />
   <p>
-    Requires full Xcode (for GPUI shader compilation and the Swift capture
-    engine). See
+    Requires full Xcode for the Swift app and capture engine. See
     <a
-      href="https://github.com/shivamhwp/wrec/blob/main/CONTRIBUTING.md"
+      href="https://github.com/shivamdoting/wrec/blob/main/CONTRIBUTING.md"
       target="_blank"
       rel="noopener noreferrer">CONTRIBUTING.md</a
     > for the full development setup.
