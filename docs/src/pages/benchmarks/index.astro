@@ -81,11 +81,6 @@ const envLine = latest
                   <div class="tile-value">
                     {fmt(profile.observed?.effectiveFps)}
                   </div>
-                  {profile.observed?.stimulusAchievedFps ? (
-                    <div class="tile-sub">
-                      stimulus {fmt(profile.observed.stimulusAchievedFps)} fps
-                    </div>
-                  ) : null}
                 </div>
                 <span
                   class="t-tt"
@@ -93,6 +88,9 @@ const envLine = latest
                   role="tooltip"
                 >
                   Effective FPS measured from the decoded recording.
+                  {profile.observed?.stimulusAchievedFps
+                    ? ` Stimulus: ${fmt(profile.observed.stimulusAchievedFps)} fps.`
+                    : ""}
                 </span>
               </div>
               <div class="t-tt-wrap">
