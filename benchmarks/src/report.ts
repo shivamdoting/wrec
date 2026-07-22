@@ -2,10 +2,12 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Gate, OverallStatus, ProfileResult, SuiteName } from "./gates";
 
-// Renders benchmarks/results/ (the committed run summaries) into a single
-// dependency-free HTML page: newest run in full, older runs as a history
-// table. Verdicts use the reserved status palette and always pair an icon
-// with a label, so state never rides on color alone.
+// Renders benchmarks/results/ (the committed run summaries) into two
+// self-contained HTML pages: index.html (newest run in full + history) and
+// how.html (the methodology). Pixel UI in the app's own voice — Departure
+// Mono, embedded as base64 so a page attached to a GitHub release still
+// renders correctly on its own. Verdicts pair an icon with a label, so
+// state never rides on color alone.
 
 type Summary = {
   schema: string;
@@ -29,20 +31,34 @@ type Summary = {
 
 const root = path.resolve(import.meta.dir, "..");
 const resultsDir = path.join(root, "results");
+const fontPath = path.resolve(
+  root,
+  "..",
+  "apps/mac/Sources/WrecApp/Resources/DepartureMono-Regular.otf",
+);
 
 const statusMeta: Record<string, { icon: string; word: string; tone: string }> = {
-  pass: { icon: "✓", word: "pass", tone: "good" },
-  fail: { icon: "✕", word: "fail", tone: "critical" },
-  inconclusive: { icon: "◐", word: "inconclusive", tone: "warning" },
-  skipped: { icon: "–", word: "skipped", tone: "muted" },
+  pass: { icon: "✓", word: "PASS", tone: "good" },
+  fail: { icon: "✕", word: "FAIL", tone: "critical" },
+  inconclusive: { icon: "◐", word: "INCONCLUSIVE", tone: "warning" },
+  skipped: { icon: "–", word: "SKIPPED", tone: "muted" },
 };
 
 export const writeReport = async () => {
   const summaries = await loadSummaries();
-  const html = render(summaries);
-  const reportPath = path.join(root, "index.html");
-  await writeFile(reportPath, html);
-  return reportPath;
+  const font = await loadFont();
+  const indexPath = path.join(root, "index.html");
+  await writeFile(indexPath, shell("bench", renderIndex(summaries), font));
+  await writeFile(path.join(root, "how.html"), shell("how", renderHow(), font));
+  return indexPath;
+};
+
+const loadFont = async () => {
+  try {
+    return (await readFile(fontPath)).toString("base64");
+  } catch {
+    return null;
+  }
 };
 
 const loadSummaries = async (): Promise<Summary[]> => {
@@ -116,7 +132,7 @@ const gateRow = (gate: Gate) => {
 };
 
 const tile = (label: string, value: string, sub?: string) => `
-  <div class="tile">
+  <div class="tile px">
     <div class="tile-label">${escapeHtml(label)}</div>
     <div class="tile-value">${value}</div>
     ${sub ? `<div class="tile-sub">${sub}</div>` : ""}
@@ -126,22 +142,22 @@ const profileSection = (profile: ProfileResult) => {
   const o = profile.observed;
   const tiles = [
     tile(
-      "Observed fps",
+      "observed fps",
       fmt(o?.effectiveFps),
       o?.stimulusAchievedFps ? `stimulus ${fmt(o.stimulusAchievedFps)} fps` : undefined,
     ),
-    tile("Capture completeness", fmtPercent(o?.captureCompleteness)),
-    tile("Start latency", `${fmt(profile.latency.startMs, 0)} <span class="unit">ms</span>`),
-    tile("Finalize", `${fmt(profile.latency.finalizeMs, 0)} <span class="unit">ms</span>`),
+    tile("completeness", fmtPercent(o?.captureCompleteness)),
+    tile("start", `${fmt(profile.latency.startMs, 0)}<span class="unit">ms</span>`),
+    tile("finalize", `${fmt(profile.latency.finalizeMs, 0)}<span class="unit">ms</span>`),
     tile(
-      "CPU avg / p95",
-      `${fmt(profile.process.avgTotalCpuPercent, 1)} / ${fmt(profile.process.p95TotalCpuPercent, 1)}<span class="unit">%</span>`,
+      "cpu avg/p95",
+      `${fmt(profile.process.avgTotalCpuPercent, 1)}/${fmt(profile.process.p95TotalCpuPercent, 1)}<span class="unit">%</span>`,
     ),
-    tile("Peak RSS", fmtBytes(profile.process.maxTotalRssBytes)),
+    tile("peak rss", fmtBytes(profile.process.maxTotalRssBytes)),
   ].join("");
 
   return `
-  <section class="card">
+  <section class="card px">
     <header class="card-head">
       <h3>${escapeHtml(profile.name)}</h3>
       ${chip(profile.status)}
@@ -149,11 +165,11 @@ const profileSection = (profile: ProfileResult) => {
     <div class="tiles">${tiles}</div>
     ${
       profile.gates.length
-        ? `<table>
-        <thead><tr><th>Gate</th><th>Status</th><th class="num">Measured</th><th>Threshold</th><th class="num">Δ vs reference</th><th>Notes</th></tr></thead>
+        ? `<div class="table-wrap"><table>
+        <thead><tr><th>gate</th><th>status</th><th class="num">measured</th><th>threshold</th><th class="num">Δ vs ref</th><th>notes</th></tr></thead>
         <tbody>${profile.gates.map(gateRow).join("")}</tbody>
-      </table>`
-        : `<p class="muted">Smoke run — recorded ungated.</p>`
+      </table></div>`
+        : `<p class="muted">smoke run — recorded ungated.</p>`
     }
   </section>`;
 };
@@ -169,10 +185,10 @@ const latestSection = (latest: Summary) => {
   ]
     .filter(Boolean)
     .map((item) => `<span>${escapeHtml(String(item))}</span>`)
-    .join("<span class='dot'>·</span>");
+    .join(`<span class="dot">·</span>`);
 
   return `
-  <section class="verdict">
+  <section class="verdict px">
     <div class="verdict-chip">${chip(latest.status)}</div>
     <div>
       <h2>${escapeHtml(latest.id)}</h2>
@@ -190,105 +206,238 @@ const historyRow = (run: Summary) => `
     <td>${escapeHtml(run.id)}</td>
     <td>${chip(run.status)}</td>
     <td>${escapeHtml(run.suite)}</td>
-    <td class="mono">${escapeHtml(run.git.commit.slice(0, 7))}${run.git.dirty ? "*" : ""}</td>
+    <td>${escapeHtml(run.git.commit.slice(0, 7))}${run.git.dirty ? "*" : ""}</td>
     <td>${run.binaries.reference ? "A/B" : "budgets"}</td>
     <td class="muted">${escapeHtml(run.generatedAt)}</td>
   </tr>`;
 
-const render = (summaries: Summary[]) => {
+const renderIndex = (summaries: Summary[]) => {
   const latest = summaries[0];
-  return `<!doctype html>
+  return `
+  ${latest ? latestSection(latest) : `<p class="muted">no results yet — run <code>bun run bench</code>.</p>`}
+  ${
+    summaries.length > 1
+      ? `<section class="card px">
+      <header class="card-head"><h3>history</h3></header>
+      <div class="table-wrap"><table>
+        <thead><tr><th>run</th><th>status</th><th>suite</th><th>commit</th><th>mode</th><th>generated</th></tr></thead>
+        <tbody>${summaries.slice(1).map(historyRow).join("")}</tbody>
+      </table></div>
+    </section>`
+      : ""
+  }`;
+};
+
+const markerDemo = () => {
+  // A miniature of the real marker strip: guard pattern + a few index bits.
+  const blocks = [1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1];
+  return `<div class="marker" aria-hidden="true">${blocks
+    .map((bit) => `<span class="${bit ? "on" : "off"}"></span>`)
+    .join("")}</div>`;
+};
+
+const renderHow = () => `
+  <section class="card px prose">
+    <h2>how this was recorded</h2>
+    <p>
+      the bench never trusts what wrec says about itself. every number on the
+      bench page is decoded out of the pixels of the finished recording — the
+      same file a user would keep.
+    </p>
+
+    <h3>1 · a window that counts out loud</h3>
+    <p>
+      a stimulus window redraws 60 times a second, synced to the display. each
+      redraw paints its own frame number as a strip of big black/white blocks —
+      1 bit per block, with guard patterns at both ends:
+    </p>
+    ${markerDemo()}
+    <p>
+      the number advances once per <em>rendered</em> frame, so every index that
+      reaches the screen is consecutive. the window also holds a power
+      assertion — a dimming display would otherwise read as a frame-rate
+      collapse.
+    </p>
+
+    <h3>2 · wrec records it, black box</h3>
+    <p>
+      the harness drives the real release binary through the public CLI only:
+      <code>wrec record start --target window:&lt;id&gt; --json</code>, one
+      fresh isolated daemon per recording (own <code>WREC_HOME</code>, own
+      socket, env overrides scrubbed). no bench mode, no test hooks — wrec
+      cannot tell it is being measured.
+    </p>
+
+    <h3>3 · the file is the referee</h3>
+    <p>
+      after each run an AVAssetReader walks every frame of the
+      <code>.mov</code> and reads the block numbers back. missing number =
+      a displayed frame the recorder lost. from this fall out observed fps,
+      capture completeness, duplicate frames, PTS gaps and ordering. the
+      engine's own <code>frames/dropped</code> counters are recorded too —
+      and if they disagree with the decoded truth by more than 5%, that is
+      itself a failing gate.
+    </p>
+
+    <h3>4 · cost and latency on the side</h3>
+    <p>
+      while recording, <code>ps</code> samples cpu and rss of the daemon tree
+      every 250 ms; start latency (command → first frame written) and finalize
+      latency (duration elapsed → closed file) come from the timestamped
+      <code>--json</code> job events.
+    </p>
+
+    <h3>5 · a/b, not vibes</h3>
+    <p>
+      for a release, candidate and reference binaries run interleaved —
+      A B A B A B, three reps each per profile, same session — and gates
+      compare paired medians. a regression fails only if the candidate is
+      &gt;15% worse <em>and</em> beyond an absolute noise floor. thermal
+      drift and background load hit both binaries equally, so they cancel.
+    </p>
+
+    <h3>6 · three verdicts, not two</h3>
+    <p>
+      on battery, under thermal pressure, under load, or when same-binary reps
+      disagree beyond the noise floor, perf gates return
+      <strong>inconclusive</strong> instead of pass/fail. correctness gates
+      (codec, dimensions, PTS order, frame accounting) always stay hard —
+      machine load cannot corrupt those.
+    </p>
+
+    <p class="muted">
+      profiles: efficient-720p30-hevc · balanced-1080p30-hevc ·
+      high-native60-hevc · balanced-1080p30-h264. run it:
+      <code>bun run bench release --against &lt;previous wrec&gt;</code>
+    </p>
+  </section>`;
+
+// NES-style stepped-corner border: a 5×5 SVG whose four plus-shaped pixels
+// become the corners via border-image slicing.
+const pxSvg = (hex: string) =>
+  `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='5' height='5'%3E%3Cpath d='M2 1h1v1h-1zM1 2h1v1h-1zM3 2h1v1h-1zM2 3h1v1h-1z' fill='%23${hex}'/%3E%3C/svg%3E")`;
+
+const shell = (active: "bench" | "how", body: string, font: string | null) => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>wrec bench</title>
+<title>wrec bench${active === "how" ? " · how" : ""}</title>
 <style>
-  :root {
-    color-scheme: light;
-    --surface: #fcfcfb; --plane: #f9f9f7;
-    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-    --grid: #e1e0d9; --ring: rgba(11,11,11,0.10);
-    --good: #0ca30c; --warning: #b97e00; --critical: #d03b3b;
-    --good-wash: rgba(12,163,12,0.10); --warning-wash: rgba(250,178,25,0.14);
-    --critical-wash: rgba(208,59,59,0.10); --muted-wash: rgba(137,135,129,0.12);
+  ${
+    font
+      ? `@font-face {
+    font-family: "Departure Mono";
+    src: url(data:font/otf;base64,${font}) format("opentype");
+    font-display: swap;
+  }`
+      : ""
   }
-  @media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --plane: #0d0d0c; --surface: #161615;
+    --ink: #e8e7e0; --ink-2: #b8b7ae; --muted: #898781;
+    --line: #3a3936; --border: #8a8985; --border-dim: #4a4946;
+    --good: #17c964; --warning: #fab219; --critical: #f24d4d;
+    --px: ${pxSvg("8a8985")}; --px-dim: ${pxSvg("4a4946")};
+  }
+  @media (prefers-color-scheme: light) {
     :root {
-      color-scheme: dark;
-      --surface: #1a1a19; --plane: #0d0d0d;
-      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-      --grid: #2c2c2a; --ring: rgba(255,255,255,0.10);
-      --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+      color-scheme: light;
+      --plane: #f2f1ec; --surface: #fcfcfb;
+      --ink: #16150f; --ink-2: #52514e; --muted: #898781;
+      --line: #d9d8d0; --border: #52514e; --border-dim: #b1b0a8;
+      --good: #0a8a0a; --warning: #9a6a00; --critical: #c22f2f;
+      --px: ${pxSvg("52514e")}; --px-dim: ${pxSvg("b1b0a8")};
     }
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 32px 20px 64px; background: var(--plane); color: var(--ink);
-    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; padding: 0 24px 64px; background: var(--plane); color: var(--ink);
+    font-family: "Departure Mono", ui-monospace, monospace;
+    font-size: 14px; line-height: 1.6;
+    image-rendering: pixelated;
   }
-  main { max-width: 980px; margin: 0 auto; display: grid; gap: 16px; }
-  h1 { font-size: 20px; margin: 0; }
-  h2 { font-size: 16px; margin: 0; }
-  h3 { font-size: 15px; margin: 0; font-weight: 600; }
-  .sub { color: var(--ink-2); margin: 2px 0 12px; }
-  .verdict {
-    display: flex; gap: 16px; align-items: center;
-    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 18px 20px;
+  main { width: 100%; display: grid; gap: 20px; }
+  nav {
+    display: flex; align-items: center; gap: 14px;
+    padding: 18px 0 16px; margin-bottom: 20px;
+    border-bottom: 2px dashed var(--border-dim);
   }
-  .verdict-chip .chip { font-size: 15px; padding: 6px 14px; }
-  .meta { margin: 4px 0 0; color: var(--ink-2); font-size: 13px; }
-  .meta .dot { margin: 0 6px; color: var(--muted); }
-  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px 20px 20px; }
-  .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
-  .tile { border: 1px solid var(--grid); border-radius: 8px; padding: 10px 12px; }
-  .tile-label { font-size: 12px; color: var(--ink-2); }
-  .tile-value { font-size: 22px; font-weight: 600; margin-top: 2px; }
-  .tile-value .unit { font-size: 13px; font-weight: 400; color: var(--ink-2); margin-left: 1px; }
-  .tile-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
-  td { padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  nav .brand { font-size: 18px; font-weight: 700; letter-spacing: 1px; margin-right: auto; }
+  nav a {
+    color: var(--ink); text-decoration: none; padding: 4px 14px;
+    border: 4px solid transparent; border-image: var(--px-dim) 2 stretch;
+  }
+  nav a.active, nav a:hover {
+    border-image: var(--px) 2 stretch;
+    background: var(--ink); color: var(--plane);
+  }
+  h2 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
+  h3 { font-size: 14px; margin: 0; font-weight: 700; }
+  .px {
+    border: 4px solid transparent;
+    border-image: var(--px) 2 stretch;
+    background: var(--surface);
+  }
+  .verdict { display: flex; gap: 18px; align-items: center; padding: 18px 20px; }
+  .meta { margin: 6px 0 0; color: var(--ink-2); font-size: 12px; }
+  .meta .dot { margin: 0 7px; color: var(--muted); }
+  .card { padding: 16px 18px 18px; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tile { padding: 10px 12px; border-image: var(--px-dim) 2 stretch; }
+  .tile-label { font-size: 11px; color: var(--ink-2); letter-spacing: 0.5px; }
+  .tile-value { font-size: 22px; margin-top: 4px; }
+  .tile-value .unit { font-size: 12px; color: var(--ink-2); margin-left: 2px; }
+  .tile-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    text-align: left; color: var(--muted); font-weight: 400; letter-spacing: 0.5px;
+    padding: 6px 10px; border-bottom: 2px solid var(--line);
+  }
+  td { padding: 7px 10px; border-bottom: 2px solid var(--line); vertical-align: top; }
   tr:last-child td { border-bottom: none; }
   .num { font-variant-numeric: tabular-nums; text-align: right; }
   th.num { text-align: right; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .muted { color: var(--muted); }
+  code { background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 1px 5px; }
   .chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
-    color: var(--ink);
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; letter-spacing: 0.5px; padding: 2px 9px;
+    border: 3px solid transparent; border-image: var(--px-dim) 2 stretch;
+    white-space: nowrap;
   }
-  .chip-good { background: var(--good-wash); color: var(--good); }
-  .chip-critical { background: var(--critical-wash); color: var(--critical); }
-  .chip-warning { background: var(--warning-wash); color: var(--warning); }
-  .chip-muted { background: var(--muted-wash); color: var(--muted); }
+  .chip-good { color: var(--good); }
+  .chip-critical { color: var(--critical); }
+  .chip-warning { color: var(--warning); }
+  .chip-muted { color: var(--muted); }
+  .verdict-chip .chip { font-size: 15px; padding: 8px 16px; border-image: var(--px) 2 stretch; }
+  .prose { max-width: 860px; }
+  .prose p { margin: 10px 0 18px; color: var(--ink-2); }
+  .prose h2 { margin-bottom: 6px; }
+  .prose h3 { margin: 22px 0 4px; }
+  .prose em { font-style: normal; color: var(--ink); }
+  .prose strong { color: var(--warning); }
+  .marker { display: inline-flex; gap: 3px; padding: 8px; background: #6c6b66; margin: 4px 0 10px; }
+  .marker span { width: 18px; height: 40px; display: inline-block; }
+  .marker .on { background: #fff; }
+  .marker .off { background: #000; }
 </style>
 </head>
 <body>
+<nav>
+  <span class="brand">wrec bench</span>
+  <a href="index.html" class="${active === "bench" ? "active" : ""}">bench</a>
+  <a href="how.html" class="${active === "how" ? "active" : ""}">how</a>
+</nav>
 <main>
-  <div>
-    <h1>wrec bench</h1>
-    <p class="sub">Ground-truth recording performance — decoded from the output video, not self-reported.</p>
-  </div>
-  ${latest ? latestSection(latest) : `<p class="muted">No results yet — run <code>bun run bench</code>.</p>`}
-  ${
-    summaries.length > 1
-      ? `<section class="card">
-      <header class="card-head"><h3>History</h3></header>
-      <table>
-        <thead><tr><th>Run</th><th>Status</th><th>Suite</th><th>Commit</th><th>Mode</th><th>Generated</th></tr></thead>
-        <tbody>${summaries.slice(1).map(historyRow).join("")}</tbody>
-      </table>
-    </section>`
-      : ""
-  }
+${body}
 </main>
 </body>
 </html>
 `;
-};
 
 if (import.meta.main) {
   console.log(`report: ${await writeReport()}`);

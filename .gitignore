@@ -4,6 +4,7 @@
 /benchmarks/.tmp/
 /benchmarks/node_modules/
 /benchmarks/index.html
+/benchmarks/how.html
 .DS_Store
 *.mov
 *.mp4

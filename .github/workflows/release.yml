@@ -157,6 +157,7 @@ jobs:
           cp "${{ steps.bench.outputs.summary }}" "dist/bench/wrec-bench-$VERSION.json"
           bun benchmarks/src/report.ts
           cp benchmarks/index.html "dist/bench/wrec-bench-$VERSION.html"
+          cp benchmarks/how.html "dist/bench/wrec-bench-$VERSION-how.html"
 
       - name: Package unsigned DMG
         env:
