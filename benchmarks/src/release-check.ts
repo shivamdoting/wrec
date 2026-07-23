@@ -28,6 +28,7 @@ Usage:
 Options forwarded to the benchmark:
   --duration <time>
   --sample-interval-ms <n>
+  --allow-battery
 `);
       process.exit(0);
     }
@@ -38,6 +39,10 @@ Options forwarded to the benchmark:
         );
       reference = path.resolve(value);
       if (!inlineValue) index += 1;
+      continue;
+    }
+    if (flag === "--allow-battery") {
+      forwarded.push(flag);
       continue;
     }
     if (flag === "--duration" || flag === "--sample-interval-ms") {

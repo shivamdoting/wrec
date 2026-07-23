@@ -3,6 +3,7 @@ import BenchLayout from "../../layouts/BenchLayout.astro";
 import {
   fmt,
   fmtBytes,
+  fmtDate,
   fmtPercent,
   gateDelta,
   gateMeasured,
@@ -43,7 +44,11 @@ const envLine = latest
             {meta(latest.status).word}
           </span>
           <div>
-            <h2>{latest.id}</h2>
+            <h2>
+              <time datetime={latest.generatedAt} title={latest.id}>
+                {fmtDate(latest.generatedAt)}
+              </time>
+            </h2>
             <p class="meta">{envLine.join(" · ")}</p>
             <p class="meta">
               {(latest.environment.guards ?? []).map((guard) => (
@@ -251,13 +256,16 @@ const envLine = latest
                     <th>suite</th>
                     <th>commit</th>
                     <th>mode</th>
-                    <th>generated</th>
                   </tr>
                 </thead>
                 <tbody>
                   {history.map((run) => (
                     <tr>
-                      <td>{run.id}</td>
+                      <td>
+                        <time datetime={run.generatedAt} title={run.id}>
+                          {fmtDate(run.generatedAt)}
+                        </time>
+                      </td>
                       <td>
                         <span
                           class:list={["chip", `chip-${meta(run.status).tone}`]}
@@ -274,7 +282,6 @@ const envLine = latest
                         {run.git.dirty ? "*" : ""}
                       </td>
                       <td>{run.binaries.reference ? "A/B" : "budgets"}</td>
-                      <td class="muted">{run.generatedAt}</td>
                     </tr>
                   ))}
                 </tbody>

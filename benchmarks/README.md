@@ -56,6 +56,14 @@ inconclusive run exits non-zero. Commit the new file in `results/` before creati
 the version tag; the release workflow runs the same verifier and refuses to
 publish without it.
 
+AC power remains the default for trusted release measurements. When battery
+power is intentionally acceptable for a specific release, make that exception
+explicit so it is preserved in the result:
+
+```sh
+bun run release:check --against /path/to/previous-release/wrec --allow-battery
+```
+
 For budget-only investigation outside the release process, run:
 
 ```sh

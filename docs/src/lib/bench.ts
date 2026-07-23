@@ -104,6 +104,24 @@ export const fmtBytes = (bytes: number | null | undefined): string => {
 export const fmtPercent = (ratio: number | null | undefined): string =>
   ratio === null || ratio === undefined ? "–" : `${(ratio * 100).toFixed(1)}%`;
 
+const benchmarkDateFormat = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true,
+  timeZone: "UTC",
+  timeZoneName: "short",
+});
+
+export const fmtDate = (value: string): string => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : benchmarkDateFormat.format(date);
+};
+
 export const gateMeasured = (gate: Gate): string =>
   gate.name.includes("rss") && typeof gate.measured === "number"
     ? fmtBytes(gate.measured)

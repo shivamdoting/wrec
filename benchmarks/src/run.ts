@@ -37,6 +37,7 @@ type CliOptions = {
   autoBuild: boolean;
   againstBin?: string;
   sampleIntervalMs: number;
+  allowBattery: boolean;
 };
 
 type CommandResult = {
@@ -187,7 +188,7 @@ const main = async () => {
   try {
     await compileNativeTools(context);
     stimulus = await startStimulus(context.tools.stimulus);
-    const environment = await environmentPreamble(options.suite);
+    const environment = await environmentPreamble(options.suite, options.allowBattery);
     const environmentStatus = statusFromEnvironment(environment.guards, options.suite);
     const profiles = await runSuite(options, context, stimulus, environmentStatus === "pass");
     const status = combineStatuses([environmentStatus, ...profiles.map((profile) => profile.status)]);
@@ -266,6 +267,7 @@ const parseArgs = (args: string[]): CliOptions => {
   let wrecExplicit = Boolean(Bun.env.WREC_BIN);
   let againstBin: string | undefined;
   let sampleIntervalMs = 250;
+  let allowBattery = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -295,6 +297,8 @@ const parseArgs = (args: string[]): CliOptions => {
     } else if (flag === "--sample-interval-ms") {
       sampleIntervalMs = parsePositiveInt(requireValue(flag, value), flag);
       if (!inlineValue) index += 1;
+    } else if (flag === "--allow-battery") {
+      allowBattery = true;
     } else {
       throw new Error(`unknown option: ${arg}`);
     }
@@ -309,6 +313,7 @@ const parseArgs = (args: string[]): CliOptions => {
     autoBuild: !wrecExplicit,
     againstBin,
     sampleIntervalMs,
+    allowBattery,
   };
 };
 
@@ -338,6 +343,7 @@ Options:
   --wrec <path>               candidate binary (default: target/release/wrec, built automatically)
   --against <path>            reference wrec binary for interleaved A/B regression gates
   --sample-interval-ms <n>    ps sampler interval (default: 250)
+  --allow-battery             explicitly accept battery power for a release run
   -h, --help                  show this help
 `);
 };
@@ -1236,7 +1242,7 @@ const parseJsonEvents = (stdout: string) =>
     }
   });
 
-const environmentPreamble = async (suite: SuiteName) => {
+const environmentPreamble = async (suite: SuiteName, allowBattery: boolean) => {
   const [battery, thermal, productVersion, buildVersion, chip, model, memsize] =
     await Promise.all([
       commandSnapshot(["pmset", "-g", "batt"]),
@@ -1249,7 +1255,11 @@ const environmentPreamble = async (suite: SuiteName) => {
     ]);
   const loadAverage = os.loadavg();
   const cpuCount = os.cpus().length;
-  const guards = environmentGuards({ battery, thermal, loadAverage, cpuCount }, suite);
+  const guards = environmentGuards(
+    { battery, thermal, loadAverage, cpuCount },
+    suite,
+    allowBattery,
+  );
 
   return {
     acPower: battery,
@@ -1279,6 +1289,7 @@ const environmentGuards = (
     cpuCount: number;
   },
   suite: SuiteName,
+  allowBattery: boolean,
 ): EnvironmentGuard[] => {
   if (suite !== "release") {
     return [];
@@ -1295,9 +1306,13 @@ const environmentGuards = (
   return [
     {
       name: "env_ac_power",
-      threshold: "AC Power",
+      threshold: allowBattery ? "AC Power or explicit battery override" : "AC Power",
       measured: onAc ? "AC Power" : battery.stdout.trim().split("\n")[0] ?? null,
-      status: onAc ? "pass" : "inconclusive",
+      status: onAc || allowBattery ? "pass" : "inconclusive",
+      details:
+        !onAc && allowBattery
+          ? "battery power explicitly accepted with --allow-battery"
+          : undefined,
     },
     {
       name: "env_thermal",
