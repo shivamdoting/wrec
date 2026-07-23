@@ -29,9 +29,11 @@ change, and a maintainer can vouch for you. Once a maintainer comments
 ## Requirements
 
 - macOS 15+ on Apple Silicon.
-- Full Xcode selected with `xcode-select`.
+- Full Xcode selected with `xcode-select` for the SwiftUI shell and native
+  capture engine.
 
-If GPUI shader compilation fails, select full Xcode:
+If Swift or the native capture engine cannot find the Apple toolchain, select
+full Xcode:
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -125,4 +127,6 @@ package contains `wrec`, `daemon`, and `capture-engine`, so it can run without
 copying anything out of the app bundle.
 
 Pushing a `v*` tag whose commit is on `main` runs the release workflow and
-uploads the dev `.dmg` and dev CLI archive to GitHub Releases.
+uploads the release `.dmg`, app update archive, standalone CLI archive,
+benchmark summary, checksums, and build-provenance attestations to GitHub
+Releases.

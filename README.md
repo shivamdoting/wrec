@@ -29,8 +29,8 @@
 [![CI powered by Blacksmith](images/blacksmith-ci-badge.svg)](https://www.blacksmith.sh/)
 
 Wrec records displays or windows with a native ScreenCaptureKit pipeline, writes
-hardware-encoded `.mov` files, and gives you both a small GPUI app and a
-JSON-friendly CLI for scripts and agents.
+hardware-encoded `.mov` files, and gives you both a native SwiftUI menu-bar app
+and a JSON-friendly CLI for scripts and agents.
 
 > [!NOTE]
 > Wrec is still early public software. Release builds are not notarized, so
@@ -44,7 +44,7 @@ JSON-friendly CLI for scripts and agents.
 
 ## Features
 
-- Native macOS app built with Rust and GPUI.
+- Native SwiftUI menu-bar app with no capture code in the UI process.
 - Standalone `wrec` CLI for terminals, scripts, and coding agents.
 - Display and window capture.
 - HEVC by default, with H.264 available.
@@ -54,6 +54,23 @@ JSON-friendly CLI for scripts and agents.
 - Pause, resume, stop, queued jobs, and recording status.
 - JSON output for target discovery, job control, errors, metrics, and logs.
 - Local recording history and metrics stored separately from media files.
+
+## Architecture
+
+The app and CLI are thin clients for the same local recording service. The
+SwiftUI shell never captures frames itself: both clients send newline-delimited
+JSON requests over a Unix socket to the Rust daemon. The daemon owns target
+discovery, permissions, the recording queue, job state, controls, history, and
+metrics.
+
+For an active job, the daemon launches a separate native Swift capture engine.
+ScreenCaptureKit delivers frames directly to AVAssetWriter, which performs
+hardware encoding and writes the `.mov` file. Rust coordinates the recording
+but never copies or processes video frames.
+
+The app bundle contains `wrec-app`, `daemon`, and `capture-engine`. The
+standalone CLI package contains `wrec`, `daemon`, and `capture-engine`, so both
+interfaces use the same protocol and recording pipeline.
 
 ## Install
 

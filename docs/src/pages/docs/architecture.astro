@@ -7,16 +7,16 @@ const architectureNotes = [
     "The app and CLI own user interaction only. They do not import backend, macOS recorder, or capture-engine code.",
   ],
   [
-    "Control is the contract",
-    "The control crate owns IPC request/response types, daemon discovery, daemon startup, job snapshots, errors, and protocol version checks.",
+    "One protocol for every client",
+    "Both clients use the same newline-delimited JSON protocol over ~/.wrec/wrec.sock. Protocol version checks prevent mismatched clients and daemons from silently misbehaving.",
   ],
   [
     "Daemon owns recording state",
-    "The daemon is the source of truth for target listing, Screen Recording permission requests, one active job, queued jobs, pause/resume/stop, and persisted events.",
+    "The Rust daemon is the source of truth for target listing, permissions, one active job, queued jobs, pause/resume/stop, history, metrics, and persisted events.",
   ],
   [
-    "Platform code stays below daemon",
-    "The macOS recorder and Swift capture engine are runtime internals. Agents should observe them only through daemon job events and errors.",
+    "Frames stay native",
+    "The daemon launches a separate Swift capture-engine process for each active job. ScreenCaptureKit feeds AVAssetWriter directly; Rust never copies, transforms, or encodes video frames.",
   ],
   [
     "Separate packages share one runtime shape",
@@ -39,13 +39,26 @@ const architectureNotes = [
     never touches frames.
   </p>
 
-  <img
-    src="/architecture.svg"
-    alt="wrec architecture diagram: wrec-app and the wrec CLI share core types and talk through an IPC client over a Unix socket to the daemon, which drives the macOS recorder and the capture engine (ScreenCaptureKit → AVAssetWriter → .mov)"
-    class="architecture-diagram"
-    width="1200"
-    height="600"
-  />
+  <h2>Process boundaries</h2>
+  <ol class="flow-list">
+    <li>
+      <strong><code>wrec-app</code> or <code>wrec</code></strong> discovers or starts
+      the daemon, then sends a JSON request over <code>~/.wrec/wrec.sock</code>.
+    </li>
+    <li>
+      <strong><code>daemon</code></strong> resolves the target and settings, owns
+      the queue and job lifecycle, and persists events and metrics.
+    </li>
+    <li>
+      <strong><code>capture-engine</code></strong> receives one resolved recording
+      job and owns ScreenCaptureKit, AVAssetWriter, system audio, microphone input,
+      pause, resume, and finalization.
+    </li>
+    <li>
+      <strong>The <code>.mov</code> file</strong> is written by AVAssetWriter while
+      status and metrics travel back through the daemon to either client.
+    </li>
+  </ol>
 
   <table>
     <tbody>

@@ -330,15 +330,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-.architecture-diagram {
-  display: block;
-  width: 100%;
-  height: auto;
-  margin: 28px 0 18px;
-  border: 1px solid var(--page-line);
-  border-radius: 10px;
-}
-
 .docs-page pre {
   white-space: pre-wrap;
 }

@@ -3,6 +3,7 @@ import CodeBlock from "../../components/CodeBlock.astro";
 import DocsLayout from "../../layouts/DocsLayout.astro";
 
 const curlInstall = `curl -fsSL https://wrec.app/install | sh`;
+const curlAppInstall = `curl -fsSL https://wrec.app/install-app | sh`;
 
 const quarantine = `xattr -dr com.apple.quarantine /Applications/Wrec.app`;
 
@@ -52,16 +53,19 @@ cargo run -p cli -- targets --json   # run the agent-friendly CLI`;
   </ol>
 
   <h2>Install</h2>
+  <p>The native menu-bar app installs with:</p>
+  <CodeBlock code={curlAppInstall} label="Copy app install command" />
   <p>The CLI for terminals, scripts, and agents installs with:</p>
   <CodeBlock code={curlInstall} label="Copy install command" />
   <p>
-    The app is downloadable from
+    The app is also downloadable from
     <a
       href="https://github.com/shivamdoting/wrec/releases"
       target="_blank"
       rel="noopener noreferrer">GitHub Releases</a
-    >. Release builds are not notarized yet, so macOS blocks the first launch of
-    the app. Clear the quarantine recursively and reopen:
+    >. Browser-downloaded release builds are not notarized yet, so macOS blocks
+    their first launch. The install script is not affected; for a manually
+    downloaded app, clear the quarantine recursively and reopen:
   </p>
   <CodeBlock code={quarantine} label="Copy command" />
 

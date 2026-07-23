@@ -48,7 +48,7 @@ For release packaging:
 ```
 
 This creates `dist/release/Wrec.app` with the release Cargo profile, bundle id
-`app.wrec.mac`, and a DMG like `dist/release/wrec-0.1.0.dmg`. Release
+`app.wrec.mac`, and a versioned DMG such as `dist/release/wrec-0.3.0.dmg`. Release
 packaging does not generate the companion README.
 
 Release packaging uses `images/wrec-icon.png` as the app icon; dev packaging
