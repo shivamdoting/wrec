@@ -9,6 +9,17 @@ wrec is a JSON-first macOS screen recorder. Prefer the CLI, pass `--json` on
 every command that supports it, select exact targets, and treat daemon job
 state as the source of truth.
 
+## Canonical documentation
+
+- Agent and CLI contract: https://wrec.app/docs/agents
+- Configuration: https://wrec.app/docs/configuration
+- Architecture: https://wrec.app/docs/architecture
+
+Use the agent contract for the current selectors, recording options, JSON
+schema, examples, and recovery guidance. Use `wrec --help` to confirm the
+options supported by the installed binary if its version differs from the
+live documentation.
+
 If `wrec` is not on PATH, ask the user to install it:
 `curl -fsSL https://wrec.app/install | sh`
 
@@ -64,20 +75,3 @@ Keep it current with `wrec update` (`wrec update --check --json` reports
   The final location is `output_path` on the job snapshot.
 - A duration recording keeps running if stdin closes, so append `</dev/null`
   for non-interactive runs.
-
-## Record options
-
-- `--app Safari`, `--target-name README`, `--display 1`, `--window 438` —
-  alternative selectors; name matching is a fallback when ids are unavailable
-  and fails on ambiguous matches. Pass only one selector.
-- `--duration 500ms|30s|5m|1h` — stop automatically after a duration.
-- `--quality efficient|balanced|high` — preset caps: Efficient 720p/30fps,
-  Balanced 1080p/30fps, High native/60fps. Use `--quality high` for native
-  resolution or 60 fps.
-- `--resolution native|720p|1080p|2k|4k`, `--fps 30|60`, `--codec hevc|h264`.
-- `--cursor/--no-cursor`, `--system-audio/--no-system-audio`,
-  `--mic/--no-mic`, `--hide-wrec/--no-hide-wrec` — capture toggles; without a
-  flag, recordings follow the saved app setting.
-- `--out <dir>` — override the output directory for this run.
-
-Full agent contract: https://wrec.app/docs/agents

@@ -56,15 +56,17 @@ final class RecorderModel {
     var settings: RecorderSettings
     var selectedTargetKey: String?
     var showNerdLogs: Bool
+    var autoOpenAfterRecording: Bool
 
-    /// Menu bar title, empty at idle. Precomputed; changes at most once/second.
+    /// Live recording time, frozen while the completed file is being finalized.
     private(set) var menuBarText: String = ""
-    /// `0:42  12.3 MB  4.1 Mbps` while recording.
+    /// `12.3 MB  4.1 Mbps  1260 f` while recording.
     private(set) var metricsText: String = ""
 
     @ObservationIgnored private let daemon = DaemonClient()
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var activeJobId: UInt64?
+    @ObservationIgnored private var stoppingMenuBarText: String?
     @ObservationIgnored private var toastDismissTask: Task<Void, Never>?
     @ObservationIgnored private var lastTargetsRefresh: Date = .distantPast
     @ObservationIgnored private var targetsRefreshInFlight = false
@@ -75,6 +77,7 @@ final class RecorderModel {
         settings = config.settings
         selectedTargetKey = config.selectedTargetKey
         showNerdLogs = config.showNerdLogs
+        autoOpenAfterRecording = config.autoOpenAfterRecording
 
         Task { await bootstrap() }
     }
@@ -214,6 +217,8 @@ final class RecorderModel {
         guard let target = selectedTarget, canRecord else { return }
         let params = StartRecordingParams(target: target, settings: settings)
         phase = .starting
+        stoppingMenuBarText = nil
+        menuBarText = Self.menuBarText(phase: phase, metrics: metrics)
         Task {
             do {
                 try await daemon.ensure()
@@ -243,13 +248,24 @@ final class RecorderModel {
     ) {
         let previous = self.phase
         self.phase = phase
+        if phase == .stopping {
+            let frozen = Self.menuBarText(phase: .recording, metrics: metrics)
+            stoppingMenuBarText = frozen
+            menuBarText = frozen
+        } else {
+            menuBarText = Self.menuBarText(phase: phase, metrics: metrics)
+        }
         Task {
             do {
                 apply(try await op())
             } catch {
                 // Roll the optimistic phase back so the transport doesn't
                 // stay disabled after a failed pause/resume/stop.
-                if self.phase == phase { self.phase = previous }
+                if self.phase == phase {
+                    self.phase = previous
+                    self.stoppingMenuBarText = nil
+                    self.menuBarText = Self.menuBarText(phase: previous, metrics: self.metrics)
+                }
                 show(toast: "\(error)")
             }
         }
@@ -305,8 +321,12 @@ final class RecorderModel {
             finishSession()
             if let path = job.outputPath {
                 let url = URL(fileURLWithPath: path)
-                lastRecordingDir = url.deletingLastPathComponent()
+                let directory = url.deletingLastPathComponent()
+                lastRecordingDir = directory
                 show(toast: "Saved \(url.lastPathComponent)")
+                if autoOpenAfterRecording {
+                    Platform.open(directory)
+                }
             }
         case .failed:
             finishSession()
@@ -317,13 +337,23 @@ final class RecorderModel {
             finishSession()
         }
 
-        menuBarText = Self.menuBarText(phase: phase, metrics: metrics)
+        if !job.status.isTerminal {
+            if phase == .stopping {
+                if stoppingMenuBarText == nil {
+                    stoppingMenuBarText = Self.menuBarText(phase: .recording, metrics: metrics)
+                }
+                menuBarText = stoppingMenuBarText ?? ""
+            } else {
+                menuBarText = Self.menuBarText(phase: phase, metrics: metrics)
+            }
+        }
     }
 
     private func finishSession() {
         pollTask?.cancel()
         pollTask = nil
         activeJobId = nil
+        stoppingMenuBarText = nil
         phase = .idle
         metrics = nil
         metricsText = ""
@@ -348,11 +378,17 @@ final class RecorderModel {
         persist()
     }
 
+    func setAutoOpenAfterRecording(_ value: Bool) {
+        autoOpenAfterRecording = value
+        persist()
+    }
+
     private func persist() {
         let config = AppConfig(
             settings: settings,
             selectedTargetKey: selectedTargetKey,
-            showNerdLogs: showNerdLogs
+            showNerdLogs: showNerdLogs,
+            autoOpenAfterRecording: autoOpenAfterRecording
         )
         ConfigStore.save(config)
     }
@@ -406,28 +442,21 @@ final class RecorderModel {
 
     private static func format(metrics: RecorderMetrics) -> String {
         let mb = Double(metrics.outputBytes) / 1_000_000
-        var text = String(
-            format: "%d:%02d  %.1f MB  %.1f Mbps",
-            metrics.elapsedSecs / 60, metrics.elapsedSecs % 60,
-            mb, Double(metrics.estimatedBitrateMbps)
-        )
+        var text = String(format: "%.1f MB  %.1f Mbps", mb, Double(metrics.estimatedBitrateMbps))
         if let frames = metrics.frames {
             text += String(format: "  %d f", frames)
-            if let dropped = metrics.droppedFrames, dropped > 0 {
-                text += String(format: "  %d dropped", dropped)
-            }
         }
         return text
     }
 
     private static func menuBarText(phase: RecorderPhase, metrics: RecorderMetrics?) -> String {
         switch phase {
-        case .recording:
+        case .recording, .pausing, .paused, .resuming:
             guard let metrics else { return "REC" }
             return String(
                 format: "%d:%02d", metrics.elapsedSecs / 60, metrics.elapsedSecs % 60)
-        case .paused: return "II"
-        case .starting, .stopping, .pausing, .resuming: return "…"
+        case .stopping: return ""
+        case .starting: return "…"
         default: return ""
         }
     }

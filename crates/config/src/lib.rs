@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub selected_target_key: Option<String>,
     #[serde(default)]
     pub show_nerd_logs: bool,
+    #[serde(default)]
+    pub auto_open_after_recording: bool,
 }
 
 impl AppConfig {
@@ -298,5 +300,6 @@ mod tests {
 
         assert_eq!(config.settings.resolution, Resolution::R1080p);
         assert!(!config.settings.include_microphone);
+        assert!(!config.auto_open_after_recording);
     }
 }

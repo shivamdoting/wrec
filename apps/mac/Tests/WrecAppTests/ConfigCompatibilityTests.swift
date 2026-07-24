@@ -44,6 +44,7 @@ struct ConfigCompatibilityTests {
         #expect(loaded.settings.resolution == .r4k)
         #expect(loaded.selectedTargetKey == "window:42")
         #expect(loaded.showNerdLogs)
+        #expect(!loaded.autoOpenAfterRecording)
         #expect(FileManager.default.fileExists(atPath: current.path))
         #expect(FileManager.default.fileExists(atPath: malformed.path))
         #expect(!FileManager.default.fileExists(atPath: legacy.path))
@@ -81,7 +82,10 @@ struct ConfigCompatibilityTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let current = root.appending(path: "config.json")
         var config = AppConfig(
-            settings: .defaults(), selectedTargetKey: nil, showNerdLogs: false)
+            settings: .defaults(),
+            selectedTargetKey: nil,
+            showNerdLogs: false,
+            autoOpenAfterRecording: true)
 
         for quality in Quality.allCases {
             config.settings.quality = quality
@@ -91,6 +95,7 @@ struct ConfigCompatibilityTests {
 
         let loaded = ConfigStore.load(currentPath: current, legacyPaths: [])
         #expect(loaded.settings.quality == Quality.allCases.last)
+        #expect(loaded.autoOpenAfterRecording)
     }
 
     @Test

@@ -241,17 +241,25 @@ struct AppConfig: Codable, Sendable {
     var settings: RecorderSettings
     var selectedTargetKey: String?
     var showNerdLogs: Bool
+    var autoOpenAfterRecording: Bool
 
     enum CodingKeys: String, CodingKey {
         case settings
         case selectedTargetKey
         case showNerdLogs
+        case autoOpenAfterRecording
     }
 
-    init(settings: RecorderSettings, selectedTargetKey: String?, showNerdLogs: Bool) {
+    init(
+        settings: RecorderSettings,
+        selectedTargetKey: String?,
+        showNerdLogs: Bool,
+        autoOpenAfterRecording: Bool
+    ) {
         self.settings = settings
         self.selectedTargetKey = selectedTargetKey
         self.showNerdLogs = showNerdLogs
+        self.autoOpenAfterRecording = autoOpenAfterRecording
     }
 
     init(from decoder: Decoder) throws {
@@ -259,6 +267,8 @@ struct AppConfig: Codable, Sendable {
         settings = try container.decode(RecorderSettings.self, forKey: .settings)
         selectedTargetKey = try container.decodeIfPresent(String.self, forKey: .selectedTargetKey)
         showNerdLogs = try container.decodeIfPresent(Bool.self, forKey: .showNerdLogs) ?? false
+        autoOpenAfterRecording =
+            try container.decodeIfPresent(Bool.self, forKey: .autoOpenAfterRecording) ?? false
     }
 }
 

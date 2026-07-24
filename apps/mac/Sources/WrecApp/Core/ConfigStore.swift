@@ -107,7 +107,8 @@ enum ConfigStore {
         AppConfig(
             settings: .defaults(),
             selectedTargetKey: nil,
-            showNerdLogs: false
+            showNerdLogs: false,
+            autoOpenAfterRecording: false
         )
     }
 }

@@ -80,6 +80,12 @@ private struct GeneralTab: View {
                     get: { model.showNerdLogs },
                     set: { model.setShowNerdLogs($0) }
                 ))
+            Toggle(
+                "Auto open after recording",
+                isOn: Binding(
+                    get: { model.autoOpenAfterRecording },
+                    set: { model.setAutoOpenAfterRecording($0) }
+                ))
         }
         .formStyle(.grouped)
     }

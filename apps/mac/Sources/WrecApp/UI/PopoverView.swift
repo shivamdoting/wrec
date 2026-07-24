@@ -53,7 +53,24 @@ private struct HeaderRow: View {
             Text("WREC")
                 .font(.pixel(13))
                 .foregroundStyle(Color.primary)
-            Spacer()
+                .fixedSize()
+            Group {
+                if model.showNerdLogs,
+                    model.phase.isActiveSession,
+                    !model.metricsText.isEmpty
+                {
+                    Text(model.metricsText)
+                } else {
+                    Text("")
+                        .accessibilityHidden(true)
+                }
+            }
+            .font(.pixel(13))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .frame(maxWidth: .infinity, alignment: .leading)
             SettingsLink {
                 Image(systemName: "gearshape")
                     .imageScale(.medium)
@@ -101,19 +118,11 @@ private struct TransportSection: View {
     let model: RecorderModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if model.phase.isActiveSession {
-                    PauseButton(model: model)
-                }
-                RecordButton(model: model)
+        HStack(spacing: 8) {
+            if model.phase.isActiveSession {
+                PauseButton(model: model)
             }
-            if model.showNerdLogs, model.phase.isActiveSession, !model.metricsText.isEmpty {
-                Text(model.metricsText)
-                    .font(.pixel(11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+            RecordButton(model: model)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
