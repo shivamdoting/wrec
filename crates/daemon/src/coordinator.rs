@@ -282,7 +282,10 @@ impl<R: RecordingRuntime> Coordinator<R> {
         let job = active_job_mut(&mut state, id)?;
         job.status = JobStatus::Paused;
         job.push_event(EventLevel::Info, "pause requested");
-        Ok(json!({ "job": job.snapshot(None) }))
+        let snapshot = job.snapshot(None);
+        drop(state);
+        notify_job_changed();
+        Ok(json!({ "job": snapshot }))
     }
 
     pub(crate) fn job_resume(state: SharedCoordinator<R>, id: u64) -> Result<Value, AgentError> {
@@ -312,7 +315,10 @@ impl<R: RecordingRuntime> Coordinator<R> {
         let job = active_job_mut(&mut state, id)?;
         job.status = JobStatus::Recording;
         job.push_event(EventLevel::Info, "resume requested");
-        Ok(json!({ "job": job.snapshot(None) }))
+        let snapshot = job.snapshot(None);
+        drop(state);
+        notify_job_changed();
+        Ok(json!({ "job": snapshot }))
     }
 
     pub(crate) fn job_stop(state: SharedCoordinator<R>, id: u64) -> Result<Value, AgentError> {
@@ -326,6 +332,7 @@ impl<R: RecordingRuntime> Coordinator<R> {
             job.mark_finishing();
             control
         };
+        notify_job_changed();
 
         if let Err(err) = lock_control(&control, id)?.stop() {
             let mut state = lock_state(&state)?;
@@ -526,6 +533,7 @@ fn run_job<R: RecordingRuntime>(
             job.mark_recording();
         }
     }
+    notify_job_changed();
 
     let started = Instant::now();
     let mut duration_stop_requested = false;
@@ -598,7 +606,7 @@ fn handle_recorder_event<R: RecordingRuntime>(
         return true;
     }
 
-    match backend_event {
+    let done = match backend_event {
         BackendEvent::Starting { output_path, .. } => {
             job.output_path = Some(output_path.clone());
             job.push_event(
@@ -643,7 +651,12 @@ fn handle_recorder_event<R: RecordingRuntime>(
             }
             true
         }
+    };
+    if done {
+        drop(state);
+        notify_job_changed();
     }
+    done
 }
 
 fn finish_job_failed<R: RecordingRuntime>(
@@ -665,6 +678,8 @@ fn finish_job_failed<R: RecordingRuntime>(
     if state.active_job_id == Some(job_id) {
         state.active_job_id = None;
     }
+    drop(state);
+    notify_job_changed();
 }
 
 /// Recording with the microphone needs mic access before the capture engine
@@ -789,6 +804,16 @@ fn lock_control<E>(control: &Arc<Mutex<E>>, id: u64) -> Result<MutexGuard<'_, E>
 
 fn target_list_lock() -> &'static Mutex<()> {
     TARGET_LIST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// The menu bar app has zero idle polling by design, so it only learns about
+/// jobs it didn't start itself (e.g. a CLI recording) by observing this. No
+/// payload: observers just re-query `wrec jobs`/`job show`, so a stale or
+/// coalesced delivery is harmless.
+const JOB_CHANGED_NOTIFICATION: &str = "app.wrec.job-changed";
+
+fn notify_job_changed() {
+    macos::post_distributed_notification(JOB_CHANGED_NOTIFICATION);
 }
 
 fn job_state_error(

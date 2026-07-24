@@ -13,6 +13,7 @@
 
 import AppKit
 import AVFoundation
+import CoreFoundation
 import Foundation
 import Observation
 
@@ -102,6 +103,11 @@ final class RecorderModel {
     // MARK: - Bootstrap
 
     private func bootstrap() async {
+        // Passive: an observer costs nothing at idle. It's the only way the
+        // app learns about a job it didn't start itself (e.g. from the CLI),
+        // since there is deliberately no idle polling to notice one.
+        observeJobChangedNotifications()
+
         await refreshMicPermission()
         // When granted, this also runs the first target sweep (they're
         // empty at launch) — no second one needed here.
@@ -120,9 +126,35 @@ final class RecorderModel {
         }
     }
 
+    /// The daemon posts this distributed notification (no payload) after
+    /// every job transition. The C callback can't capture `self`, so the
+    /// observer pointer carries it across, and it hops back onto the
+    /// MainActor before touching model state.
+    private func observeJobChangedNotifications() {
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDistributedCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let model = Unmanaged<RecorderModel>.fromOpaque(observer).takeUnretainedValue()
+                Task { @MainActor in
+                    await model.adoptRunningJob()
+                }
+            },
+            Self.jobChangedNotificationName,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    private static let jobChangedNotificationName = "app.wrec.job-changed" as CFString
+
     /// If a daemon is already recording (e.g. started from the CLI, or the
     /// app relaunched mid-session), attach to it instead of pretending idle.
-    private func adoptRunningJob() async {
+    /// A no-op while a job is already known: the poll loop owns it from here,
+    /// and re-adopting would just restart the same poll task.
+    func adoptRunningJob() async {
+        guard activeJobId == nil else { return }
         guard let status = try? await daemon.status(), let jobId = status.activeJobId else { return }
         activeJobId = jobId
         startPolling(jobId)

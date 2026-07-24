@@ -26,11 +26,16 @@ impl RecordingRuntime for MacosRuntime {
 
     fn list_targets(&self) -> Result<Vec<CaptureTarget>, AgentError> {
         let (tx, _rx) = mpsc::channel();
-        MacosRecorder::new(tx).list_targets().map_err(|err| AgentError {
-            code: "target_listing_failed".into(),
-            message: err.to_string(),
-            recoverable: true,
-            next: format!("Run `wrec targets --json` again; if this repeats, check Screen Recording permission and {}.", control::daemon_log_path().display()),
+        MacosRecorder::new(tx).list_targets().map_err(|err| {
+            if matches!(err, RecorderError::MissingScreenRecordingPermission) {
+                warn_screen_recording_permission_missing();
+            }
+            AgentError {
+                code: "target_listing_failed".into(),
+                message: err.to_string(),
+                recoverable: true,
+                next: format!("Run `wrec targets --json` again; if this repeats, check Screen Recording permission and {}.", control::daemon_log_path().display()),
+            }
         })
     }
 
@@ -67,12 +72,15 @@ impl RecordingRuntime for MacosRuntime {
 
 fn permission_error(error: RecorderError) -> AgentError {
     match error {
-        RecorderError::MissingScreenRecordingPermission => AgentError {
-            code: "screen_recording_permission_missing".into(),
-            message: "screen recording permission is not granted".into(),
-            recoverable: true,
-            next: "Grant Screen Recording permission, then retry.".into(),
-        },
+        RecorderError::MissingScreenRecordingPermission => {
+            warn_screen_recording_permission_missing();
+            AgentError {
+                code: "screen_recording_permission_missing".into(),
+                message: "screen recording permission is not granted".into(),
+                recoverable: true,
+                next: "Grant Screen Recording permission, then retry.".into(),
+            }
+        }
         RecorderError::Backend(message) if message.contains("capture-engine") => AgentError {
             code: "capture_engine_missing".into(),
             message: format!("backend error: {message}"),
@@ -86,6 +94,17 @@ fn permission_error(error: RecorderError) -> AgentError {
             next: "Fix the backend error above, then retry the permission check.".into(),
         },
     }
+}
+
+/// Screen Recording TCC is granted to whatever process launched this daemon
+/// (Wrec.app or the terminal running `wrec daemon start`), not to the daemon
+/// binary itself, so a denial here otherwise leaves no trail in daemon.log
+/// pointing anyone at the actual app to go re-approve.
+fn warn_screen_recording_permission_missing() {
+    tracing::warn!(
+        "screen recording permission is not granted; grant it to the app that launched this \
+         daemon (Wrec.app, or the terminal/shell running `wrec`), then retry"
+    );
 }
 
 #[cfg(test)]
