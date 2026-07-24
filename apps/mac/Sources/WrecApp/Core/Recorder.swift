@@ -13,6 +13,7 @@
 
 import AppKit
 import AVFoundation
+import CoreFoundation
 import Foundation
 import Observation
 
@@ -102,6 +103,11 @@ final class RecorderModel {
     // MARK: - Bootstrap
 
     private func bootstrap() async {
+        // Passive: an observer costs nothing at idle. It's the only way the
+        // app learns about a job it didn't start itself (e.g. from the CLI),
+        // since there is deliberately no idle polling to notice one.
+        observeJobChangedNotifications()
+
         await refreshMicPermission()
         // When granted, this also runs the first target sweep (they're
         // empty at launch) — no second one needed here.
@@ -120,10 +126,62 @@ final class RecorderModel {
         }
     }
 
+    /// The daemon posts this distributed notification (no payload) after
+    /// every job transition. The C callback can't capture `self`, so the
+    /// observer pointer carries it across, and it hops back onto the
+    /// MainActor before touching model state.
+    private func observeJobChangedNotifications() {
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDistributedCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let model = Unmanaged<RecorderModel>.fromOpaque(observer).takeUnretainedValue()
+                Task { @MainActor in
+                    await model.adoptRunningJob()
+                }
+            },
+            Self.jobChangedNotificationName as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    // A plain String so the nonisolated deinit can reach it too.
+    private nonisolated static let jobChangedNotificationName = "app.wrec.job-changed"
+
+    /// The production model lives for the whole process, but anything that
+    /// creates a short-lived instance (tests) must not leave the center
+    /// holding a dangling observer pointer.
+    deinit {
+        CFNotificationCenterRemoveObserver(
+            CFNotificationCenterGetDistributedCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            CFNotificationName(Self.jobChangedNotificationName as CFString),
+            nil
+        )
+    }
+
     /// If a daemon is already recording (e.g. started from the CLI, or the
     /// app relaunched mid-session), attach to it instead of pretending idle.
-    private func adoptRunningJob() async {
+    /// Keyed on the daemon's job id, not just "is one tracked": back-to-back
+    /// CLI recordings can start a new job before the old job's poll loop has
+    /// seen its terminal snapshot, and a guard on the stale id would drop the
+    /// new job's only notification. Same-id deliveries stay no-ops.
+    func adoptRunningJob() async {
         guard let status = try? await daemon.status(), let jobId = status.activeJobId else { return }
+        guard jobId != activeJobId else { return }
+        if let outgoing = activeJobId {
+            // Hand the session over; the old poll loop would otherwise keep
+            // painting a dead job's timer over the new one's. Its terminal
+            // snapshot still owes the user the Saved toast (and auto-open),
+            // so deliver that before tearing the session down.
+            if let final = try? await daemon.showJob(outgoing), final.status.isTerminal {
+                apply(final)
+            } else {
+                finishSession()
+            }
+        }
         activeJobId = jobId
         startPolling(jobId)
     }

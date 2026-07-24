@@ -39,6 +39,9 @@ struct PopoverView: View {
                 await model.refreshScreenPermission(requestIfNeeded: false)
             }
             await model.refreshTargetsIfStale()
+            // Belt-and-suspenders alongside the distributed-notification
+            // observer: a no-op whenever a job is already known.
+            await model.adoptRunningJob()
         }
     }
 }

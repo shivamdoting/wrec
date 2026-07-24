@@ -53,6 +53,14 @@ pub fn open_microphone_privacy_settings() -> Result<()> {
     platform::open_microphone_privacy_settings()
 }
 
+/// Tells any listening app (the menu bar UI, if one is running) that a job's
+/// status changed, so it can re-query the daemon instead of polling at idle.
+/// Fire-and-forget: nothing distinguishes "no listener" from "delivery
+/// failed", and the daemon's job logic must never depend on this succeeding.
+pub fn post_distributed_notification(name: &str) {
+    platform::post_distributed_notification(name);
+}
+
 impl RecorderEngine for MacosRecorder {
     fn list_targets(&self) -> Result<Vec<CaptureTarget>> {
         platform::list_targets()
@@ -273,6 +281,21 @@ mod platform {
             )));
         }
         Ok(())
+    }
+
+    pub fn post_distributed_notification(name: &str) {
+        use objc2_core_foundation::{CFNotificationCenter, CFString};
+
+        let Some(center) = CFNotificationCenter::distributed_center() else {
+            return;
+        };
+        let name = CFString::from_str(name);
+        // SAFETY: `name` is a live CFString, `object` and `user_info` are
+        // both `None`/null (observers just re-query the daemon), and
+        // `deliver_immediately` needs no suspension-behavior bookkeeping.
+        unsafe {
+            center.post_notification(Some(&*name), std::ptr::null(), None, true);
+        }
     }
 
     pub fn list_targets() -> Result<Vec<CaptureTarget>> {
@@ -1044,6 +1067,8 @@ mod platform {
     pub fn open_microphone_privacy_settings() -> Result<()> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))
     }
+
+    pub fn post_distributed_notification(_name: &str) {}
 
     pub fn list_targets() -> Result<Vec<CaptureTarget>> {
         Err(RecorderError::Backend("wrec only supports macOS".into()))
