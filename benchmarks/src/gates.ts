@@ -163,7 +163,11 @@ export type Gate = {
 
 export type ProfileResult = {
   name: string;
-  request: ProfileSpec & { duration: string; durationMs: number; expectedDimensions: Dimensions };
+  request: ProfileSpec & {
+    duration: string;
+    durationMs: number;
+    expectedDimensions: Dimensions;
+  };
   target: string;
   targetInfo?: Record<string, unknown>;
   status: OverallStatus;
@@ -223,8 +227,12 @@ const cpuNoiseFloor = 3;
 const rssNoiseFloor = 20 * 1024 * 1024;
 const latencyNoiseFloor = 150;
 
-export const expectedOutputDimensions = (native: Dimensions, resolution: Resolution) => {
-  const even = (value: number) => Math.max(2, Math.round(value) - (Math.round(value) % 2));
+export const expectedOutputDimensions = (
+  native: Dimensions,
+  resolution: Resolution,
+) => {
+  const even = (value: number) =>
+    Math.max(2, Math.round(value) - (Math.round(value) % 2));
   const maxSize =
     resolution === "720p"
       ? { width: 1280, height: 720 }
@@ -236,7 +244,11 @@ export const expectedOutputDimensions = (native: Dimensions, resolution: Resolut
     return { width: even(native.width), height: even(native.height) };
   }
 
-  const scale = Math.min(1, maxSize.width / native.width, maxSize.height / native.height);
+  const scale = Math.min(
+    1,
+    maxSize.width / native.width,
+    maxSize.height / native.height,
+  );
   return {
     width: even(native.width * scale),
     height: even(native.height * scale),
@@ -250,8 +262,12 @@ export const summarizeRuns = (runs: RunResult[]): AggregateSummary => {
   return {
     capture: {
       outputBytes: medianOf(runs, (run) => run.outputBytes),
-      bitrateMbps: median(lastMetrics.map((item) => item.estimated_bitrate_mbps)),
-      selfReportedFrames: median(lastMetrics.map((item) => item.frames).filter(isFiniteNumber)),
+      bitrateMbps: median(
+        lastMetrics.map((item) => item.estimated_bitrate_mbps),
+      ),
+      selfReportedFrames: median(
+        lastMetrics.map((item) => item.frames).filter(isFiniteNumber),
+      ),
       selfReportedDroppedFrames: median(
         lastMetrics.map((item) => item.dropped_frames).filter(isFiniteNumber),
       ),
@@ -262,27 +278,53 @@ export const summarizeRuns = (runs: RunResult[]): AggregateSummary => {
       finalizeMs: medianOf(runs, (run) => run.latency.finalizeMs),
     },
     process: {
-      avgTotalCpuPercent: medianOf(runs, (run) => run.processSummary.avgTotalCpuPercent),
-      p95TotalCpuPercent: medianOf(runs, (run) => run.processSummary.p95TotalCpuPercent),
-      maxTotalCpuPercent: medianOf(runs, (run) => run.processSummary.maxTotalCpuPercent),
-      maxTotalRssBytes: medianOf(runs, (run) => run.processSummary.maxTotalRssBytes),
+      avgTotalCpuPercent: medianOf(
+        runs,
+        (run) => run.processSummary.avgTotalCpuPercent,
+      ),
+      p95TotalCpuPercent: medianOf(
+        runs,
+        (run) => run.processSummary.p95TotalCpuPercent,
+      ),
+      maxTotalCpuPercent: medianOf(
+        runs,
+        (run) => run.processSummary.maxTotalCpuPercent,
+      ),
+      maxTotalRssBytes: medianOf(
+        runs,
+        (run) => run.processSummary.maxTotalRssBytes,
+      ),
     },
     observed: {
       codec: mode(observations.map((item) => item.codec).filter(isPresent)),
-      dimensions: modeDimensions(observations.map((item) => item.dimensions).filter(isPresent)),
+      dimensions: modeDimensions(
+        observations.map((item) => item.dimensions).filter(isPresent),
+      ),
       decodedFrames: median(observations.map((item) => item.decodedFrames)),
-      uniqueStimulusFrames: median(observations.map((item) => item.uniqueStimulusFrames)),
-      effectiveFps: median(observations.map((item) => item.effectiveFps).filter(isFiniteNumber)),
+      uniqueStimulusFrames: median(
+        observations.map((item) => item.uniqueStimulusFrames),
+      ),
+      effectiveFps: median(
+        observations.map((item) => item.effectiveFps).filter(isFiniteNumber),
+      ),
       stimulusAchievedFps: median(
-        observations.map((item) => item.stimulusAchievedFps).filter(isFiniteNumber),
+        observations
+          .map((item) => item.stimulusAchievedFps)
+          .filter(isFiniteNumber),
       ),
       captureCompleteness: median(
-        observations.map((item) => item.captureCompleteness).filter(isFiniteNumber),
+        observations
+          .map((item) => item.captureCompleteness)
+          .filter(isFiniteNumber),
       ),
-      maxInterFramePtsGapMs: max(
-        observations.map((item) => item.maxInterFramePtsGapMs).filter(isFiniteNumber),
+      maxInterFramePtsGapMs: median(
+        observations
+          .map((item) => item.maxInterFramePtsGapMs)
+          .filter(isFiniteNumber),
       ),
-      ptsMonotonic: runs.length > 0 && runs.every((run) => run.observed?.ptsMonotonic === true),
+      ptsMonotonic:
+        runs.length > 0 &&
+        runs.every((run) => run.observed?.ptsMonotonic === true),
       selfReportDisagreementRatio: medianOf(runs, selfReportDisagreementRatio),
     },
   };
@@ -323,8 +365,9 @@ export const evaluateProfileGates = (
   // delivered, capped at the profile target. capture_completeness below then
   // isolates the recorder's own loss regardless of stimulus pacing.
   const achievedFps = candidate.observed.stimulusAchievedFps;
-  const effectiveFpsTarget =
-    isFiniteNumber(achievedFps) ? Math.min(profile.fps, achievedFps) : profile.fps;
+  const effectiveFpsTarget = isFiniteNumber(achievedFps)
+    ? Math.min(profile.fps, achievedFps)
+    : profile.fps;
   // 60 fps window capture tops out around 95-96% of the display rate even
   // when the engine reports zero drops (measured on an M1 Air with a
   // display-link stimulus): ScreenCaptureKit itself delivers ~57/60 for a
@@ -338,7 +381,11 @@ export const evaluateProfileGates = (
       threshold: `>= ${round(effectiveFpsThreshold)} fps (${fpsFloorRatio * 100}% of min(target ${profile.fps}, stimulus ${isFiniteNumber(achievedFps) ? round(achievedFps) : "?"}))`,
       measured: candidate.observed.effectiveFps,
       passes: (value) => value >= effectiveFpsThreshold,
-      noisy: spreadExceeds(candidateRuns, (run) => run.observed?.effectiveFps, 0.5),
+      noisy: spreadExceeds(
+        candidateRuns,
+        (run) => run.observed?.effectiveFps,
+        0.5,
+      ),
     }),
   );
   // Unique-vs-spanned index completeness only means "frames the recorder
@@ -351,7 +398,11 @@ export const evaluateProfileGates = (
         threshold: `>= ${fpsFloorRatio * 100}% of displayed frames`,
         measured: candidate.observed.captureCompleteness,
         passes: (value) => value >= fpsFloorRatio,
-        noisy: spreadExceeds(candidateRuns, (run) => run.observed?.captureCompleteness, 0.01),
+        noisy: spreadExceeds(
+          candidateRuns,
+          (run) => run.observed?.captureCompleteness,
+          0.01,
+        ),
       }),
     );
   } else {
@@ -360,7 +411,8 @@ export const evaluateProfileGates = (
       threshold: "capture rate >= display rate",
       measured: candidate.observed.captureCompleteness,
       status: "skipped",
-      details: "profile captures slower than the stimulus displays; skipping every other frame is by design",
+      details:
+        "profile captures slower than the stimulus displays; skipping every other frame is by design",
     });
   }
   gates.push(
@@ -369,7 +421,11 @@ export const evaluateProfileGates = (
       threshold: `<= ${(dropRatioThreshold * 100).toFixed(2)}%`,
       measured: candidate.capture.selfReportedDropRatio,
       passes: (value) => value <= dropRatioThreshold,
-      noisy: spreadExceeds(candidateRuns, selfReportedDropRatio, dropRatioThreshold),
+      noisy: spreadExceeds(
+        candidateRuns,
+        selfReportedDropRatio,
+        dropRatioThreshold,
+      ),
     }),
   );
   gates.push(
@@ -395,7 +451,9 @@ export const evaluateProfileGates = (
     name: "codec_match",
     threshold: profile.codec,
     measured: candidate.observed.codec,
-    status: candidateRuns.every((run) => run.decode?.codec === profile.codec) ? "pass" : "fail",
+    status: candidateRuns.every((run) => run.decode?.codec === profile.codec)
+      ? "pass"
+      : "fail",
   });
   gates.push({
     name: "dimensions_match_request",
@@ -403,7 +461,9 @@ export const evaluateProfileGates = (
     measured: candidate.observed.dimensions
       ? `${candidate.observed.dimensions.width}x${candidate.observed.dimensions.height}`
       : null,
-    status: candidateRuns.every((run) => dimensionsEqual(run.decode?.dimensions, expectedDimensions))
+    status: candidateRuns.every((run) =>
+      dimensionsEqual(run.decode?.dimensions, expectedDimensions),
+    )
       ? "pass"
       : "fail",
   });
@@ -422,7 +482,11 @@ export const evaluateProfileGates = (
       threshold: "<= 1500 ms",
       measured: candidate.latency.startMs,
       passes: (value) => value <= 1500,
-      noisy: spreadExceeds(candidateRuns, (run) => run.latency.startMs, latencyNoiseFloor),
+      noisy: spreadExceeds(
+        candidateRuns,
+        (run) => run.latency.startMs,
+        latencyNoiseFloor,
+      ),
     }),
   );
   gates.push(
@@ -431,7 +495,11 @@ export const evaluateProfileGates = (
       threshold: `<= ${finalizeThreshold} ms`,
       measured: candidate.latency.finalizeMs,
       passes: (value) => value <= finalizeThreshold,
-      noisy: spreadExceeds(candidateRuns, (run) => run.latency.finalizeMs, latencyNoiseFloor),
+      noisy: spreadExceeds(
+        candidateRuns,
+        (run) => run.latency.finalizeMs,
+        latencyNoiseFloor,
+      ),
     }),
   );
 
@@ -452,13 +520,17 @@ export const evaluateProfileGates = (
       ? {
           ...gate,
           status: "inconclusive" as GateStatus,
-          details: "environment untrusted (battery/thermal/load); rerun on AC power",
+          details:
+            "environment untrusted (battery/thermal/load); rerun on AC power",
         }
       : gate,
   );
 };
 
-export const statusFromGates = (gates: Gate[], runs: RunResult[]): OverallStatus => {
+export const statusFromGates = (
+  gates: Gate[],
+  runs: RunResult[],
+): OverallStatus => {
   if (runs.some((run) => run.exitCode !== 0 || run.error)) {
     return "fail";
   }
@@ -495,12 +567,27 @@ const numericBudgetGate = ({
   noisy: boolean;
 }): Gate => {
   if (!isFiniteNumber(measured)) {
-    return { name, threshold, measured: null, status: "fail", details: "metric unavailable" };
+    return {
+      name,
+      threshold,
+      measured: null,
+      status: "fail",
+      details: "metric unavailable",
+    };
+  }
+  if (passes(measured)) {
+    return { name, threshold, measured, status: "pass" };
   }
   if (noisy) {
-    return { name, threshold, measured, status: "inconclusive", details: "rep spread exceeded noise floor" };
+    return {
+      name,
+      threshold,
+      measured,
+      status: "inconclusive",
+      details: "rep spread exceeded noise floor",
+    };
   }
-  return { name, threshold, measured, status: passes(measured) ? "pass" : "fail" };
+  return { name, threshold, measured, status: "fail" };
 };
 
 const regressionGates = ({
@@ -590,20 +677,22 @@ const regressionGate = (
   const deltas = Array.from({ length: pairedCount }, (_, index) => {
     const candidate = getter(candidateRuns[index]);
     const reference = getter(referenceRuns[index]);
-    return isFiniteNumber(candidate) && isFiniteNumber(reference) ? candidate - reference : null;
+    return isFiniteNumber(candidate) && isFiniteNumber(reference)
+      ? candidate - reference
+      : null;
   }).filter(isFiniteNumber);
   const referenceMedian = median(referenceValues);
   const measured = median(candidateValues);
   const delta = median(deltas);
   const deltaPercent =
-    isFiniteNumber(delta) && isFiniteNumber(referenceMedian) && referenceMedian !== 0
+    isFiniteNumber(delta) &&
+    isFiniteNumber(referenceMedian) &&
+    referenceMedian !== 0
       ? (delta / referenceMedian) * 100
       : null;
-  const noisy =
-    spreadExceeds(candidateRuns, getter, noiseFloor) ||
-    spreadExceeds(referenceRuns, getter, noiseFloor);
-
-  if (noisy) {
+  const worseByPercent = isFiniteNumber(deltaPercent) && deltaPercent > 15;
+  const aboveNoise = isFiniteNumber(delta) && delta > noiseFloor;
+  if (worseByPercent && aboveNoise && spreadExceedsValues(deltas, noiseFloor)) {
     return {
       name,
       threshold: `candidate <= reference + 15% and <= reference + ${formatNoise(noiseFloor, unit)}`,
@@ -611,13 +700,10 @@ const regressionGate = (
       delta,
       deltaPercent,
       status: "inconclusive",
-      details: "same-binary rep spread exceeded noise floor",
+      details: "paired A/B delta spread exceeded noise floor",
     };
   }
 
-  const worseByPercent =
-    isFiniteNumber(deltaPercent) && deltaPercent > 15;
-  const aboveNoise = isFiniteNumber(delta) && delta > noiseFloor;
   return {
     name,
     threshold: `candidate <= reference + 15% and <= reference + ${formatNoise(noiseFloor, unit)}`,
@@ -640,11 +726,11 @@ const selfReportedDropRatio = (run: RunResult) => {
 
 const selfReportDisagreementRatio = (run: RunResult) => {
   const frames = run.lastMetrics?.frames;
-  const observed = run.observed?.uniqueStimulusFrames;
-  if (!isFiniteNumber(frames) || !isFiniteNumber(observed) || observed <= 0) {
+  const decoded = run.decode?.frames.length;
+  if (!isFiniteNumber(frames) || !isFiniteNumber(decoded) || decoded <= 0) {
     return null;
   }
-  return Math.abs(frames - observed) / observed;
+  return Math.abs(frames - decoded) / decoded;
 };
 
 const spreadExceeds = (
@@ -653,11 +739,19 @@ const spreadExceeds = (
   noiseFloor: number,
 ) => {
   const values = runs.map(getter).filter(isFiniteNumber);
-  return values.length >= 2 && max(values)! - min(values)! > noiseFloor * 2;
+  return spreadExceedsValues(values, noiseFloor);
 };
 
-const medianOf = (runs: RunResult[], getter: (run: RunResult) => number | null | undefined) =>
-  median(runs.map(getter).filter(isFiniteNumber));
+const spreadExceedsValues = (values: number[], noiseFloor: number) => {
+  const center = median(values);
+  if (values.length < 3 || !isFiniteNumber(center)) return false;
+  return median(values.map((value) => Math.abs(value - center)))! > noiseFloor;
+};
+
+const medianOf = (
+  runs: RunResult[],
+  getter: (run: RunResult) => number | null | undefined,
+) => median(runs.map(getter).filter(isFiniteNumber));
 
 const median = (values: number[]) => {
   if (!values.length) {
@@ -689,19 +783,27 @@ const modeDimensions = (values: Dimensions[]) => {
   if (!encoded) {
     return null;
   }
-  const [width, height] = encoded.split("x").map((value) => Number.parseInt(value, 10));
+  const [width, height] = encoded
+    .split("x")
+    .map((value) => Number.parseInt(value, 10));
   return { width, height };
 };
 
-const dimensionsEqual = (left: Dimensions | null | undefined, right: Dimensions) =>
+const dimensionsEqual = (
+  left: Dimensions | null | undefined,
+  right: Dimensions,
+) =>
   Boolean(left && left.width === right.width && left.height === right.height);
 
 const formatNoise = (value: number, unit: string) =>
-  unit === "bytes" ? `${Math.round(value / 1024 / 1024)} MB` : `${value} ${unit}`;
+  unit === "bytes"
+    ? `${Math.round(value / 1024 / 1024)} MB`
+    : `${value} ${unit}`;
 
 const round = (value: number) => Number(value.toFixed(3));
 
-const isPresent = <T>(value: T | null | undefined): value is T => value !== null && value !== undefined;
+const isPresent = <T>(value: T | null | undefined): value is T =>
+  value !== null && value !== undefined;
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);

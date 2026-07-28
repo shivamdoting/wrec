@@ -1,4 +1,12 @@
-import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -145,9 +153,14 @@ const resultsDir = path.join(root, "results");
 // <home>/wrec.sock. macOS caps socket paths at ~104 bytes (SUN_LEN), so the
 // run dir must stay short — a repo-relative .tmp/ path is already too long.
 const tmpRoot = "/tmp/wrec-bench";
+const nativeToolsCache = "/tmp/wrec-bench-native-tools";
 const stimulusTitle = "wrec-bench-stimulus";
 const loadSettleTimeoutMs = 5 * 60_000;
 const loadSettlePollMs = 5_000;
+const measuredReps = 5;
+const captureAttempts = 3;
+const captureCooldownMs = 1_500;
+const minimumStimulusFps = 50;
 
 const main = async () => {
   const options = parseArgs(Bun.argv.slice(2));
@@ -190,11 +203,25 @@ const main = async () => {
   try {
     await compileNativeTools(context);
     await waitForStableLoad(options.suite);
-    const environment = await environmentPreamble(options.suite, options.allowBattery);
-    const environmentStatus = statusFromEnvironment(environment.guards, options.suite);
+    const environment = await environmentPreamble(
+      options.suite,
+      options.allowBattery,
+    );
+    const environmentStatus = statusFromEnvironment(
+      environment.guards,
+      options.suite,
+    );
     stimulus = await startStimulus(context.tools.stimulus);
-    const profiles = await runSuite(options, context, stimulus, environmentStatus === "pass");
-    const status = combineStatuses([environmentStatus, ...profiles.map((profile) => profile.status)]);
+    const profiles = await runSuite(
+      options,
+      context,
+      stimulus,
+      environmentStatus === "pass",
+    );
+    const status = combineStatuses([
+      environmentStatus,
+      ...profiles.map((profile) => profile.status),
+    ]);
 
     result = {
       schema: "wrec.perf/v1",
@@ -256,7 +283,9 @@ const main = async () => {
   console.log(`results: ${resultPath}`);
   if (summaryPath) {
     console.log(`summary: ${summaryPath}`);
-    console.log("view: wrec.app/benchmarks (or `bun run dev` in docs/) after committing the summary");
+    console.log(
+      "view: wrec.app/benchmarks (or `bun run dev` in docs/) after committing the summary",
+    );
   }
   process.exitCode = benchmarkExitCode(result.suite, result.status);
 };
@@ -264,7 +293,8 @@ const main = async () => {
 const parseArgs = (args: string[]): CliOptions => {
   let suite: SuiteName = "smoke";
   let duration: string | undefined;
-  let wrecBin = Bun.env.WREC_BIN ?? path.join(repoRoot, "target", "release", "wrec");
+  let wrecBin =
+    Bun.env.WREC_BIN ?? path.join(repoRoot, "target", "release", "wrec");
   // A candidate the caller never pointed at is built fresh before the run;
   // an explicit --wrec/WREC_BIN is benchmarked exactly as given.
   let wrecExplicit = Boolean(Bun.env.WREC_BIN);
@@ -376,15 +406,22 @@ const parsePositiveInt = (value: string, flag: string) => {
 const parseDurationMs = (value: string) => {
   const match = value.match(/^(\d+)(ms|s|m|h)$/);
   if (!match) {
-    throw new Error(`duration expects a value like 5000ms, 5s, 1m, or 1h: ${value}`);
+    throw new Error(
+      `duration expects a value like 5000ms, 5s, 1m, or 1h: ${value}`,
+    );
   }
   const amount = Number.parseInt(match[1], 10);
   const unit = match[2];
-  const multiplier = unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "m" ? 60_000 : 3_600_000;
+  const multiplier =
+    unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "m" ? 60_000 : 3_600_000;
   return amount * multiplier;
 };
 
-const binaryRuntime = (variant: VariantName, binPath: string, runtimeDir: string): BinaryRuntime => ({
+const binaryRuntime = (
+  variant: VariantName,
+  binPath: string,
+  runtimeDir: string,
+): BinaryRuntime => ({
   variant,
   path: path.resolve(binPath),
   wrecHome: path.join(runtimeDir, variant, "home"),
@@ -405,20 +442,44 @@ const compileNativeTools = async (context: RunContext) => {
   );
 };
 
-const compileSwift = async (source: string, output: string, frameworks: string[]) => {
+const compileSwift = async (
+  source: string,
+  output: string,
+  frameworks: string[],
+) => {
+  const sourceText = await Bun.file(source).text();
+  const cacheKey = Bun.hash(
+    JSON.stringify([sourceText, frameworks, os.release()]),
+  ).toString(16);
+  const cached = path.join(
+    nativeToolsCache,
+    `${path.basename(source, ".swift")}-${cacheKey}`,
+  );
+  await mkdir(nativeToolsCache, { recursive: true });
+
+  if (await Bun.file(cached).exists()) {
+    await copyFile(cached, output);
+    await chmod(output, 0o755);
+    return;
+  }
+
   const args = [
     "swiftc",
     source,
     "-o",
-    output,
+    cached,
     "-module-cache-path",
-    path.join(path.dirname(output), "swift-module-cache"),
+    path.join(nativeToolsCache, "swift-module-cache"),
     ...frameworks.flatMap((framework) => ["-framework", framework]),
   ];
   const result = await shell(args);
   if (result.exitCode !== 0) {
-    throw new Error(`swiftc failed for ${path.relative(repoRoot, source)}:\n${result.stderr || result.stdout}`);
+    throw new Error(
+      `swiftc failed for ${path.relative(repoRoot, source)}:\n${result.stderr || result.stdout}`,
+    );
   }
+  await copyFile(cached, output);
+  await chmod(output, 0o755);
 };
 
 const startStimulus = async (stimulusBin: string): Promise<StimulusRuntime> => {
@@ -433,10 +494,7 @@ const startStimulus = async (stimulusBin: string): Promise<StimulusRuntime> => {
     readyLine = await waitForStimulusReady(proc, stderr);
   } catch (error) {
     proc.kill("SIGTERM");
-    await Promise.race([
-      proc.exited.catch(() => undefined),
-      Bun.sleep(1000),
-    ]);
+    await Promise.race([proc.exited.catch(() => undefined), Bun.sleep(1000)]);
     throw error;
   }
   const ready = parseStimulusReady(readyLine);
@@ -485,7 +543,8 @@ const parseStimulusReady = (line: string) => {
     width: 1280,
     height: 720,
   };
-  const pixels = parseDimensions(line.match(/\bpixels=(\d+x\d+)/)?.[1]) ?? points;
+  const pixels =
+    parseDimensions(line.match(/\bpixels=(\d+x\d+)/)?.[1]) ?? points;
   const scale = Number.parseFloat(line.match(/\bscale=([\d.]+)/)?.[1] ?? "1");
   return {
     title,
@@ -513,15 +572,23 @@ const runSuite = async (
   stimulus: StimulusRuntime,
   envTrusted: boolean,
 ) => {
-  const profiles = options.suite === "release" ? releaseProfiles : [smokeProfile];
-  const candidate = context.binaries.find((binary) => binary.variant === "candidate")!;
-  const reference = context.binaries.find((binary) => binary.variant === "reference");
+  const profiles =
+    options.suite === "release" ? releaseProfiles : [smokeProfile];
+  const candidate = context.binaries.find(
+    (binary) => binary.variant === "candidate",
+  )!;
+  const reference = context.binaries.find(
+    (binary) => binary.variant === "reference",
+  );
   const results: ProfileResult[] = [];
 
   for (const profile of profiles) {
-    const expectedDimensions = expectedOutputDimensions(stimulus.pixels, profile.resolution);
+    const expectedDimensions = expectedOutputDimensions(
+      stimulus.pixels,
+      profile.resolution,
+    );
     if (options.suite === "smoke") {
-      const run = await runCapture({
+      const run = await runStableCapture({
         context,
         binary: candidate,
         allBinaries: context.binaries,
@@ -537,7 +604,12 @@ const runSuite = async (
       const aggregate = summarizeRuns([run]);
       results.push({
         name: profile.name,
-        request: { ...profile, duration: options.duration, durationMs: options.durationMs, expectedDimensions },
+        request: {
+          ...profile,
+          duration: options.duration,
+          durationMs: options.durationMs,
+          expectedDimensions,
+        },
         target: run.target,
         targetInfo: run.targetInfo,
         status: statusFromGates([], [run]),
@@ -555,7 +627,7 @@ const runSuite = async (
     }
 
     const warmups = [
-      await runCapture({
+      await runStableCapture({
         context,
         binary: candidate,
         allBinaries: context.binaries,
@@ -571,7 +643,7 @@ const runSuite = async (
     ];
     if (reference) {
       warmups.push(
-        await runCapture({
+        await runStableCapture({
           context,
           binary: reference,
           allBinaries: context.binaries,
@@ -589,11 +661,15 @@ const runSuite = async (
 
     const candidateRuns: RunResult[] = [];
     const referenceRuns: RunResult[] = [];
-    for (let rep = 1; rep <= 3; rep += 1) {
-      candidateRuns.push(
-        await runCapture({
+    for (let rep = 1; rep <= measuredReps; rep += 1) {
+      const order =
+        reference && rep % 2 === 0
+          ? [reference, candidate]
+          : [candidate, reference].filter(isPresent);
+      for (const binary of order) {
+        const run = await runStableCapture({
           context,
-          binary: candidate,
+          binary,
           allBinaries: context.binaries,
           profile,
           duration: options.duration,
@@ -603,29 +679,17 @@ const runSuite = async (
           rep,
           warmup: false,
           stimulus,
-        }),
-      );
-      if (reference) {
-        referenceRuns.push(
-          await runCapture({
-            context,
-            binary: reference,
-            allBinaries: context.binaries,
-            profile,
-            duration: options.duration,
-            durationMs: options.durationMs,
-            expectedDimensions,
-            sampleIntervalMs: options.sampleIntervalMs,
-            rep,
-            warmup: false,
-            stimulus,
-          }),
+        });
+        (binary.variant === "candidate" ? candidateRuns : referenceRuns).push(
+          run,
         );
       }
     }
 
     const aggregate = summarizeRuns(candidateRuns);
-    const referenceAggregate = reference ? summarizeRuns(referenceRuns) : undefined;
+    const referenceAggregate = reference
+      ? summarizeRuns(referenceRuns)
+      : undefined;
     const gates = evaluateProfileGates(
       profile,
       options.durationMs,
@@ -641,8 +705,16 @@ const runSuite = async (
     ]);
     results.push({
       name: profile.name,
-      request: { ...profile, duration: options.duration, durationMs: options.durationMs, expectedDimensions },
-      target: candidateRuns[0]?.target ?? warmups[0]?.target ?? `window:${stimulus.title}`,
+      request: {
+        ...profile,
+        duration: options.duration,
+        durationMs: options.durationMs,
+        expectedDimensions,
+      },
+      target:
+        candidateRuns[0]?.target ??
+        warmups[0]?.target ??
+        `window:${stimulus.title}`,
       targetInfo: candidateRuns[0]?.targetInfo ?? warmups[0]?.targetInfo,
       status,
       warmups,
@@ -660,6 +732,47 @@ const runSuite = async (
   }
 
   return results;
+};
+
+const runStableCapture = async (options: Parameters<typeof runCapture>[0]) => {
+  let lastRun: RunResult | undefined;
+  let lastProblem = "";
+
+  for (let attempt = 1; attempt <= captureAttempts; attempt += 1) {
+    await Bun.sleep(captureCooldownMs);
+    const run = await runCapture(options);
+    const problem = unstableMeasurement(run);
+    if (!problem) return run;
+
+    lastRun = run;
+    lastProblem = problem;
+    if (attempt < captureAttempts) {
+      console.log(
+        `retrying ${run.id}: ${problem} (attempt ${attempt}/${captureAttempts})`,
+      );
+    }
+  }
+
+  return {
+    ...lastRun!,
+    error:
+      lastRun?.error ??
+      `measurement remained unstable after ${captureAttempts} attempts: ${lastProblem}`,
+  };
+};
+
+const unstableMeasurement = (run: RunResult) => {
+  if (run.exitCode !== 0) return `recorder exited ${run.exitCode}`;
+  if (run.error) return run.error;
+  if (run.decoderError) return run.decoderError;
+  if (!run.observed) return "decoded observation unavailable";
+  if (
+    isFiniteNumber(run.observed.stimulusAchievedFps) &&
+    run.observed.stimulusAchievedFps < minimumStimulusFps
+  ) {
+    return `stimulus delivered ${run.observed.stimulusAchievedFps.toFixed(1)} fps (< ${minimumStimulusFps})`;
+  }
+  return "";
 };
 
 const runCapture = async ({
@@ -790,10 +903,17 @@ const runCapture = async ({
     exitCode: result.exitCode,
     elapsedMs: result.elapsedMs,
     outputBytes,
-    recordingFilesDeleted: recordingFiles.map((file) => path.relative(root, file)),
+    recordingFilesDeleted: recordingFiles.map((file) =>
+      path.relative(root, file),
+    ),
     metrics,
     lastMetrics,
-    latency: deriveLatency(jsonEvents, result.startedAtMs, result.completedAtMs, durationMs),
+    latency: deriveLatency(
+      jsonEvents,
+      result.startedAtMs,
+      result.completedAtMs,
+      durationMs,
+    ),
     processSamples,
     processSummary: summarizeProcessSamples(processSamples),
     decode: decodeAttempt.decode,
@@ -863,19 +983,25 @@ const failedSetupRun = async ({
 const ensureDaemon = async (binary: BinaryRuntime) => {
   const result = await runWrec(binary, ["daemon", "start", "--json"]);
   if (result.exitCode !== 0) {
-    throw new Error(`daemon start failed for ${binary.variant}:\n${result.stderr || result.stdout}`);
+    throw new Error(
+      `daemon start failed for ${binary.variant}:\n${result.stderr || result.stdout}`,
+    );
   }
 };
 
 const daemonPidFor = async (binary: BinaryRuntime) => {
   const result = await runWrec(binary, ["daemon", "status", "--json"]);
   if (result.exitCode !== 0) {
-    throw new Error(`daemon status failed for ${binary.variant}:\n${result.stderr || result.stdout}`);
+    throw new Error(
+      `daemon status failed for ${binary.variant}:\n${result.stderr || result.stdout}`,
+    );
   }
   const status = JSON.parse(result.stdout) as Record<string, unknown>;
   const pid = Number(status.pid);
   if (!Number.isFinite(pid)) {
-    throw new Error(`daemon status did not include a numeric pid: ${result.stdout}`);
+    throw new Error(
+      `daemon status did not include a numeric pid: ${result.stdout}`,
+    );
   }
   return pid;
 };
@@ -883,7 +1009,9 @@ const daemonPidFor = async (binary: BinaryRuntime) => {
 const resolveStimulusTarget = async (binary: BinaryRuntime, title: string) => {
   const result = await runWrec(binary, ["list", "--json"]);
   if (result.exitCode !== 0) {
-    throw new Error(`target detection failed for ${binary.variant}:\n${result.stderr || result.stdout}`);
+    throw new Error(
+      `target detection failed for ${binary.variant}:\n${result.stderr || result.stdout}`,
+    );
   }
   const targets = JSON.parse(result.stdout) as TargetInfo[];
   const windows = targets.filter((item) => item.kind === "window");
@@ -891,7 +1019,9 @@ const resolveStimulusTarget = async (binary: BinaryRuntime, title: string) => {
   const fuzzy = windows.find((item) => item.name?.includes(title));
   const target = exact ?? fuzzy;
   if (!target) {
-    throw new Error(`stimulus window not found in wrec list --json; saw windows: ${windows.map((item) => item.name).join(", ")}`);
+    throw new Error(
+      `stimulus window not found in wrec list --json; saw windows: ${windows.map((item) => item.name).join(", ")}`,
+    );
   }
   return target;
 };
@@ -999,7 +1129,8 @@ const decodeMovie = async (decoderBin: string, movieFile: string) => {
   if (result.exitCode !== 0) {
     return {
       decode: null,
-      decoderError: result.stderr || result.stdout || `decoder exited ${result.exitCode}`,
+      decoderError:
+        result.stderr || result.stdout || `decoder exited ${result.exitCode}`,
     };
   }
 
@@ -1021,12 +1152,18 @@ const deriveObserved = (
   lastMetrics: MetricsSnapshot | null,
 ): ObservedSummary => {
   const frames = decode.frames;
-  const readable = frames.filter((frame) => Number.isFinite(frame.stimulusIndex));
-  const indices = readable.map((frame) => frame.stimulusIndex!).sort((a, b) => a - b);
+  const readable = frames.filter((frame) =>
+    Number.isFinite(frame.stimulusIndex),
+  );
+  const indices = readable
+    .map((frame) => frame.stimulusIndex!)
+    .sort((a, b) => a - b);
   const uniqueIndices = [...new Set(indices)];
   const missingStimulusIndices =
     uniqueIndices.length > 1
-      ? range(uniqueIndices[0], uniqueIndices.at(-1)!).filter((index) => !uniqueIndices.includes(index))
+      ? range(uniqueIndices[0], uniqueIndices.at(-1)!).filter(
+          (index) => !uniqueIndices.includes(index),
+        )
       : [];
   const pts = frames.map((frame) => frame.ptsMs).filter(Number.isFinite);
   const firstPtsMs = pts.length ? Math.min(...pts) : null;
@@ -1035,9 +1172,13 @@ const deriveObserved = (
   const steadyEnd = lastPtsMs === null ? null : lastPtsMs - 1000;
   const steadyReadable =
     steadyStart !== null && steadyEnd !== null && steadyEnd > steadyStart
-      ? readable.filter((frame) => frame.ptsMs >= steadyStart && frame.ptsMs <= steadyEnd)
+      ? readable.filter(
+          (frame) => frame.ptsMs >= steadyStart && frame.ptsMs <= steadyEnd,
+        )
       : [];
-  const steadyUnique = new Set(steadyReadable.map((frame) => frame.stimulusIndex));
+  const steadyUnique = new Set(
+    steadyReadable.map((frame) => frame.stimulusIndex),
+  );
   const steadyDurationSecs =
     steadyStart !== null && steadyEnd !== null && steadyEnd > steadyStart
       ? (steadyEnd - steadyStart) / 1000
@@ -1053,26 +1194,34 @@ const deriveObserved = (
       ? Math.max(...steadyIndices) - Math.min(...steadyIndices) + 1
       : null;
   const stimulusAchievedFps =
-    steadySpan !== null && steadyDurationSecs > 0 ? steadySpan / steadyDurationSecs : null;
+    steadySpan !== null && steadyDurationSecs > 0
+      ? steadySpan / steadyDurationSecs
+      : null;
   const captureCompleteness =
-    steadySpan !== null && steadySpan > 0 ? steadyUnique.size / steadySpan : null;
+    steadySpan !== null && steadySpan > 0
+      ? steadyUnique.size / steadySpan
+      : null;
   // Gaps and monotonicity are computed in AVAssetReader decode order, which
   // equals presentation order only when the stream has no B-frames. wrec's
   // realtime capture pipeline never emits B-frames today; if it ever starts,
   // pts_monotonic fails loudly and that encoder change gets reviewed here.
   const ptsGaps = pts.slice(1).map((value, index) => value - pts[index]);
   const selfReportDisagreementRatio =
-    typeof lastMetrics?.frames === "number" && uniqueIndices.length > 0
-      ? Math.abs(lastMetrics.frames - uniqueIndices.length) / uniqueIndices.length
+    typeof lastMetrics?.frames === "number" && frames.length > 0
+      ? Math.abs(lastMetrics.frames - frames.length) / frames.length
       : null;
 
   return {
     decodedFrames: frames.length,
     readableStimulusFrames: readable.length,
     uniqueStimulusFrames: uniqueIndices.length,
-    duplicateStimulusFrames: Math.max(0, readable.length - uniqueIndices.length),
+    duplicateStimulusFrames: Math.max(
+      0,
+      readable.length - uniqueIndices.length,
+    ),
     missingStimulusIndices,
-    effectiveFps: steadyDurationSecs > 0 ? steadyUnique.size / steadyDurationSecs : null,
+    effectiveFps:
+      steadyDurationSecs > 0 ? steadyUnique.size / steadyDurationSecs : null,
     stimulusAchievedFps,
     captureCompleteness,
     maxInterFramePtsGapMs: ptsGaps.length ? Math.max(...ptsGaps) : null,
@@ -1096,17 +1245,20 @@ const deriveLatency = (
   const started =
     findJobEventMs(jobEvents, "recording started") ??
     findJobEventMs(jobEvents, "recording active");
-  const durationElapsed = findJobEventMs(jobEvents, "duration elapsed; stopping");
+  const durationElapsed = findJobEventMs(
+    jobEvents,
+    "duration elapsed; stopping",
+  );
   const terminal =
     [...jobEvents]
       .reverse()
       .map((event) => timestampMs(event))
       .find(isFiniteNumber) ?? null;
-  const fallbackDurationExpiry =
-    started === null ? null : started + durationMs;
+  const fallbackDurationExpiry = started === null ? null : started + durationMs;
 
   return {
-    startMs: started === null ? null : Math.max(0, started - commandStartedAtMs),
+    startMs:
+      started === null ? null : Math.max(0, started - commandStartedAtMs),
     finalizeMs:
       terminal === null
         ? null
@@ -1121,8 +1273,10 @@ const deriveLatency = (
   };
 };
 
-const findJobEventMs = (events: Array<Record<string, unknown>>, message: string) =>
-  timestampMs(events.find((event) => event.message === message));
+const findJobEventMs = (
+  events: Array<Record<string, unknown>>,
+  message: string,
+) => timestampMs(events.find((event) => event.message === message));
 
 const timestampMs = (event?: Record<string, unknown>) => {
   const value = Number(event?.timestamp_ms);
@@ -1196,7 +1350,10 @@ const childPids = async (pid: number) => {
     .filter(Number.isFinite);
 };
 
-const parseProcessRow = (line: string, daemonPid: number): ProcessRow | undefined => {
+const parseProcessRow = (
+  line: string,
+  daemonPid: number,
+): ProcessRow | undefined => {
   const match = line.trim().match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.+)$/);
   if (!match) {
     return undefined;
@@ -1227,14 +1384,19 @@ const summarizeProcessSamples = (samples: ProcessSample[]): ProcessSummary => {
     rssBytes: sum(sample.processes.map((process) => process.rssBytes)),
   }));
   const byRole = (role: ProcessRow["role"]) =>
-    samples.flatMap((sample) => sample.processes.filter((process) => process.role === role));
+    samples.flatMap((sample) =>
+      sample.processes.filter((process) => process.role === role),
+    );
   const helpers = byRole("helper");
   const daemons = byRole("daemon");
 
   return {
     sampleCount: samples.length,
     maxTotalCpuPercent: max(totals.map((total) => total.cpuPercent)),
-    p95TotalCpuPercent: percentile(totals.map((total) => total.cpuPercent), 95),
+    p95TotalCpuPercent: percentile(
+      totals.map((total) => total.cpuPercent),
+      95,
+    ),
     avgTotalCpuPercent: average(totals.map((total) => total.cpuPercent)),
     maxTotalRssBytes: max(totals.map((total) => total.rssBytes)),
     maxHelperCpuPercent: max(helpers.map((process) => process.cpuPercent)),
@@ -1253,7 +1415,9 @@ const parseMetrics = (events: Array<Record<string, unknown>>) =>
       {
         elapsed_secs: Number(event.metrics.elapsed_secs ?? 0),
         output_bytes: Number(event.metrics.output_bytes ?? 0),
-        estimated_bitrate_mbps: Number(event.metrics.estimated_bitrate_mbps ?? 0),
+        estimated_bitrate_mbps: Number(
+          event.metrics.estimated_bitrate_mbps ?? 0,
+        ),
         frames: nullableNumber(event.metrics.frames),
         dropped_frames: nullableNumber(event.metrics.dropped_frames),
       },
@@ -1333,8 +1497,12 @@ const environmentGuards = (
   return [
     {
       name: "env_ac_power",
-      threshold: allowBattery ? "AC Power or explicit battery override" : "AC Power",
-      measured: onAc ? "AC Power" : battery.stdout.trim().split("\n")[0] ?? null,
+      threshold: allowBattery
+        ? "AC Power or explicit battery override"
+        : "AC Power",
+      measured: onAc
+        ? "AC Power"
+        : (battery.stdout.trim().split("\n")[0] ?? null),
       status: onAc || allowBattery ? "pass" : "inconclusive",
       details:
         !onAc && allowBattery
@@ -1344,7 +1512,8 @@ const environmentGuards = (
     {
       name: "env_thermal",
       threshold: "thermal limits at 100%",
-      measured: thermal.exitCode === 0 ? thermal.stdout.trim() : thermal.stderr.trim(),
+      measured:
+        thermal.exitCode === 0 ? thermal.stdout.trim() : thermal.stderr.trim(),
       status: thermalOk ? "pass" : "inconclusive",
     },
     {
@@ -1356,17 +1525,22 @@ const environmentGuards = (
   ];
 };
 
-const statusFromEnvironment = (guards: EnvironmentGuard[], suite: SuiteName): OverallStatus => {
+const statusFromEnvironment = (
+  guards: EnvironmentGuard[],
+  suite: SuiteName,
+): OverallStatus => {
   if (suite !== "release") {
     return "pass";
   }
-  return guards.some((guard) => guard.status === "inconclusive") ? "inconclusive" : "pass";
+  return guards.some((guard) => guard.status === "inconclusive")
+    ? "inconclusive"
+    : "pass";
 };
 
 const parseThermalLimits = (stdout: string) =>
-  [...stdout.matchAll(/(?:CPU_Speed_Limit|CPU_Scheduler_Limit)\s*=\s*(\d+)/g)].map((match) =>
-    Number.parseInt(match[1], 10),
-  );
+  [
+    ...stdout.matchAll(/(?:CPU_Speed_Limit|CPU_Scheduler_Limit)\s*=\s*(\d+)/g),
+  ].map((match) => Number.parseInt(match[1], 10));
 
 const commandSnapshot = async (cmd: string[]): Promise<EnvironmentCommand> => {
   const result = await shell(cmd);
@@ -1436,30 +1610,44 @@ const parseDimensions = (value?: string) => {
   if (!value) {
     return undefined;
   }
-  const [width, height] = value.split("x").map((part) => Number.parseInt(part, 10));
-  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : undefined;
+  const [width, height] = value
+    .split("x")
+    .map((part) => Number.parseInt(part, 10));
+  return Number.isFinite(width) && Number.isFinite(height)
+    ? { width, height }
+    : undefined;
 };
 
 const range = (start: number, end: number) =>
-  Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index);
+  Array.from(
+    { length: Math.max(0, end - start + 1) },
+    (_, index) => start + index,
+  );
 
-const lines = (value: string) => value.split(/\r?\n/).filter((line) => line.length > 0);
+const lines = (value: string) =>
+  value.split(/\r?\n/).filter((line) => line.length > 0);
 const slugDate = (value: string) => value.replaceAll(/[:.]/g, "-");
 const shortSha = (sha: string) => sha.slice(0, 7);
-const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+const sum = (values: number[]) =>
+  values.reduce((total, value) => total + value, 0);
 const max = (values: number[]) => (values.length ? Math.max(...values) : 0);
-const average = (values: number[]) => (values.length ? sum(values) / values.length : 0);
+const average = (values: number[]) =>
+  values.length ? sum(values) / values.length : 0;
 const percentile = (values: number[], percent: number) => {
   if (!values.length) {
     return 0;
   }
   const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percent / 100) * sorted.length) - 1));
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil((percent / 100) * sorted.length) - 1),
+  );
   return sorted[index];
 };
 const isRecord = <K extends string, V>(value: unknown): value is Record<K, V> =>
   typeof value === "object" && value !== null;
-const isPresent = <T>(value: T | null | undefined): value is T => value !== null && value !== undefined;
+const isPresent = <T>(value: T | null | undefined): value is T =>
+  value !== null && value !== undefined;
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 

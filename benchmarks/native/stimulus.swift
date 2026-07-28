@@ -30,33 +30,40 @@ final class StimulusView: NSView {
     }
 
     private func drawAnimatedField() {
-        let cellSize: CGFloat = 40
-        let phase = Int(frameIndex / 2)
-        let hue = CGFloat(frameIndex % 360) / 360
-
-        NSColor(calibratedHue: hue, saturation: 0.65, brightness: 0.92, alpha: 1).setFill()
-        bounds.fill()
-
-        for y in stride(from: CGFloat(0), to: bounds.height, by: cellSize) {
-            for x in stride(from: CGFloat(0), to: bounds.width, by: cellSize) {
-                let xi = Int(x / cellSize)
-                let yi = Int(y / cellSize)
-                let bright = (xi + yi + phase) % 2 == 0
-                let localHue = CGFloat((xi * 17 + yi * 29 + phase * 3) % 360) / 360
-                let color = NSColor(
-                    calibratedHue: localHue,
-                    saturation: bright ? 0.72 : 0.48,
-                    brightness: bright ? 0.98 : 0.35,
-                    alpha: 1
-                )
-                color.setFill()
-                NSRect(x: x, y: y, width: cellSize, height: cellSize).fill()
-            }
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            return
         }
 
-        let sweepX = CGFloat(frameIndex % 1280)
-        NSColor(calibratedWhite: 1, alpha: 0.24).setFill()
-        NSRect(x: sweepX, y: 0, width: 18, height: bounds.height).fill()
+        // Keep the source visibly changing without making the stimulus itself
+        // a CPU/GPU benchmark. The old 32×18 AppKit checkerboard allocated and
+        // filled hundreds of colored rectangles per frame, which competed with
+        // the recorder and made otherwise identical reps diverge.
+        let phase = CGFloat(frameIndex % 240) / 240
+        context.setFillColor(
+            red: 0.08 + phase * 0.12,
+            green: 0.12,
+            blue: 0.2 + (1 - phase) * 0.12,
+            alpha: 1
+        )
+        context.fill(bounds)
+
+        let bandWidth = bounds.width / 8
+        for band in 0..<8 {
+            let value = CGFloat((Int(frameIndex) + band * 31) % 255) / 255
+            context.setFillColor(red: value, green: 0.65, blue: 1 - value, alpha: 1)
+            context.fill(
+                CGRect(
+                    x: CGFloat(band) * bandWidth,
+                    y: 96,
+                    width: bandWidth,
+                    height: 360
+                )
+            )
+        }
+
+        let sweepX = CGFloat(frameIndex % UInt32(canvasWidth))
+        context.setFillColor(gray: 1, alpha: 0.8)
+        context.fill(CGRect(x: sweepX, y: 0, width: 20, height: bounds.height))
     }
 
     private func drawMarkerStrip() {

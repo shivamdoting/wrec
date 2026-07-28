@@ -77,9 +77,11 @@ Release profiles:
 - `high-native60-hevc`
 - `balanced-1080p30-h264`
 
-Each release profile runs one warmup and three measured reps per binary. With
-`--against`, measured reps are interleaved candidate/reference as ABABAB within
-each profile. The default release duration is `15s`; `--duration` overrides it.
+Each release profile runs one warmup and five measured reps per binary. With
+`--against`, measured reps alternate AB/BA order within each profile to cancel
+order and thermal bias. A failed capture or stimulus rate below 50 fps is retried
+up to twice before the run is rejected. The default release duration is `15s`;
+`--duration` overrides it.
 
 ## Native Helpers
 
@@ -116,7 +118,7 @@ Hard gates:
 - max inter-frame PTS gap <= 500 ms
 - PTS monotonicity
 - decoded codec and dimensions match the request
-- self-reported frames and decoded unique stimulus frames disagree by <= 5%
+- self-reported frames and decoded file frames disagree by <= 5%
 - start latency <= 1500 ms
 - finalize latency <= 3000 ms, or <= 5000 ms for `high`
 

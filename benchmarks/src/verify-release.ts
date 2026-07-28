@@ -69,11 +69,11 @@ export const validateReleaseSummary = (value: unknown) => {
     const referenceRuns = Array.isArray(measured.reference)
       ? measured.reference
       : [];
-    if (candidateRuns.length < 3) {
-      errors.push(`${expected.name} has fewer than 3 candidate reps`);
+    if (candidateRuns.length < 5) {
+      errors.push(`${expected.name} has fewer than 5 candidate reps`);
     }
-    if (referenceRuns.length < 3) {
-      errors.push(`${expected.name} has fewer than 3 reference reps`);
+    if (referenceRuns.length < 5) {
+      errors.push(`${expected.name} has fewer than 5 reference reps`);
     }
   }
 
