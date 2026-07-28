@@ -211,6 +211,16 @@ const main = async () => {
       environment.guards,
       options.suite,
     );
+    if (options.suite === "release" && environmentStatus !== "pass") {
+      const failed = environment.guards
+        .filter((guard) => guard.status !== "pass")
+        .map(
+          (guard) =>
+            `${guard.name}: measured ${guard.measured}, required ${guard.threshold}`,
+        )
+        .join("; ");
+      throw new Error(`release environment is not trustworthy: ${failed}`);
+    }
     stimulus = await startStimulus(context.tools.stimulus);
     const profiles = await runSuite(
       options,
@@ -1056,7 +1066,7 @@ const shell = (cmd: string[]) => runProcess(cmd, repoRoot, Bun.env);
 const waitForStableLoad = async (suite: SuiteName) => {
   if (suite !== "release") return;
 
-  const threshold = Math.max(1, os.cpus().length / 2);
+  const threshold = releaseLoadThreshold();
   const started = Date.now();
   let load = os.loadavg()[0] ?? 0;
   if (load > threshold)
@@ -1069,6 +1079,11 @@ const waitForStableLoad = async (suite: SuiteName) => {
     load = os.loadavg()[0] ?? 0;
   }
 
+  if (load > threshold) {
+    throw new Error(
+      `setup load did not settle within ${loadSettleTimeoutMs / 60_000} minutes: ${load.toFixed(2)} > ${threshold.toFixed(2)}`,
+    );
+  }
   console.log(
     `pre-measurement load: ${load.toFixed(2)} (target <= ${threshold.toFixed(2)})`,
   );
@@ -1493,6 +1508,7 @@ const environmentGuards = (
     thermalLimits.every((value) => value >= 100) &&
     !/thermal warning level:\s*(?!0|none)/i.test(thermal.stdout);
   const loadOne = loadAverage[0] ?? 0;
+  const loadThreshold = releaseLoadThreshold(cpuCount);
 
   return [
     {
@@ -1518,12 +1534,15 @@ const environmentGuards = (
     },
     {
       name: "env_load_average",
-      threshold: `1m load <= ${cpuCount}`,
+      threshold: `1m load <= ${loadThreshold}`,
       measured: loadOne,
-      status: loadOne <= cpuCount ? "pass" : "inconclusive",
+      status: loadOne <= loadThreshold ? "pass" : "inconclusive",
     },
   ];
 };
+
+const releaseLoadThreshold = (cpuCount = os.cpus().length) =>
+  Math.max(1, cpuCount / 2);
 
 const statusFromEnvironment = (
   guards: EnvironmentGuard[],
