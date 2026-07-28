@@ -135,7 +135,12 @@ window.backgroundColor = .black
 window.hasShadow = false
 window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 window.isReleasedWhenClosed = false
-window.orderFrontRegardless()
+// An accessory app is not activated by `orderFrontRegardless`, so another
+// normal-layer window can remain above the stimulus and SCK throttles the
+// occluded target. Keep the stimulus on layer 0 for target discovery, but make
+// its app active so every rendered frame actually reaches the display.
+window.makeKeyAndOrderFront(nil)
+app.activate(ignoringOtherApps: true)
 
 // A Timer at 1/60 s gets coalesced to ~58 fps by the runloop, which starves a
 // 60 fps capture of frames it then gets blamed for missing. A display link

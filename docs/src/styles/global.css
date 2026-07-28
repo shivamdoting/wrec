@@ -673,6 +673,55 @@ body {
   gap: 12px;
 }
 
+.bench-page .tldr {
+  padding-block: 18px;
+}
+
+.bench-page .tldr-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: tldr;
+}
+
+.bench-page .tldr-list li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 4px solid transparent;
+  border-image: var(--bench-px-dim) 2 stretch;
+  counter-increment: tldr;
+}
+
+.bench-page .tldr-list li::before {
+  content: "0" counter(tldr);
+  grid-row: 1 / 3;
+  color: var(--page-subtle);
+  font-size: 10px;
+  align-self: start;
+}
+
+.bench-page .tldr-value {
+  color: var(--bench-good);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.bench-page .tldr-list small {
+  display: block;
+  margin-top: 3px;
+  color: var(--page-subtle);
+  font: inherit;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
 .bench-page .tiles {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -900,4 +949,10 @@ body {
 
 .bench-page .marker .off {
   background: #000;
+}
+
+@media (max-width: 720px) {
+  .bench-page .tldr-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

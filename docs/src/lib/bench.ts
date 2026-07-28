@@ -49,6 +49,52 @@ export type BenchSummary = {
   profiles: BenchProfile[];
 };
 
+export type BenchImprovement = {
+  label: string;
+  profile: string;
+  percent: number;
+};
+
+const improvementLabels: Record<string, string> = {
+  regression_cpu_avg: "average CPU",
+  regression_cpu_p95: "p95 CPU",
+  regression_max_rss: "peak memory",
+  regression_start_latency: "start latency",
+  regression_finalize_latency: "finalize latency",
+};
+
+export const benchmarkImprovements = (
+  summary: BenchSummary,
+): BenchImprovement[] => {
+  const bestByMetric = new Map<string, BenchImprovement>();
+
+  for (const profile of summary.profiles) {
+    for (const gate of profile.gates) {
+      const label = improvementLabels[gate.name];
+      if (
+        !label ||
+        gate.status !== "pass" ||
+        typeof gate.deltaPercent !== "number" ||
+        gate.deltaPercent >= 0
+      )
+        continue;
+
+      const improvement = {
+        label,
+        profile: profile.name,
+        percent: Math.abs(gate.deltaPercent),
+      };
+      const current = bestByMetric.get(gate.name);
+      if (!current || improvement.percent > current.percent)
+        bestByMetric.set(gate.name, improvement);
+    }
+  }
+
+  return [...bestByMetric.values()]
+    .sort((a, b) => b.percent - a.percent)
+    .slice(0, 3);
+};
+
 const candidateDirs = () => [
   path.resolve(process.cwd(), "..", "benchmarks", "results"),
   path.resolve(process.cwd(), "benchmarks", "results"),
