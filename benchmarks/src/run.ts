@@ -146,6 +146,8 @@ const resultsDir = path.join(root, "results");
 // run dir must stay short — a repo-relative .tmp/ path is already too long.
 const tmpRoot = "/tmp/wrec-bench";
 const stimulusTitle = "wrec-bench-stimulus";
+const loadSettleTimeoutMs = 5 * 60_000;
+const loadSettlePollMs = 5_000;
 
 const main = async () => {
   const options = parseArgs(Bun.argv.slice(2));
@@ -187,9 +189,10 @@ const main = async () => {
   let result: BenchmarkResult | undefined;
   try {
     await compileNativeTools(context);
-    stimulus = await startStimulus(context.tools.stimulus);
+    await waitForStableLoad(options.suite);
     const environment = await environmentPreamble(options.suite, options.allowBattery);
     const environmentStatus = statusFromEnvironment(environment.guards, options.suite);
+    stimulus = await startStimulus(context.tools.stimulus);
     const profiles = await runSuite(options, context, stimulus, environmentStatus === "pass");
     const status = combineStatuses([environmentStatus, ...profiles.map((profile) => profile.status)]);
 
@@ -723,6 +726,8 @@ const runCapture = async ({
     profile.codec,
     "--resolution",
     profile.resolution,
+    "--no-system-audio",
+    "--no-mic",
     "--duration",
     duration,
     "--out",
@@ -917,6 +922,27 @@ const runWrec = (binary: BinaryRuntime, args: string[]) =>
   });
 
 const shell = (cmd: string[]) => runProcess(cmd, repoRoot, Bun.env);
+
+const waitForStableLoad = async (suite: SuiteName) => {
+  if (suite !== "release") return;
+
+  const threshold = Math.max(1, os.cpus().length / 2);
+  const started = Date.now();
+  let load = os.loadavg()[0] ?? 0;
+  if (load > threshold)
+    console.log(
+      `waiting for setup load to settle: ${load.toFixed(2)} > ${threshold.toFixed(2)}`,
+    );
+
+  while (load > threshold && Date.now() - started < loadSettleTimeoutMs) {
+    await Bun.sleep(loadSettlePollMs);
+    load = os.loadavg()[0] ?? 0;
+  }
+
+  console.log(
+    `pre-measurement load: ${load.toFixed(2)} (target <= ${threshold.toFixed(2)})`,
+  );
+};
 
 const baseWrecEnv = () => {
   const env = { ...Bun.env };
