@@ -141,6 +141,13 @@ window.isReleasedWhenClosed = false
 // its app active so every rendered frame actually reaches the display.
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
+let visibilityTimer = Timer(timeInterval: 1, repeats: true) { _ in
+    if !app.isActive {
+        app.activate(ignoringOtherApps: true)
+    }
+    window.orderFrontRegardless()
+}
+RunLoop.main.add(visibilityTimer, forMode: .common)
 
 // A Timer at 1/60 s gets coalesced to ~58 fps by the runloop, which starves a
 // 60 fps capture of frames it then gets blamed for missing. A display link
