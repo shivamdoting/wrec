@@ -53,6 +53,7 @@ export type BenchImprovement = {
   label: string;
   profile: string;
   percent: number;
+  status: "pass" | "inconclusive";
 };
 
 const improvementLabels: Record<string, string> = {
@@ -73,7 +74,7 @@ export const benchmarkImprovements = (
       const label = improvementLabels[gate.name];
       if (
         !label ||
-        gate.status !== "pass" ||
+        (gate.status !== "pass" && gate.status !== "inconclusive") ||
         typeof gate.deltaPercent !== "number" ||
         gate.deltaPercent >= 0
       )
@@ -83,6 +84,7 @@ export const benchmarkImprovements = (
         label,
         profile: profile.name,
         percent: Math.abs(gate.deltaPercent),
+        status: gate.status,
       };
       const current = bestByMetric.get(gate.name);
       if (!current || improvement.percent > current.percent)
