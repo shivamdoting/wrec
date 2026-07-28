@@ -155,8 +155,10 @@ const resultsDir = path.join(root, "results");
 const tmpRoot = "/tmp/wrec-bench";
 const nativeToolsCache = "/tmp/wrec-bench-native-tools";
 const stimulusTitle = "wrec-bench-stimulus";
-const loadSettleTimeoutMs = 5 * 60_000;
-const loadSettlePollMs = 5_000;
+const environmentSettleTimeoutMs = 5 * 60_000;
+const environmentSettlePollMs = 2_000;
+const minimumCpuIdlePercent = 65;
+const stableCpuSamples = 3;
 const measuredReps = 5;
 const captureAttempts = 3;
 const captureCooldownMs = 1_500;
@@ -202,10 +204,11 @@ const main = async () => {
   let result: BenchmarkResult | undefined;
   try {
     await compileNativeTools(context);
-    await waitForStableLoad(options.suite);
+    const cpuIdlePercent = await waitForStableCpu(options.suite);
     const environment = await environmentPreamble(
       options.suite,
       options.allowBattery,
+      cpuIdlePercent,
     );
     const environmentStatus = statusFromEnvironment(
       environment.guards,
@@ -1063,30 +1066,45 @@ const runWrec = (binary: BinaryRuntime, args: string[]) =>
 
 const shell = (cmd: string[]) => runProcess(cmd, repoRoot, Bun.env);
 
-const waitForStableLoad = async (suite: SuiteName) => {
-  if (suite !== "release") return;
+const waitForStableCpu = async (suite: SuiteName) => {
+  if (suite !== "release") return null;
 
-  const threshold = releaseLoadThreshold();
   const started = Date.now();
-  let load = os.loadavg()[0] ?? 0;
-  if (load > threshold)
+  let stableSamples = 0;
+  let idle = await currentCpuIdlePercent();
+  if (idle < minimumCpuIdlePercent) {
     console.log(
-      `waiting for setup load to settle: ${load.toFixed(2)} > ${threshold.toFixed(2)}`,
-    );
-
-  while (load > threshold && Date.now() - started < loadSettleTimeoutMs) {
-    await Bun.sleep(loadSettlePollMs);
-    load = os.loadavg()[0] ?? 0;
-  }
-
-  if (load > threshold) {
-    throw new Error(
-      `setup load did not settle within ${loadSettleTimeoutMs / 60_000} minutes: ${load.toFixed(2)} > ${threshold.toFixed(2)}`,
+      `waiting for CPU idle to settle: ${idle.toFixed(1)}% < ${minimumCpuIdlePercent}%`,
     );
   }
-  console.log(
-    `pre-measurement load: ${load.toFixed(2)} (target <= ${threshold.toFixed(2)})`,
+
+  while (Date.now() - started < environmentSettleTimeoutMs) {
+    stableSamples = idle >= minimumCpuIdlePercent ? stableSamples + 1 : 0;
+    if (stableSamples >= stableCpuSamples) {
+      console.log(
+        `pre-measurement CPU idle: ${idle.toFixed(1)}% (${stableCpuSamples} stable samples)`,
+      );
+      return idle;
+    }
+    await Bun.sleep(environmentSettlePollMs);
+    idle = await currentCpuIdlePercent();
+  }
+
+  throw new Error(
+    `CPU idle did not stay above ${minimumCpuIdlePercent}% within ${environmentSettleTimeoutMs / 60_000} minutes (last ${idle.toFixed(1)}%)`,
   );
+};
+
+const currentCpuIdlePercent = async () => {
+  const result = await shell(["top", "-l", "2", "-n", "0", "-s", "1"]);
+  const matches = [...result.stdout.matchAll(/CPU usage:.*?([\d.]+)% idle/g)];
+  const idle = Number(matches.at(-1)?.[1]);
+  if (result.exitCode !== 0 || !Number.isFinite(idle)) {
+    throw new Error(
+      `unable to read CPU idle percentage: ${result.stderr || result.stdout}`,
+    );
+  }
+  return idle;
 };
 
 const baseWrecEnv = () => {
@@ -1448,7 +1466,11 @@ const parseJsonEvents = (stdout: string) =>
     }
   });
 
-const environmentPreamble = async (suite: SuiteName, allowBattery: boolean) => {
+const environmentPreamble = async (
+  suite: SuiteName,
+  allowBattery: boolean,
+  cpuIdlePercent: number | null,
+) => {
   const [battery, thermal, productVersion, buildVersion, chip, model, memsize] =
     await Promise.all([
       commandSnapshot(["pmset", "-g", "batt"]),
@@ -1462,7 +1484,7 @@ const environmentPreamble = async (suite: SuiteName, allowBattery: boolean) => {
   const loadAverage = os.loadavg();
   const cpuCount = os.cpus().length;
   const guards = environmentGuards(
-    { battery, thermal, loadAverage, cpuCount },
+    { battery, thermal, cpuIdlePercent },
     suite,
     allowBattery,
   );
@@ -1478,6 +1500,7 @@ const environmentPreamble = async (suite: SuiteName, allowBattery: boolean) => {
     model,
     memoryBytes: Number.parseInt(memsize, 10) || os.totalmem(),
     loadAverage,
+    cpuIdlePercent,
     guards,
   };
 };
@@ -1486,13 +1509,11 @@ const environmentGuards = (
   {
     battery,
     thermal,
-    loadAverage,
-    cpuCount,
+    cpuIdlePercent,
   }: {
     battery: EnvironmentCommand;
     thermal: EnvironmentCommand;
-    loadAverage: number[];
-    cpuCount: number;
+    cpuIdlePercent: number | null;
   },
   suite: SuiteName,
   allowBattery: boolean,
@@ -1507,9 +1528,6 @@ const environmentGuards = (
     thermal.exitCode === 0 &&
     thermalLimits.every((value) => value >= 100) &&
     !/thermal warning level:\s*(?!0|none)/i.test(thermal.stdout);
-  const loadOne = loadAverage[0] ?? 0;
-  const loadThreshold = releaseLoadThreshold(cpuCount);
-
   return [
     {
       name: "env_ac_power",
@@ -1533,16 +1551,17 @@ const environmentGuards = (
       status: thermalOk ? "pass" : "inconclusive",
     },
     {
-      name: "env_load_average",
-      threshold: `1m load <= ${loadThreshold}`,
-      measured: loadOne,
-      status: loadOne <= loadThreshold ? "pass" : "inconclusive",
+      name: "env_cpu_idle",
+      threshold: `CPU idle >= ${minimumCpuIdlePercent}% for ${stableCpuSamples} samples`,
+      measured: cpuIdlePercent,
+      status:
+        typeof cpuIdlePercent === "number" &&
+        cpuIdlePercent >= minimumCpuIdlePercent
+          ? "pass"
+          : "inconclusive",
     },
   ];
 };
-
-const releaseLoadThreshold = (cpuCount = os.cpus().length) =>
-  Math.max(1, cpuCount / 2);
 
 const statusFromEnvironment = (
   guards: EnvironmentGuard[],
