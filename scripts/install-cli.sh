@@ -4,11 +4,33 @@ set -eu
 PREFIX="${WREC_PREFIX:-/usr/local}"
 VERSION="${WREC_VERSION:-latest}"
 REPO="${WREC_REPO:-shivamdoting/wrec}"
+CHANNEL="${WREC_CHANNEL:-release}"
 ARTIFACT_QUALIFIER="${WREC_ARTIFACT_QUALIFIER-}"
 BIN_DIR="$PREFIX/bin"
-LIB_DIR="$PREFIX/lib/wrec"
-BIN="$BIN_DIR/wrec"
-CLI="$LIB_DIR/wrec"
+
+case "$CHANNEL" in
+  dev)
+    CLI_NAME="wrec-dev"
+    ARCHIVE_PREFIX="wrec-dev-cli"
+    ;;
+  nightly)
+    CLI_NAME="wrec-nightly"
+    ARCHIVE_PREFIX="wrec-nightly-cli"
+    ;;
+  release | stable)
+    CHANNEL="release"
+    CLI_NAME="wrec"
+    ARCHIVE_PREFIX="wrec-cli"
+    ;;
+  *)
+    echo "unsupported WREC_CHANNEL: $CHANNEL (expected dev, nightly, or release)" >&2
+    exit 1
+    ;;
+esac
+
+LIB_DIR="$PREFIX/lib/$CLI_NAME"
+BIN="$BIN_DIR/$CLI_NAME"
+CLI="$LIB_DIR/$CLI_NAME"
 DAEMON="$LIB_DIR/daemon"
 CAPTURE_ENGINE="$LIB_DIR/capture-engine"
 MARKER="# managed by wrec"
@@ -62,7 +84,7 @@ target_name() {
 
 asset_name() {
   target="$(target_name)"
-  asset="wrec-cli-$target"
+  asset="$ARCHIVE_PREFIX-$target"
   if [ -n "$ARTIFACT_QUALIFIER" ]; then
     asset="$asset-$ARTIFACT_QUALIFIER"
   fi
@@ -73,9 +95,14 @@ release_url() {
   file="$1"
 
   if [ "$VERSION" = "latest" ]; then
-    echo "https://github.com/$REPO/releases/latest/download/$file"
+    if [ "$CHANNEL" = "nightly" ]; then
+      echo "https://github.com/$REPO/releases/download/nightly/$file"
+    else
+      echo "https://github.com/$REPO/releases/latest/download/$file"
+    fi
   else
     case "$VERSION" in
+      nightly) tag="nightly" ;;
       v*) tag="$VERSION" ;;
       *) tag="v$VERSION" ;;
     esac
@@ -192,31 +219,39 @@ fi
 tar -xzf "$archive" -C "$tmp_dir"
 payload="$tmp_dir/wrec-cli"
 
-for file in wrec daemon capture-engine; do
+for file in "$CLI_NAME" daemon capture-engine; do
   if [ ! -x "$payload/$file" ]; then
     echo "missing executable in CLI package: $file" >&2
     exit 1
   fi
 done
+if [ ! -f "$payload/artifact-version" ]; then
+  echo "missing artifact-version in CLI package" >&2
+  exit 1
+fi
+ARTIFACT_VERSION="$(cat "$payload/artifact-version")"
 
 wrapper="$tmp_dir/wrec-wrapper"
 {
   echo "#!/bin/sh"
   echo "$MARKER"
+  echo "export WREC_CHANNEL=\"$CHANNEL\""
+  echo "export WREC_ARTIFACT_VERSION=\"$ARTIFACT_VERSION\""
   echo "exec \"$CLI\" \"\$@\""
 } >"$wrapper"
 
 lib_parent="$PREFIX/lib"
-stage="$lib_parent/.wrec.staged-$$"
-backup="$lib_parent/.wrec.old-$$"
-wrapper_stage="$BIN_DIR/.wrec.staged-$$"
+stage="$lib_parent/.$CLI_NAME.staged-$$"
+backup="$lib_parent/.$CLI_NAME.old-$$"
+wrapper_stage="$BIN_DIR/.$CLI_NAME.staged-$$"
 run_root install -d -m 0755 "$BIN_DIR" "$lib_parent"
 run_root rm -rf "$stage" "$backup"
 run_root rm -f "$wrapper_stage"
 run_root install -d -m 0755 "$stage"
-run_root install -m 0755 "$payload/wrec" "$stage/wrec"
+run_root install -m 0755 "$payload/$CLI_NAME" "$stage/$CLI_NAME"
 run_root install -m 0755 "$payload/daemon" "$stage/daemon"
 run_root install -m 0755 "$payload/capture-engine" "$stage/capture-engine"
+run_root install -m 0644 "$payload/artifact-version" "$stage/artifact-version"
 run_root install -m 0755 "$wrapper" "$wrapper_stage"
 
 # Swap the complete three-binary runtime as one directory so an interrupted
@@ -236,5 +271,5 @@ run_root mv "$wrapper_stage" "$BIN"
 committed=1
 run_root rm -rf "$backup"
 
-echo "Installed wrec CLI at $BIN"
-echo "Run: wrec help"
+echo "Installed $CHANNEL CLI at $BIN"
+echo "Run: $CLI_NAME help"

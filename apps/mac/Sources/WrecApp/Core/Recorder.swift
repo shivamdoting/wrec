@@ -14,6 +14,7 @@
 import AppKit
 import AVFoundation
 import CoreFoundation
+import CoreGraphics
 import Foundation
 import Observation
 
@@ -111,7 +112,7 @@ final class RecorderModel {
         await refreshMicPermission()
         // When granted, this also runs the first target sweep (they're
         // empty at launch) — no second one needed here.
-        await refreshScreenPermission(requestIfNeeded: false)
+        await refreshScreenPermission(requestIfNeeded: true)
         await adoptRunningJob()
 
         // Displays are the one target class that changes without the user
@@ -141,14 +142,11 @@ final class RecorderModel {
                     await model.adoptRunningJob()
                 }
             },
-            Self.jobChangedNotificationName as CFString,
+            WrecChannel.current.jobChangedNotification as CFString,
             nil,
             .deliverImmediately
         )
     }
-
-    // A plain String so the nonisolated deinit can reach it too.
-    private nonisolated static let jobChangedNotificationName = "app.wrec.job-changed"
 
     /// The production model lives for the whole process, but anything that
     /// creates a short-lived instance (tests) must not leave the center
@@ -157,7 +155,7 @@ final class RecorderModel {
         CFNotificationCenterRemoveObserver(
             CFNotificationCenterGetDistributedCenter(),
             Unmanaged.passUnretained(self).toOpaque(),
-            CFNotificationName(Self.jobChangedNotificationName as CFString),
+            CFNotificationName(WrecChannel.current.jobChangedNotification as CFString),
             nil
         )
     }
@@ -189,19 +187,12 @@ final class RecorderModel {
     // MARK: - Permissions
 
     func refreshScreenPermission(requestIfNeeded: Bool) async {
-        do {
-            try await daemon.ensure()
-            let status =
-                requestIfNeeded
-                ? try await daemon.requestScreenPermission()
-                : try await daemon.screenPermissionStatus()
-            screenPermission = status
-            if status.isGranted, targets.isEmpty {
-                await refreshTargets()
-            }
-        } catch {
-            screenPermission = .unknown
-            show(toast: "\(error)")
+        let granted =
+            CGPreflightScreenCaptureAccess()
+            || (requestIfNeeded && CGRequestScreenCaptureAccess())
+        screenPermission = granted ? .granted : .missing
+        if granted, targets.isEmpty {
+            await refreshTargets()
         }
     }
 

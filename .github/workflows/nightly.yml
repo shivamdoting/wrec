@@ -1,0 +1,126 @@
+name: Nightly
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS nightly
+    runs-on: blacksmith-6vcpu-macos-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: Prepare Xcode Metal toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      - name: Check
+        run: |
+          cargo fmt --check
+          cargo check
+          cargo test
+          swift test --package-path apps/mac
+
+      - name: Package nightly
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          short="${SHORT_SHA:0:7}"
+          ARTIFACT_QUALIFIER="nightly-$short" ./scripts/package-macos.sh nightly
+          ARTIFACT_QUALIFIER="nightly-$short" ./scripts/package-cli-macos.sh nightly
+
+      - name: Prepare rolling assets
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          target="aarch64-apple-darwin"
+          short="${COMMIT_SHA:0:7}"
+
+          tar -C dist/nightly -czf \
+            "dist/nightly/wrec-nightly-app-$target.tar.gz" \
+            "Wrec Nightly.app"
+          cp "dist/cli/nightly/wrec-nightly-cli-$target-nightly-$short.tar.gz" \
+            "dist/nightly/wrec-nightly-cli-$target.tar.gz"
+          cp dist/nightly/wrec-*-nightly-"$short".dmg \
+            "dist/nightly/wrec-nightly-$target.dmg"
+
+          (
+            cd dist/nightly
+            shasum -a 256 \
+              "wrec-nightly-app-$target.tar.gz" \
+              "wrec-nightly-cli-$target.tar.gz" \
+              "wrec-nightly-$target.dmg" |
+              sed 's|\./||'
+          ) > dist/nightly/SHA256SUMS
+
+          codesign --verify --deep --strict --verbose=2 "dist/nightly/Wrec Nightly.app"
+          /usr/libexec/PlistBuddy -c "Print :WrecChannel" \
+            "dist/nightly/Wrec Nightly.app/Contents/Info.plist" |
+            grep -qx nightly
+
+      - name: Publish rolling nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          target="aarch64-apple-darwin"
+          assets=(
+            "dist/nightly/wrec-nightly-app-$target.tar.gz"
+            "dist/nightly/wrec-nightly-cli-$target.tar.gz"
+            "dist/nightly/wrec-nightly-$target.dmg"
+            "dist/nightly/SHA256SUMS"
+          )
+
+          git tag -f nightly "$COMMIT_SHA"
+          git push origin refs/tags/nightly --force
+
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly "${assets[@]}" --clobber
+            gh release edit nightly \
+              --target "$COMMIT_SHA" \
+              --title "Wrec Nightly" \
+              --notes "Automated early-access build from main at $COMMIT_SHA." \
+              --prerelease
+          else
+            gh release create nightly "${assets[@]}" \
+              --target "$COMMIT_SHA" \
+              --title "Wrec Nightly" \
+              --notes "Automated early-access build from main at $COMMIT_SHA." \
+              --prerelease
+          fi

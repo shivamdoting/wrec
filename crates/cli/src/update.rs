@@ -4,6 +4,7 @@ use std::{
 };
 
 use serde_json::{json, Value};
+use wrec_channel::Channel;
 
 use crate::args::UpdateArgs;
 
@@ -12,8 +13,6 @@ use crate::args::UpdateArgs;
 const INSTALLER: &str = include_str!("../../../scripts/install-cli.sh");
 
 const DEFAULT_REPO: &str = "shivamdoting/wrec";
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 pub fn update(args: UpdateArgs) -> ExitCode {
     match run(&args) {
         Ok(code) => code,
@@ -32,7 +31,8 @@ fn run(args: &UpdateArgs) -> Result<ExitCode, String> {
     let repo = std::env::var("WREC_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string());
     let asset = asset_name()?;
     let release = latest_release(&repo, &asset)?;
-    let update_available = is_newer(&release.version, CURRENT_VERSION);
+    let current_version = current_version();
+    let update_available = is_newer(&release.version, &current_version);
 
     if args.check {
         if args.json {
@@ -40,18 +40,23 @@ fn run(args: &UpdateArgs) -> Result<ExitCode, String> {
                 "{}",
                 json!({
                     "command": "update",
-                    "current": CURRENT_VERSION,
+                    "current": current_version,
                     "latest": release.version,
                     "update_available": update_available,
                 })
             );
         } else if update_available {
             println!(
-                "update available: wrec {CURRENT_VERSION} -> {} (run `wrec update`)",
-                release.version
+                "update available: {} {current_version} -> {} (run `{} update`)",
+                Channel::current().cli_name(),
+                release.version,
+                Channel::current().cli_name(),
             );
         } else {
-            println!("wrec {CURRENT_VERSION} is up to date");
+            println!(
+                "{} {current_version} is up to date",
+                Channel::current().cli_name()
+            );
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -62,13 +67,16 @@ fn run(args: &UpdateArgs) -> Result<ExitCode, String> {
                 "{}",
                 json!({
                     "command": "update",
-                    "current": CURRENT_VERSION,
+                    "current": current_version,
                     "latest": release.version,
                     "status": "up_to_date",
                 })
             );
         } else {
-            println!("wrec {CURRENT_VERSION} is up to date");
+            println!(
+                "{} {current_version} is up to date",
+                Channel::current().cli_name()
+            );
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -85,7 +93,7 @@ fn run(args: &UpdateArgs) -> Result<ExitCode, String> {
             "{}",
             json!({
                 "command": "update",
-                "current": CURRENT_VERSION,
+                "current": current_version,
                 "latest": release.version,
                 "status": "updated",
                 "bin": installed,
@@ -95,7 +103,11 @@ fn run(args: &UpdateArgs) -> Result<ExitCode, String> {
             })
         );
     } else {
-        println!("updated wrec {CURRENT_VERSION} -> {}", release.version);
+        println!(
+            "updated {} {current_version} -> {}",
+            Channel::current().cli_name(),
+            release.version
+        );
         if daemon_restart_required {
             println!(
                 "the daemon may still be running the old version; restart it with `wrec daemon stop && wrec daemon start`"
@@ -146,6 +158,7 @@ fn download_and_install(
     let status = Command::new("sh")
         .arg(&installer)
         .env("WREC_CLI_ARCHIVE", &archive)
+        .env("WREC_CHANNEL", Channel::current().as_str())
         .stdin(Stdio::inherit())
         .stdout(if args.json {
             Stdio::null()
@@ -160,11 +173,16 @@ fn download_and_install(
     }
 
     let prefix = std::env::var("WREC_PREFIX").unwrap_or_else(|_| "/usr/local".to_string());
-    Ok(format!("{prefix}/bin/wrec"))
+    Ok(format!("{prefix}/bin/{}", Channel::current().cli_name()))
 }
 
 fn latest_release(repo: &str, asset: &str) -> Result<Release, String> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let endpoint = if Channel::current() == Channel::Nightly {
+        "releases/tags/nightly"
+    } else {
+        "releases/latest"
+    };
+    let url = format!("https://api.github.com/repos/{repo}/{endpoint}");
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -194,7 +212,19 @@ fn parse_release(body: &Value, asset: &str) -> Result<Release, String> {
         .get("tag_name")
         .and_then(Value::as_str)
         .ok_or("release response had no tag_name")?;
-    let version = tag.trim_start_matches('v').to_string();
+    let version = if Channel::current() == Channel::Nightly {
+        let commit = body
+            .get("target_commitish")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        format!(
+            "{}-nightly-{}",
+            env!("CARGO_PKG_VERSION"),
+            &commit[..commit.len().min(7)]
+        )
+    } else {
+        tag.trim_start_matches('v').to_string()
+    };
 
     let entry = body
         .get("assets")
@@ -232,12 +262,21 @@ fn asset_name() -> Result<String, String> {
         return Err("wrec releases currently require an Apple Silicon Mac".into());
     }
     let target = "aarch64-apple-darwin";
+    let prefix = match Channel::current() {
+        Channel::Dev => "wrec-dev-cli",
+        Channel::Nightly => "wrec-nightly-cli",
+        Channel::Release => "wrec-cli",
+    };
     let qualifier = std::env::var("WREC_ARTIFACT_QUALIFIER").unwrap_or_default();
     if qualifier.is_empty() {
-        Ok(format!("wrec-cli-{target}.tar.gz"))
+        Ok(format!("{prefix}-{target}.tar.gz"))
     } else {
-        Ok(format!("wrec-cli-{target}-{qualifier}.tar.gz"))
+        Ok(format!("{prefix}-{target}-{qualifier}.tar.gz"))
     }
+}
+
+fn current_version() -> String {
+    std::env::var("WREC_ARTIFACT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
 }
 
 /// A fresh, owner-only workspace whose creation fails rather than adopting an

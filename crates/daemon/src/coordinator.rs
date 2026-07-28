@@ -18,6 +18,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use wrec_channel::Channel;
 
 pub(crate) type SharedCoordinator<R> = Arc<Mutex<Coordinator<R>>>;
 
@@ -58,6 +59,7 @@ impl<R: RecordingRuntime> Coordinator<R> {
         json!({
             "daemon_version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
+            "channel": Channel::current(),
             "runtime_path": std::env::current_exe().ok(),
             "pid": std::process::id(),
             "home": wrec_home(),
@@ -815,10 +817,8 @@ fn target_list_lock() -> &'static Mutex<()> {
 /// jobs it didn't start itself (e.g. a CLI recording) by observing this. No
 /// payload: observers just re-query `wrec jobs`/`job show`, so a stale or
 /// coalesced delivery is harmless.
-const JOB_CHANGED_NOTIFICATION: &str = "app.wrec.job-changed";
-
 fn notify_job_changed() {
-    macos::post_distributed_notification(JOB_CHANGED_NOTIFICATION);
+    macos::post_distributed_notification(&Channel::current().notification_name("job-changed"));
 }
 
 fn job_state_error(

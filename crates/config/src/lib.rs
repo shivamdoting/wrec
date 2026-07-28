@@ -4,14 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-
-// Dev (debug-profile) builds get their own data namespace so testing never
-// touches the installed app's store, config, or logs. App, CLI, and daemon
-// built with the same profile stay on one namespace.
-#[cfg(debug_assertions)]
-const APP_DATA_DIR_NAME: &str = "Wrec Dev";
-#[cfg(not(debug_assertions))]
-const APP_DATA_DIR_NAME: &str = "Wrec";
+use wrec_channel::Channel;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -193,17 +186,17 @@ fn default_wrec_dir() -> PathBuf {
         .map(|home| {
             home.join("Library")
                 .join("Application Support")
-                .join(APP_DATA_DIR_NAME)
+                .join(Channel::current().app_name())
         })
-        .unwrap_or_else(|| Path::new(".").join(APP_DATA_DIR_NAME))
+        .unwrap_or_else(|| Path::new(".").join(Channel::current().app_name()))
 }
 
 #[cfg(not(target_os = "macos"))]
 fn default_wrec_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join(".wrec"))
-        .unwrap_or_else(|| Path::new(".").join(".wrec"))
+        .map(|home| home.join(Channel::current().home_dir_name()))
+        .unwrap_or_else(|| Path::new(".").join(Channel::current().home_dir_name()))
 }
 
 fn legacy_config_paths() -> Vec<PathBuf> {
@@ -224,14 +217,11 @@ fn legacy_config_paths() -> Vec<PathBuf> {
 #[cfg(target_os = "macos")]
 fn legacy_app_support_config_paths(home: &Path) -> Vec<PathBuf> {
     let app_support = home.join("Library").join("Application Support");
-    // "Wrec Dev" is the live dev-build namespace, not a legacy source; a
-    // migration would delete the dev config out from under dev builds.
-    let runtime_name = runtime_app_name();
-    let mut names = Vec::new();
-    if runtime_name != APP_DATA_DIR_NAME && runtime_name != "Wrec Dev" {
-        names.push(runtime_name);
-    }
-
+    let names: &[&str] = match Channel::current() {
+        // Never import another active channel's config.
+        Channel::Dev | Channel::Nightly => &[],
+        Channel::Release => &["wrec"],
+    };
     names
         .into_iter()
         .map(|name| app_support.join(name).join("config.json"))
@@ -241,18 +231,6 @@ fn legacy_app_support_config_paths(home: &Path) -> Vec<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 fn legacy_app_support_config_paths(_: &Path) -> Vec<PathBuf> {
     Vec::new()
-}
-
-#[cfg(target_os = "macos")]
-fn runtime_app_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.ancestors()
-                .filter_map(|path| path.file_name()?.to_str())
-                .find_map(|name| name.strip_suffix(".app").map(ToOwned::to_owned))
-        })
-        .unwrap_or_else(|| "Wrec".to_string())
 }
 
 #[cfg(test)]

@@ -9,7 +9,20 @@ set -eu
 APPS_DIR="${WREC_APPS_DIR:-/Applications}"
 VERSION="${WREC_VERSION:-latest}"
 REPO="${WREC_REPO:-shivamdoting/wrec}"
+CHANNEL="${WREC_CHANNEL:-release}"
 ARTIFACT_QUALIFIER="${WREC_ARTIFACT_QUALIFIER-}"
+
+case "$CHANNEL" in
+  nightly) ARCHIVE_PREFIX="wrec-nightly-app" ;;
+  release | stable)
+    CHANNEL="release"
+    ARCHIVE_PREFIX="wrec-app"
+    ;;
+  *)
+    echo "unsupported WREC_CHANNEL: $CHANNEL (expected nightly or release)" >&2
+    exit 1
+    ;;
+esac
 
 can_write_apps_dir() {
   path="$APPS_DIR"
@@ -56,7 +69,7 @@ target_name() {
 
 asset_name() {
   target="$(target_name)"
-  asset="wrec-app-$target"
+  asset="$ARCHIVE_PREFIX-$target"
   if [ -n "$ARTIFACT_QUALIFIER" ]; then
     asset="$asset-$ARTIFACT_QUALIFIER"
   fi
@@ -67,9 +80,14 @@ release_url() {
   file="$1"
 
   if [ "$VERSION" = "latest" ]; then
-    echo "https://github.com/$REPO/releases/latest/download/$file"
+    if [ "$CHANNEL" = "nightly" ]; then
+      echo "https://github.com/$REPO/releases/download/nightly/$file"
+    else
+      echo "https://github.com/$REPO/releases/latest/download/$file"
+    fi
   else
     case "$VERSION" in
+      nightly) tag="nightly" ;;
       v*) tag="$VERSION" ;;
       *) tag="v$VERSION" ;;
     esac

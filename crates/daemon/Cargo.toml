@@ -16,6 +16,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror.workspace = true
 tracing.workspace = true
+wrec-channel.workspace = true
 
 [[bin]]
 name = "daemon"

@@ -221,28 +221,8 @@ fn dirs_output_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-// Dev (debug-profile) binaries running outside an .app bundle keep their
-// recordings separate from the installed app's.
-#[cfg(debug_assertions)]
-const DEFAULT_RECORDINGS_DIR_NAME: &str = "Wrec Dev";
-#[cfg(not(debug_assertions))]
-const DEFAULT_RECORDINGS_DIR_NAME: &str = "Wrec";
-
-#[cfg(target_os = "macos")]
 fn recordings_dir_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.ancestors()
-                .filter_map(|path| path.file_name()?.to_str())
-                .find_map(|name| name.strip_suffix(".app").map(ToOwned::to_owned))
-        })
-        .unwrap_or_else(|| DEFAULT_RECORDINGS_DIR_NAME.to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn recordings_dir_name() -> String {
-    DEFAULT_RECORDINGS_DIR_NAME.to_string()
+    wrec_channel::Channel::current().app_name().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

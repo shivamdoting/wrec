@@ -14,6 +14,7 @@ import SwiftUI
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         ConfigStore.flush()
+        DaemonClient.stopDaemonOnExit()
     }
 }
 
@@ -66,7 +67,7 @@ enum UIPreview {
 
     static func openIfRequested(model: RecorderModel) {
         guard let mode = ProcessInfo.processInfo.environment["WREC_UI_PREVIEW"],
-            mode == "1" || mode == "settings"
+            mode == "1" || mode == "settings" || mode == "about"
         else { return }
         DispatchQueue.main.async {
             let previewWindow = NSWindow(
@@ -76,11 +77,16 @@ enum UIPreview {
                 defer: false
             )
             previewWindow.title = "wrec preview"
-            previewWindow.contentView =
-                mode == "settings"
-                ? NSHostingView(
+            switch mode {
+            case "settings":
+                previewWindow.contentView = NSHostingView(
                     rootView: SettingsGeneralPreview(model: model).frame(width: 440))
-                : NSHostingView(rootView: PopoverView(model: model))
+            case "about":
+                previewWindow.contentView = NSHostingView(
+                    rootView: SettingsAboutPreview().frame(width: 440))
+            default:
+                previewWindow.contentView = NSHostingView(rootView: PopoverView(model: model))
+            }
             previewWindow.level = .floating
             previewWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             // Pin to a known spot: 40pt from the screen's top-left.
@@ -88,7 +94,7 @@ enum UIPreview {
                 let top = screen.frame.maxY - 40
                 previewWindow.setFrameTopLeftPoint(NSPoint(x: 40, y: top))
             }
-            if mode == "settings" {
+            if mode == "settings" || mode == "about" {
                 previewWindow.setContentSize(NSSize(width: 440, height: 520))
             }
             window = previewWindow
@@ -105,6 +111,15 @@ enum UIPreview {
                 // Stdout is block-buffered when redirected to a file/pipe —
                 // exactly how test drivers consume this line.
                 fflush(stdout)
+                if let path = ProcessInfo.processInfo.environment["WREC_UI_SNAPSHOT_PATH"],
+                    let view = previewWindow.contentView,
+                    let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+                {
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    if let data = bitmap.representation(using: .png, properties: [:]) {
+                        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                    }
+                }
             }
         }
     }
@@ -144,6 +159,10 @@ struct MenuBarLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(nsImage: WrecMark.menuBarImage)
+            if !WrecChannel.current.badge.isEmpty, !model.phase.isActiveSession {
+                Text(WrecChannel.current == .nightly ? "N" : "D")
+                    .font(.system(size: 9, weight: .bold))
+            }
             if !model.menuBarText.isEmpty {
                 Text(model.menuBarText)
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())

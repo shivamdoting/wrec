@@ -18,6 +18,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use wrec_channel::{Channel, CHANNEL_ENV};
 
 // First exec of a freshly built daemon can eat seconds in Gatekeeper
 // assessment and store migration before the socket appears.
@@ -54,6 +55,7 @@ impl DaemonLaunch {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
+        command.env(CHANNEL_ENV, Channel::current().as_str());
         for (key, value) in &self.envs {
             command.env(key, value);
         }
@@ -253,6 +255,12 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
         next: "Create the directory manually or set WREC_HOME to a writable path.".into(),
     })?;
 
+    if std::env::var_os("WREC_DAEMON_BIN").is_none()
+        && std::env::var_os("WREC_HEADLESS").as_deref() != Some(std::ffi::OsStr::new("1"))
+    {
+        return launch_app_daemon(&client);
+    }
+
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -325,6 +333,65 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
         recoverable: true,
         next: format!(
             "Inspect {}, then run `wrec daemon serve` manually if needed.",
+            daemon_log_path().display()
+        ),
+    })
+}
+
+fn launch_app_daemon(client: &DaemonClient) -> Result<(), AgentError> {
+    let channel = Channel::current();
+    let status = Command::new("/usr/bin/open")
+        .args(["-g", "-j", "-b", channel.bundle_id()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| AgentError {
+            code: "app_start_failed".into(),
+            message: format!("Could not launch {}: {err}", channel.app_name()),
+            recoverable: true,
+            next: format!(
+                "Install or open {} once, then retry with `{}`.",
+                channel.app_name(),
+                channel.cli_name()
+            ),
+        })?;
+    if !status.success() {
+        return Err(AgentError {
+            code: "app_not_installed".into(),
+            message: format!(
+                "{} is not installed, so macOS cannot attribute Screen Recording permission to it.",
+                channel.app_name()
+            ),
+            recoverable: true,
+            next: format!(
+                "Install/open {}, then retry. WREC_HEADLESS=1 is reserved for controlled benchmarks.",
+                channel.app_name()
+            ),
+        });
+    }
+
+    let started = Instant::now();
+    while started.elapsed() < STARTUP_TIMEOUT {
+        if let Ok(status) = client.status() {
+            validate_daemon_status(&status)?;
+            return Ok(());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+
+    Err(AgentError {
+        code: "daemon_unreachable".into(),
+        message: format!(
+            "{} launched but its daemon did not become reachable at {} within {}s.",
+            channel.app_name(),
+            socket_path().display(),
+            STARTUP_TIMEOUT.as_secs()
+        ),
+        recoverable: true,
+        next: format!(
+            "Open {} and inspect {}.",
+            channel.app_name(),
             daemon_log_path().display()
         ),
     })
@@ -462,13 +529,21 @@ fn validate_daemon_status(status: &Value) -> Result<(), AgentError> {
         return Err(incompatible_daemon_error("missing protocol_version"));
     };
 
-    if protocol_version == PROTOCOL_VERSION {
-        Ok(())
-    } else {
-        Err(incompatible_daemon_error(format!(
+    if protocol_version != PROTOCOL_VERSION {
+        return Err(incompatible_daemon_error(format!(
             "protocol_version {protocol_version}, expected {PROTOCOL_VERSION}"
-        )))
+        )));
     }
+
+    let expected = Channel::current().as_str();
+    let actual = status.get("channel").and_then(Value::as_str).unwrap_or("");
+    if actual != expected {
+        return Err(incompatible_daemon_error(format!(
+            "channel {actual:?}, expected {expected:?}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn incompatible_daemon_error(reason: impl Into<String>) -> AgentError {
@@ -493,7 +568,7 @@ fn daemon_launch() -> Result<DaemonLaunch, AgentError> {
     })?;
 
     let candidates = daemon_candidates(&current);
-    let installed_daemon = PathBuf::from("/usr/local/lib/wrec/daemon");
+    let installed_daemon = installed_daemon_path();
 
     if let Some(launch) = candidates
         .iter()
@@ -521,7 +596,7 @@ fn daemon_launch() -> Result<DaemonLaunch, AgentError> {
 
 fn daemon_candidates(current: &Path) -> Vec<PathBuf> {
     let Some(current_dir) = current.parent() else {
-        return vec![PathBuf::from("/usr/local/lib/wrec/daemon")];
+        return vec![installed_daemon_path()];
     };
     let profile_dir = current_dir
         .parent()
@@ -530,11 +605,17 @@ fn daemon_candidates(current: &Path) -> Vec<PathBuf> {
     [
         Some(current_dir.join("daemon")),
         profile_dir.map(|dir| dir.join("daemon")),
-        Some(PathBuf::from("/usr/local/lib/wrec/daemon")),
+        Some(installed_daemon_path()),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+fn installed_daemon_path() -> PathBuf {
+    PathBuf::from("/usr/local/lib")
+        .join(Channel::current().runtime_dir_name())
+        .join("daemon")
 }
 
 fn daemon_executable_launch(path: PathBuf) -> Option<DaemonLaunch> {

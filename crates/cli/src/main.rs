@@ -15,7 +15,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Command::Version) => {
-            println!("wrec {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "{} {}",
+                wrec_channel::Channel::current().cli_name(),
+                std::env::var("WREC_ARTIFACT_VERSION")
+                    .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+            );
             ExitCode::SUCCESS
         }
         Ok(Command::List(list_args)) => run::list(list_args),

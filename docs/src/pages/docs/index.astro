@@ -4,6 +4,8 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
 
 const curlInstall = `curl -fsSL https://wrec.app/install | sh`;
 const curlAppInstall = `curl -fsSL https://wrec.app/install-app | sh`;
+const nightlyInstall = `curl -fsSL https://wrec.app/install-app | WREC_CHANNEL=nightly sh
+curl -fsSL https://wrec.app/install | WREC_CHANNEL=nightly sh`;
 
 const quarantine = `xattr -dr com.apple.quarantine /Applications/Wrec.app`;
 
@@ -58,6 +60,13 @@ cargo run -p cli -- targets --json   # run the agent-friendly CLI`;
   <p>The CLI for terminals, scripts, and agents installs with:</p>
   <CodeBlock code={curlInstall} label="Copy install command" />
   <p>
+    Nightly is the optimized early-access channel for testing work from <code
+      >main</code
+    >. It is isolated from stable and installs as Wrec Nightly with the
+    <code>wrec-nightly</code> CLI:
+  </p>
+  <CodeBlock code={nightlyInstall} label="Copy Nightly commands" />
+  <p>
     The app is also downloadable from
     <a
       href="https://github.com/shivamdoting/wrec/releases"
@@ -75,8 +84,8 @@ cargo run -p cli -- targets --json   # run the agent-friendly CLI`;
       <strong>macOS 15+ on Apple Silicon</strong> — Intel Macs are not supported yet.
     </li>
     <li>
-      <strong>Screen Recording permission</strong> — for the app, or for the terminal
-      running the CLI.
+      <strong>Screen Recording permission</strong> — for Wrec, Wrec Nightly, or Wrec
+      Dev. The matching CLI launches its app rather than asking for helper permission.
     </li>
     <li>
       <strong>Audio Recording permission</strong> — only when system audio capture

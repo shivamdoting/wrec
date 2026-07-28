@@ -54,12 +54,12 @@ enum Updater {
         ProcessInfo.processInfo.environment["WREC_REPO"] ?? "shivamdoting/wrec"
     }
 
-    static var currentVersion: String { Bundle.main.shortVersion }
+    static var currentVersion: String { WrecBuild.artifactVersion }
 
     /// Update only a packaged, non-dev bundle — dev and `swift run` builds
     /// update by rebuilding.
     static func eligibleBundle() -> URL? {
-        guard let bundle = Platform.currentAppBundle(), !Platform.isDevBundle() else {
+        guard let bundle = Platform.currentAppBundle(), WrecChannel.current != .dev else {
             return nil
         }
         return bundle
@@ -73,7 +73,11 @@ enum Updater {
 
     static func check() async throws -> Release? {
         let release = try await latestRelease()
-        guard isNewer(release.version, than: currentVersion) else { return nil }
+        let updateAvailable =
+            WrecChannel.current == .nightly
+            ? release.version != currentVersion
+            : isNewer(release.version, than: currentVersion)
+        guard updateAvailable else { return nil }
         return release
     }
 
@@ -156,8 +160,10 @@ enum Updater {
             return Release(version: version, assetURL: archive, sha256: digest)
         }
 
+        let endpoint =
+            WrecChannel.current == .nightly ? "releases/tags/nightly" : "releases/latest"
         var request = URLRequest(
-            url: URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!)
+            url: URL(string: "https://api.github.com/repos/\(repo)/\(endpoint)")!)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("wrec-app", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -172,15 +178,27 @@ enum Updater {
         }
         struct ReleaseJSON: Decodable {
             let tagName: String
+            let targetCommitish: String?
             let assets: [Asset]
         }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let release = try decoder.decode(ReleaseJSON.self, from: data)
 
-        let version = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
+        let version: String
+        if WrecChannel.current == .nightly {
+            let commit = String((release.targetCommitish ?? "unknown").prefix(7))
+            version = "\(Bundle.main.shortVersion)-nightly-\(commit)"
+        } else {
+            version =
+                release.tagName.hasPrefix("v")
+                ? String(release.tagName.dropFirst()) : release.tagName
+        }
         #if arch(arm64)
-        let assetName = "wrec-app-aarch64-apple-darwin.tar.gz"
+        let assetName =
+            WrecChannel.current == .nightly
+            ? "wrec-nightly-app-aarch64-apple-darwin.tar.gz"
+            : "wrec-app-aarch64-apple-darwin.tar.gz"
         #else
         throw UpdaterError.message("Wrec releases currently require an Apple Silicon Mac")
         #endif

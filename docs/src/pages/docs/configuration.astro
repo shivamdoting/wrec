@@ -3,16 +3,16 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
 
 const pathRows = [
   [
-    "~/Library/Application Support/Wrec",
-    "App config (config.json), recording history and metrics (wrec.sqlite), and the app log (wrec.log).",
+    "~/Library/Application Support/<app name>",
+    "Channel-isolated app config (config.json), recording history and metrics (wrec.sqlite), and the app log (wrec.log).",
   ],
   [
-    "~/.wrec",
-    "Daemon runtime files: the Unix socket (wrec.sock), the daemon log (daemon.log), and persisted job events (job-events.jsonl).",
+    "~/.wrec, ~/.wrec-nightly, ~/.wrec-dev",
+    "Release, Nightly, and Dev daemon runtime files: Unix socket, daemon log, and persisted job events.",
   ],
   [
     "~/Movies/<app name>",
-    "Recording output, named wrec-<unix seconds>.mov. The folder follows the app bundle name: Wrec for the release app, Wrec Dev for dev builds.",
+    "Recording output, named wrec-<unix seconds>.mov. App names are Wrec, Wrec Nightly, and Wrec Dev.",
   ],
 ];
 
@@ -24,6 +24,10 @@ const presetRows = [
 
 const envRows = [
   [
+    "WREC_CHANNEL",
+    "Selects dev, nightly, or release for controlled development and packaging. Normal installs set this automatically.",
+  ],
+  [
     "WREC_HOME",
     "Moves the daemon runtime directory (socket, daemon log, job events) away from ~/.wrec.",
   ],
@@ -33,7 +37,7 @@ const envRows = [
   ],
   [
     "WREC_DAEMON_BIN",
-    "Path to the daemon executable used when a client auto-starts the daemon.",
+    "Path to the daemon executable for controlled headless development and benchmarks.",
   ],
   [
     "WREC_CAPTURE_ENGINE_PATH",

@@ -1,7 +1,6 @@
 // Headless smoke test: `WREC_SMOKE=1 wrec-app` exercises the entire daemon
 // wire — spawn, status, permissions, targets, start → poll → stop — and
-// exits nonzero on any failure. No UI, no TCC prompts beyond what the daemon
-// itself triggers. Used by scripts and CI to prove the shell ⇄ engine
+// exits nonzero on any failure. Used by scripts and CI to prove the shell ⇄ engine
 // contract without a display.
 
 import Foundation

@@ -8,7 +8,7 @@ const architectureNotes = [
   ],
   [
     "One protocol for every client",
-    "Both clients use the same newline-delimited JSON protocol over ~/.wrec/wrec.sock. Protocol version checks prevent mismatched clients and daemons from silently misbehaving.",
+    "Both clients use the same newline-delimited JSON protocol. Dev, Nightly, and Release have different sockets, and the handshake rejects cross-channel connections.",
   ],
   [
     "Daemon owns recording state",
@@ -21,6 +21,10 @@ const architectureNotes = [
   [
     "Separate packages share one runtime shape",
     "The app package carries wrec-app, daemon, and capture-engine. The standalone CLI package carries wrec, daemon, and capture-engine.",
+  ],
+  [
+    "The app owns permission",
+    "The app requests Screen Recording directly. The daemon stays in its launch chain, and the CLI launches the matching app when needed, so internal helpers do not become user-facing permission entries.",
   ],
   [
     "Agent rule",
@@ -42,8 +46,9 @@ const architectureNotes = [
   <h2>Process boundaries</h2>
   <ol class="flow-list">
     <li>
-      <strong><code>wrec-app</code> or <code>wrec</code></strong> discovers or starts
-      the daemon, then sends a JSON request over <code>~/.wrec/wrec.sock</code>.
+      <strong><code>wrec-app</code></strong> starts its channel's daemon. A CLI first
+      launches the matching app when needed, then sends the request over that channel's
+      socket.
     </li>
     <li>
       <strong><code>daemon</code></strong> resolves the target and settings, owns

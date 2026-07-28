@@ -408,6 +408,7 @@ struct StartRecordingParams: Encodable, Sendable {
 struct DaemonStatus: Decodable, Sendable {
     let daemonVersion: String
     let protocolVersion: Int
+    let channel: WrecChannel
     let activeJobId: UInt64?
 }
 

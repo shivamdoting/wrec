@@ -87,20 +87,13 @@ enum ConfigStore {
     }
 
     private static func legacyConfigPaths() -> [URL] {
+        guard WrecChannel.current == .release else { return [] }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        var paths: [URL] = []
-        if let runtimeName = Platform.currentAppBundle()?
-            .deletingPathExtension().lastPathComponent,
-            runtimeName != "Wrec", runtimeName != "Wrec Dev"
-        {
-            let support = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            paths.append(support.appending(path: runtimeName).appending(path: "config.json"))
-        }
-        paths.append(home.appending(path: ".wrec/config.json"))
-        paths.append(home.appending(path: ".config/wrec/config.json"))
-        paths.append(home.appending(path: ".config/wrec.json"))
-        return paths
+        return [
+            home.appending(path: ".wrec/config.json"),
+            home.appending(path: ".config/wrec/config.json"),
+            home.appending(path: ".config/wrec.json"),
+        ]
     }
 
     private static func defaults() -> AppConfig {

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/wrec.png" alt="wrec" width="112" />
+  <img src="images/wrec-icon.png" alt="wrec" width="112" />
 </p>
 
 <p align="center">
@@ -59,7 +59,7 @@ and a JSON-friendly CLI for scripts and agents.
 
 The app and CLI are thin clients for the same local recording service. The
 SwiftUI shell never captures frames itself: both clients send newline-delimited
-JSON requests over a Unix socket to the Rust daemon. The daemon owns target
+JSON requests over a channel-specific Unix socket to the Rust daemon. The daemon owns target
 discovery, permissions, the recording queue, job state, controls, history, and
 metrics.
 
@@ -71,6 +71,10 @@ but never copies or processes video frames.
 The app bundle contains `wrec-app`, `daemon`, and `capture-engine`. The
 standalone CLI package contains `wrec`, `daemon`, and `capture-engine`, so both
 interfaces use the same protocol and recording pipeline.
+
+Normal CLI commands launch the matching Wrec app when its daemon is absent.
+This keeps macOS Screen Recording permission attached to Wrec, Wrec Nightly,
+or Wrec Dev instead of exposing internal helpers in System Settings.
 
 ## Install
 
@@ -100,34 +104,33 @@ under `/usr/local/lib/wrec`, and places a managed wrapper at
 `/usr/local/bin/wrec`. Update it later with `wrec update` (or check first
 with `wrec update --check`).
 
+**Nightly** — optimized early-access builds from `main`, isolated from stable:
+
+```bash
+curl -fsSL https://wrec.app/install-app | WREC_CHANNEL=nightly sh
+curl -fsSL https://wrec.app/install | WREC_CHANNEL=nightly sh
+```
+
+Nightly installs as `Wrec Nightly.app` with the `wrec-nightly` CLI.
+
 ## Requirements
 
 - macOS 15+.
 - Apple Silicon (M-series) Mac. Intel Macs are not supported yet.
-- Screen Recording permission for the app or terminal.
+- Screen Recording permission for the matching Wrec app.
 - Audio Recording permission when system audio capture is enabled.
 - Microphone permission when microphone capture is enabled.
 
-## Runtime Paths
+## Build channels
 
-App config and SQLite data:
+| Channel | Audience | App | CLI | Runtime home |
+|---|---|---|---|---|
+| Dev | Contributors building locally | Wrec Dev | `wrec-dev` | `~/.wrec-dev` |
+| Nightly | Users testing work from `main` | Wrec Nightly | `wrec-nightly` | `~/.wrec-nightly` |
+| Release | Stable users | Wrec | `wrec` | `~/.wrec` |
 
-```text
-~/Library/Application Support/Wrec
-```
-
-Default recording output:
-
-```text
-~/Movies/<app name>
-```
-
-Daemon files for local automation:
-
-```text
-~/.wrec/wrec.sock
-~/.wrec/daemon.log
-```
+Each channel also has its own `~/Library/Application Support/<app name>` data
+directory and `~/Movies/<app name>` default recording directory.
 
 Set `WREC_HOME` to override the daemon directory for tests or isolated agents.
 

@@ -115,16 +115,22 @@ Create a local dev app:
 This creates `dist/dev/Wrec Dev.app`, uses the dev Cargo profile, signs the app
 ad-hoc, and writes `dist/dev/README.md` with the local build details.
 
-Create optimized dev artifacts:
+Create optimized public Nightly artifacts:
+
+```bash
+./scripts/package-macos.sh nightly
+./scripts/package-cli-macos.sh nightly
+```
+
+Nightly creates `dist/nightly/Wrec Nightly.app` and stays isolated from both
+contributor Dev builds and stable Release builds.
+
+Create stable release artifacts explicitly:
 
 ```bash
 ./scripts/package-macos.sh release
 ./scripts/package-cli-macos.sh release
 ```
-
-The app package contains `wrec-app`, `daemon`, and `capture-engine`. The CLI
-package contains `wrec`, `daemon`, and `capture-engine`, so it can run without
-copying anything out of the app bundle.
 
 Pushing a `v*` tag whose commit is on `main` runs the release workflow and
 uploads the release `.dmg`, app update archive, standalone CLI archive,

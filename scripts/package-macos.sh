@@ -98,9 +98,6 @@ Release packaging is explicit:
 ./scripts/package-macos.sh release
 \`\`\`
 
-Release-profile dev artifacts use the release Cargo profile and the dev bundle
-id unless APP_NAME or BUNDLE_ID is overridden.
-
 ## Current build
 
 - Channel: \`$CHANNEL\`
@@ -115,9 +112,10 @@ id unless APP_NAME or BUNDLE_ID is overridden.
 
 ## Dev app paths
 
-- App data: \`~/Library/Application Support/Wrec\`
+- App data: \`~/Library/Application Support/$APP_NAME\`
 - Default recordings: \`~/Movies/$APP_NAME\`
-- Logs: \`~/Library/Application Support/Wrec/wrec.log\`
+- Runtime: \`~/.wrec-dev\`
+- Logs: \`~/Library/Application Support/$APP_NAME/wrec.log\`
 EOF
 }
 
@@ -125,10 +123,10 @@ usage() {
   cat <<EOF
 Usage: $0 [dev|nightly|release]
 
-Defaults to dev. Dev builds use the debug Cargo profile, ad-hoc signing, and
-create "Wrec Dev.app". Release packaging uses --release and creates "Wrec.app"
-with bundle id app.wrec.mac. All builds are ad-hoc signed unless
-CODESIGN_IDENTITY is set.
+Defaults to dev. Dev is the contributor-local debug build. Nightly is the
+optimized public early-access build. Release is the optimized stable build.
+All three have independent bundle ids, storage, sockets, CLI names, and
+artifacts. Builds are ad-hoc signed unless CODESIGN_IDENTITY is set.
 EOF
 }
 
@@ -139,12 +137,18 @@ if [[ $# -gt 1 ]]; then
 fi
 
 case "$CHANNEL" in
-  dev | nightly)
-    CHANNEL="dev"
+  dev)
     DEFAULT_APP_NAME="Wrec Dev"
     DEFAULT_BUNDLE_ID="app.wrec.dev"
     DEFAULT_PROFILE="dev"
     DEFAULT_CREATE_DMG="0"
+    DEFAULT_ICON_SOURCE="$ROOT/images/wrec-dev.png"
+    ;;
+  nightly)
+    DEFAULT_APP_NAME="Wrec Nightly"
+    DEFAULT_BUNDLE_ID="app.wrec.nightly"
+    DEFAULT_PROFILE="release"
+    DEFAULT_CREATE_DMG="1"
     DEFAULT_ICON_SOURCE="$ROOT/images/wrec-dev.png"
     ;;
   release)
@@ -173,7 +177,8 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 NOTARIZE="${NOTARIZE:-0}"
 CREATE_DMG="${CREATE_DMG:-$DEFAULT_CREATE_DMG}"
 ICON_SOURCE="${ICON_SOURCE:-$DEFAULT_ICON_SOURCE}"
-TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/wrec-$CHANNEL}"
+SWIFT_SCRATCH="${SWIFT_SCRATCH_PATH:-$ROOT/target/swift/$CHANNEL}"
 DIST_DIR="$ROOT/dist/$CHANNEL"
 APP="$DIST_DIR/$APP_NAME.app"
 CONTENTS="$APP/Contents"
@@ -183,6 +188,9 @@ INFO_PLIST="$CONTENTS/Info.plist"
 ENTITLEMENTS="$ROOT/packaging/macos/entitlements.plist"
 VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)}"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo local)"
+if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+  GIT_SHA="$GIT_SHA-dirty"
+fi
 BUILT_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 BUILT_BY="$(id -un 2>/dev/null || whoami 2>/dev/null || echo unknown)"
 BUILD_HOST="$(hostname 2>/dev/null || echo unknown)"
@@ -191,6 +199,9 @@ ARTIFACT_VERSION="${ARTIFACT_VERSION:-$VERSION}"
 case "$CHANNEL" in
   dev)
     ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER:-dev-$GIT_SHA}"
+    ;;
+  nightly)
+    ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER:-nightly-$GIT_SHA}"
     ;;
   release)
     ARTIFACT_QUALIFIER="${ARTIFACT_QUALIFIER:-}"
@@ -225,6 +236,8 @@ log "Packaging channel: $CHANNEL"
 log "App name: $APP_NAME"
 log "Bundle id: $BUNDLE_ID"
 log "Cargo profile: $PROFILE_DIR"
+log "Cargo target: $TARGET_DIR"
+log "Swift scratch: $SWIFT_SCRATCH"
 log "Version: $VERSION"
 log "Artifact version: $ARTIFACT_VERSION"
 log "Output app: $APP"
@@ -239,13 +252,16 @@ else
   SWIFT_CONFIG="debug"
 fi
 log "Building Swift app shell ($SWIFT_CONFIG)"
-run swift build -c "$SWIFT_CONFIG" --package-path "$ROOT/apps/mac"
-SWIFT_BIN_DIR="$(swift build -c "$SWIFT_CONFIG" --package-path "$ROOT/apps/mac" --show-bin-path)"
+run swift build -c "$SWIFT_CONFIG" --package-path "$ROOT/apps/mac" --scratch-path "$SWIFT_SCRATCH"
+SWIFT_BIN_DIR="$(
+  swift build -c "$SWIFT_CONFIG" --package-path "$ROOT/apps/mac" \
+    --scratch-path "$SWIFT_SCRATCH" --show-bin-path
+)"
 log "Building daemon and capture engine"
 cargo_messages="$(mktemp)"
 trap 'rm -f "$cargo_messages"' EXIT
-log "+ cargo ${cargo_args[*]} -p daemon --bin $DAEMON_BIN_NAME --message-format=json-render-diagnostics"
-cargo "${cargo_args[@]}" -p daemon --bin "$DAEMON_BIN_NAME" \
+log "+ env CARGO_TARGET_DIR=$TARGET_DIR cargo ${cargo_args[*]} -p daemon --bin $DAEMON_BIN_NAME --message-format=json-render-diagnostics"
+CARGO_TARGET_DIR="$TARGET_DIR" cargo "${cargo_args[@]}" -p daemon --bin "$DAEMON_BIN_NAME" \
   --message-format=json-render-diagnostics >"$cargo_messages"
 CAPTURE_ENGINE="$(
   sed -n 's/.*\["WREC_CAPTURE_ENGINE_PATH","\([^"]*\)"\].*/\1/p' "$cargo_messages" \
@@ -297,6 +313,9 @@ run /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$INFO_PLIST"
 run /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $BIN_NAME" "$INFO_PLIST"
 run /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$INFO_PLIST"
 run /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$INFO_PLIST"
+run /usr/libexec/PlistBuddy -c "Set :WrecChannel $CHANNEL" "$INFO_PLIST"
+run /usr/libexec/PlistBuddy -c "Set :WrecGitSHA $GIT_SHA" "$INFO_PLIST"
+run /usr/libexec/PlistBuddy -c "Set :WrecArtifactVersion $ARTIFACT_VERSION" "$INFO_PLIST"
 
 sign_args=(--force --options runtime --sign "$CODESIGN_IDENTITY")
 if [[ "$CODESIGN_IDENTITY" != "-" ]]; then

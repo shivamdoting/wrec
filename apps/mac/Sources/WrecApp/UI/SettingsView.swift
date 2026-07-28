@@ -30,6 +30,10 @@ struct SettingsGeneralPreview: View {
 
     var body: some View { GeneralTab(model: model) }
 }
+
+struct SettingsAboutPreview: View {
+    var body: some View { AboutTab() }
+}
 #endif
 
 // MARK: - General
@@ -220,7 +224,17 @@ private struct AboutTab: View {
     var body: some View {
         Form {
             LabeledContent("Version") {
-                Text(Bundle.main.shortVersion.isEmpty ? "dev" : Bundle.main.shortVersion)
+                Text(WrecBuild.artifactVersion.isEmpty ? "dev" : WrecBuild.artifactVersion)
+                    .font(.pixel(12))
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Channel") {
+                Text(WrecChannel.current.displayName)
+                    .font(.pixel(12))
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Commit") {
+                Text(WrecBuild.gitSHA)
                     .font(.pixel(12))
                     .foregroundStyle(.secondary)
             }

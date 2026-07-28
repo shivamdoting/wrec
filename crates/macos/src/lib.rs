@@ -208,7 +208,10 @@ mod platform {
     const CAPTURE_ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
     // The mic request blocks on the macOS permission dialog until the user answers.
     const MIC_PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-    const START_TIMEOUT: Duration = Duration::from_secs(5);
+    // ScreenCaptureKit's first start after a fresh permission grant can spend
+    // several seconds warming system services. Keep the steady-state path
+    // unchanged while allowing that one-time cold start to complete.
+    const START_TIMEOUT: Duration = Duration::from_secs(10);
     const STOP_TIMEOUT: Duration = Duration::from_secs(20);
     const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 

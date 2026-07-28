@@ -68,6 +68,7 @@ dependencies = [
  "ctrlc",
  "domain",
  "serde_json",
+ "wrec-channel",
 ]
 
 [[package]]
@@ -79,6 +80,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "wrec-channel",
 ]
 
 [[package]]
@@ -88,6 +90,7 @@ dependencies = [
  "domain",
  "serde",
  "serde_json",
+ "wrec-channel",
 ]
 
 [[package]]
@@ -115,6 +118,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+ "wrec-channel",
 ]
 
 [[package]]
@@ -137,6 +141,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "wrec-channel",
 ]
 
 [[package]]
@@ -898,6 +903,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "wrec-channel"
+version = "0.3.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

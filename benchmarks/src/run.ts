@@ -912,6 +912,7 @@ const runWrec = (binary: BinaryRuntime, args: string[]) =>
   runProcess([binary.path, ...args], repoRoot, {
     ...baseWrecEnv(),
     WREC_HOME: binary.wrecHome,
+    WREC_HEADLESS: "1",
     WREC_DATA_DIR: binary.dataDir,
   });
 

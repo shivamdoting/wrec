@@ -59,8 +59,8 @@ enum SkillInstallStatus: Equatable {
 enum Platform {
     static let githubURL = URL(string: "https://github.com/shivamdoting/wrec")!
     private static let managedMarker = "# managed by wrec"
-    private static let installedBin = "/usr/local/bin/wrec"
-    private static let installedLib = "/usr/local/lib/wrec"
+    private static var installedBin: String { "/usr/local/bin/\(WrecChannel.current.cliName)" }
+    private static var installedLib: String { "/usr/local/lib/\(WrecChannel.current.runtimeName)" }
 
     // MARK: - CLI
 
@@ -72,16 +72,22 @@ enum Platform {
         else {
             return .conflict
         }
-        let complete = ["wrec", "daemon", "capture-engine"].allSatisfy {
+        let complete = [WrecChannel.current.cliName, "daemon", "capture-engine"].allSatisfy {
             fm.fileExists(atPath: "\(installedLib)/\($0)")
         }
         return complete ? .installed : .needsUpdate
     }
 
     static func cliInstallCommand() -> String {
+        if WrecChannel.current == .dev {
+            return "cargo run -p cli -- help"
+        }
         let version = Bundle.main.shortVersion
-        let prefix = version.isEmpty || isDevBundle() ? "" : "WREC_VERSION=\(version) "
-        return "curl -fsSL https://wrec.app/install | \(prefix)sh"
+        let versionPrefix =
+            version.isEmpty || WrecChannel.current == .nightly ? "" : "WREC_VERSION=\(version) "
+        let channelPrefix =
+            WrecChannel.current == .nightly ? "WREC_CHANNEL=nightly " : ""
+        return "curl -fsSL https://wrec.app/install | \(channelPrefix)\(versionPrefix)sh"
     }
 
     // MARK: - Skill
@@ -165,9 +171,7 @@ enum Platform {
     }
 
     static func isDevBundle() -> Bool {
-        guard let bundle = currentAppBundle() else { return true }
-        if bundle.lastPathComponent.contains("Dev") { return true }
-        return (Bundle.main.bundleIdentifier ?? "").contains("wrec.dev")
+        WrecChannel.current == .dev
     }
 }
 

@@ -20,6 +20,12 @@
 	<string>0.3.0</string>
 	<key>CFBundleVersion</key>
 	<string>0.3.0</string>
+	<key>WrecChannel</key>
+	<string>dev</string>
+	<key>WrecGitSHA</key>
+	<string>local</string>
+	<key>WrecArtifactVersion</key>
+	<string>0.3.0-dev-local</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.video</string>
 	<key>LSMinimumSystemVersion</key>

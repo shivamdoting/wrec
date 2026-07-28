@@ -57,6 +57,12 @@ private struct HeaderRow: View {
                 .font(.pixel(13))
                 .foregroundStyle(Color.primary)
                 .fixedSize()
+            if !WrecChannel.current.badge.isEmpty {
+                Text(WrecChannel.current.badge)
+                    .font(.pixel(9))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
             Group {
                 if model.showNerdLogs,
                     model.phase.isActiveSession,

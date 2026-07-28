@@ -36,13 +36,22 @@ For contributor/dev packaging:
 
 This creates `dist/dev/Wrec Dev.app` with the dev Cargo profile, ad-hoc
 signing, bundle id `app.wrec.dev`, shared app data in
-`~/Library/Application Support/Wrec`, and recordings in `~/Movies/Wrec Dev`.
+`~/Library/Application Support/Wrec Dev`, and recordings in `~/Movies/Wrec Dev`.
 It also writes `dist/dev/README.md` on every run with the local commands and
 build details for that generated app.
 
 Dev packaging uses `images/wrec-dev.png` as the app icon.
 
-For release packaging:
+For public Nightly packaging:
+
+```bash
+./scripts/package-macos.sh nightly
+```
+
+This creates the optimized `dist/nightly/Wrec Nightly.app` with bundle id
+`app.wrec.nightly` and runtime home `~/.wrec-nightly`.
+
+For stable release packaging:
 
 ```bash
 ./scripts/package-macos.sh release
@@ -73,7 +82,7 @@ wrec-cli/
   capture-engine
 ```
 
-The resulting archive is written to `dist/cli/wrec-cli-<target>.tar.gz`.
+The resulting archives are written below `dist/cli/<channel>/`.
 `scripts/install-cli.sh` installs that runtime under `/usr/local/lib/wrec` and
 places a managed wrapper at `/usr/local/bin/wrec`.
 

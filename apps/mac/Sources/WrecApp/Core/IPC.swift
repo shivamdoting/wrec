@@ -18,6 +18,7 @@ enum IPCError: Error, CustomStringConvertible {
     case unreachable(String)
     case daemon(AgentError)
     case protocolMismatch(Int)
+    case channelMismatch(expected: WrecChannel, got: WrecChannel)
     case malformed(String)
 
     var description: String {
@@ -25,6 +26,8 @@ enum IPCError: Error, CustomStringConvertible {
         case .unreachable(let why): "daemon unreachable: \(why)"
         case .daemon(let err): err.message
         case .protocolMismatch(let got): "daemon protocol \(got) ≠ expected \(Self.protocolVersion)"
+        case .channelMismatch(let expected, let got):
+            "daemon channel \(got.rawValue) ≠ expected \(expected.rawValue)"
         case .malformed(let why): "malformed daemon response: \(why)"
         }
     }
@@ -68,6 +71,19 @@ actor DaemonClient {
             try checkProtocol(status)
             return
         }
+        // A pre-channel or otherwise incompatible idle daemon may still own
+        // this channel's legacy socket after an app update. Ask it to stop
+        // before spawning the bundled runtime. Busy daemons reject the stop,
+        // preserving any active recording.
+        if FileManager.default.fileExists(atPath: WrecPaths.socketPath().path) {
+            try? await stopDaemon()
+            let deadline = Date().addingTimeInterval(2)
+            while FileManager.default.fileExists(atPath: WrecPaths.socketPath().path),
+                Date() < deadline
+            {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
         try spawnDaemon()
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
@@ -87,6 +103,15 @@ actor DaemonClient {
     func stopDaemon() async throws {
         struct StopResult: Decodable { let stopping: Bool }
         let _: StopResult = try await request("daemon.stop", EmptyParams())
+    }
+
+    /// App termination cannot await actor work. Send one short best-effort
+    /// stop request synchronously; a busy daemon rejects it so an active
+    /// recording is never killed with the UI.
+    nonisolated static func stopDaemonOnExit() {
+        var payload = Data(#"{"id":0,"method":"daemon.stop","params":{}}"#.utf8)
+        payload.append(0x0A)
+        _ = try? roundTrip(payload, timeoutSeconds: 1)
     }
 
     func screenPermissionStatus() async throws -> PermissionStatus {
@@ -264,6 +289,9 @@ actor DaemonClient {
         guard status.protocolVersion == IPCError.protocolVersion else {
             throw IPCError.protocolMismatch(status.protocolVersion)
         }
+        guard status.channel == WrecChannel.current else {
+            throw IPCError.channelMismatch(expected: WrecChannel.current, got: status.channel)
+        }
     }
 
     // MARK: - Daemon spawn (port of control::ensure_daemon)
@@ -285,14 +313,14 @@ actor DaemonClient {
             _ = posix_spawn_file_actions_addopen(&fileActions, 2, log, O_WRONLY | O_APPEND | O_CREAT, 0o644)
         }
 
-        // New session so the daemon outlives this app, matching the Rust
-        // client's `process_group(0)`.
+        // Keep the daemon in the app's responsibility chain. Detaching it
+        // makes Screen Recording permission appear to belong to a helper.
         var attrs: posix_spawnattr_t?
         posix_spawnattr_init(&attrs)
         defer { posix_spawnattr_destroy(&attrs) }
-        posix_spawnattr_setflags(&attrs, Int16(POSIX_SPAWN_SETSID))
 
         var environment = ProcessInfo.processInfo.environment
+        environment["WREC_CHANNEL"] = WrecChannel.current.rawValue
         if let engine = launch.captureEnginePath {
             environment["WREC_CAPTURE_ENGINE_PATH"] = engine
         }
@@ -319,7 +347,7 @@ actor DaemonClient {
 
     /// Binary resolution order mirrors `control::daemon_candidates`:
     /// `$WREC_DAEMON_BIN` → sibling `daemon` next to this executable →
-    /// `/usr/local/lib/wrec/daemon`. A sibling daemon requires a sibling
+    /// `/usr/local/lib/<channel>/daemon`. A sibling daemon requires a sibling
     /// `capture-engine`, passed via env.
     private static func daemonLaunch() -> DaemonLaunch? {
         let fm = FileManager.default
@@ -336,16 +364,12 @@ actor DaemonClient {
                 return DaemonLaunch(binary: sibling, captureEnginePath: engine)
             }
         }
-        // The installed daemon is a release build serving `~/.wrec`; a debug
-        // shell polls `~/.wrec-dev` and would never see it come up — it'd
-        // just orphan a release daemon and time out.
-        #if !DEBUG
-        let installed = "/usr/local/lib/wrec/daemon"
-        let installedEngine = "/usr/local/lib/wrec/capture-engine"
+        let runtime = WrecChannel.current.runtimeName
+        let installed = "/usr/local/lib/\(runtime)/daemon"
+        let installedEngine = "/usr/local/lib/\(runtime)/capture-engine"
         if fm.isExecutableFile(atPath: installed), fm.isExecutableFile(atPath: installedEngine) {
             return DaemonLaunch(binary: installed, captureEnginePath: installedEngine)
         }
-        #endif
         return nil
     }
 }
