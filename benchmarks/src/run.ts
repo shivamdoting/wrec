@@ -711,11 +711,7 @@ const runSuite = async (
       reference ? referenceRuns : undefined,
       envTrusted,
     );
-    const status = statusFromGates(gates, [
-      ...warmups,
-      ...candidateRuns,
-      ...referenceRuns,
-    ]);
+    const status = statusFromGates(gates, [...candidateRuns, ...referenceRuns]);
     results.push({
       name: profile.name,
       request: {

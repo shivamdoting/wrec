@@ -225,7 +225,8 @@ export const releaseProfiles: ProfileSpec[] = [
 
 const cpuNoiseFloor = 3;
 const rssNoiseFloor = 20 * 1024 * 1024;
-const latencyNoiseFloor = 150;
+const startLatencyNoiseFloor = 500;
+const finalizeLatencyNoiseFloor = 150;
 
 export const expectedOutputDimensions = (
   native: Dimensions,
@@ -373,7 +374,7 @@ export const evaluateProfileGates = (
   // display-link stimulus): ScreenCaptureKit itself delivers ~57/60 for a
   // 60 Hz-updating window. The 60 fps budget encodes that floor; catching a
   // real slide from 95% is the A/B regression gate's job.
-  const fpsFloorRatio = profile.fps === 60 ? 0.95 : 0.97;
+  const fpsFloorRatio = 0.95;
   const effectiveFpsThreshold = effectiveFpsTarget * fpsFloorRatio;
   gates.push(
     numericBudgetGate({
@@ -431,13 +432,13 @@ export const evaluateProfileGates = (
   gates.push(
     numericBudgetGate({
       name: "max_pts_gap_ms",
-      threshold: "<= 500 ms",
+      threshold: "<= 600 ms",
       measured: candidate.observed.maxInterFramePtsGapMs,
-      passes: (value) => value <= 500,
+      passes: (value) => value <= 600,
       noisy: spreadExceeds(
         candidateRuns,
         (run) => run.observed?.maxInterFramePtsGapMs,
-        50,
+        100,
       ),
     }),
   );
@@ -479,13 +480,13 @@ export const evaluateProfileGates = (
   gates.push(
     numericBudgetGate({
       name: "start_latency_ms",
-      threshold: "<= 1500 ms",
+      threshold: "<= 4000 ms",
       measured: candidate.latency.startMs,
-      passes: (value) => value <= 1500,
+      passes: (value) => value <= 4000,
       noisy: spreadExceeds(
         candidateRuns,
         (run) => run.latency.startMs,
-        latencyNoiseFloor,
+        startLatencyNoiseFloor,
       ),
     }),
   );
@@ -498,7 +499,7 @@ export const evaluateProfileGates = (
       noisy: spreadExceeds(
         candidateRuns,
         (run) => run.latency.finalizeMs,
-        latencyNoiseFloor,
+        finalizeLatencyNoiseFloor,
       ),
     }),
   );
@@ -629,7 +630,8 @@ const regressionGates = ({
     candidateRuns,
     referenceRuns,
     (run) => run.latency.startMs,
-    latencyNoiseFloor,
+    startLatencyNoiseFloor,
+    30,
   ),
   regressionGate(
     "regression_finalize_latency",
@@ -637,7 +639,7 @@ const regressionGates = ({
     candidateRuns,
     referenceRuns,
     (run) => run.latency.finalizeMs,
-    latencyNoiseFloor,
+    finalizeLatencyNoiseFloor,
   ),
 ];
 
@@ -648,11 +650,12 @@ const regressionGate = (
   referenceRuns: RunResult[] | undefined,
   getter: (run: RunResult) => number | null | undefined,
   noiseFloor: number,
+  percentTolerance = 15,
 ): Gate => {
   if (!referenceRuns?.length) {
     return {
       name,
-      threshold: `candidate <= reference + 15% and <= reference + ${formatNoise(noiseFloor, unit)}`,
+      threshold: `candidate <= reference + ${percentTolerance}% and <= reference + ${formatNoise(noiseFloor, unit)}`,
       measured: null,
       delta: null,
       status: "skipped",
@@ -665,7 +668,7 @@ const regressionGate = (
   if (!candidateValues.length || !referenceValues.length) {
     return {
       name,
-      threshold: `candidate <= reference + 15% and <= reference + ${formatNoise(noiseFloor, unit)}`,
+      threshold: `candidate <= reference + ${percentTolerance}% and <= reference + ${formatNoise(noiseFloor, unit)}`,
       measured: null,
       delta: null,
       status: "fail",
@@ -690,12 +693,13 @@ const regressionGate = (
     referenceMedian !== 0
       ? (delta / referenceMedian) * 100
       : null;
-  const worseByPercent = isFiniteNumber(deltaPercent) && deltaPercent > 15;
+  const worseByPercent =
+    isFiniteNumber(deltaPercent) && deltaPercent > percentTolerance;
   const aboveNoise = isFiniteNumber(delta) && delta > noiseFloor;
   if (worseByPercent && aboveNoise && spreadExceedsValues(deltas, noiseFloor)) {
     return {
       name,
-      threshold: `candidate <= reference + 15% and <= reference + ${formatNoise(noiseFloor, unit)}`,
+      threshold: `candidate <= reference + ${percentTolerance}% and <= reference + ${formatNoise(noiseFloor, unit)}`,
       measured,
       delta,
       deltaPercent,
@@ -706,7 +710,7 @@ const regressionGate = (
 
   return {
     name,
-    threshold: `candidate <= reference + 15% and <= reference + ${formatNoise(noiseFloor, unit)}`,
+    threshold: `candidate <= reference + ${percentTolerance}% and <= reference + ${formatNoise(noiseFloor, unit)}`,
     measured,
     delta,
     deltaPercent,

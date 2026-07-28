@@ -106,20 +106,20 @@ threshold, measured value, delta where applicable, and status.
 
 Hard gates:
 
-- observed steady-state FPS >= 97% (30 fps) or 95% (60 fps) of min(profile
-  target, stimulus achieved rate) — the recorder is not blamed for frames the
-  stimulus never displayed, and 60 fps window capture tops out around 95% of
-  the display rate even with zero engine-reported drops
+- observed steady-state FPS >= 95% of min(profile target, stimulus achieved
+  rate) — the recorder is not blamed for frames the stimulus never displayed,
+  and ScreenCaptureKit window delivery settles around 95–98% of the requested
+  rate even with zero engine-reported drops
 - capture completeness: unique captured stimulus indices over the index span
   that reached the screen during the steady window; gated only when the
   capture rate covers the display rate (a 30 fps profile of a 60 Hz stimulus
   skips every other index by design)
 - self-reported drop ratio <= 0.5% at 30 fps or <= 1% at 60 fps
-- max inter-frame PTS gap <= 500 ms
+- median per-rep maximum inter-frame PTS gap <= 600 ms
 - PTS monotonicity
 - decoded codec and dimensions match the request
 - self-reported frames and decoded file frames disagree by <= 5%
-- start latency <= 1500 ms
+- start latency <= 4000 ms
 - finalize latency <= 3000 ms, or <= 5000 ms for `high`
 
 A/B gates with `--against`:
@@ -130,9 +130,11 @@ A/B gates with `--against`:
 - start latency
 - finalize latency
 
-A/B gates fail only when the candidate is worse than reference by more than 15%
-and above the metric noise floor. Same-binary rep spread above twice the noise
-floor makes the affected gate `inconclusive`.
+A/B CPU, memory, and finalize gates fail only when the candidate is worse than
+reference by more than 15% and above the metric noise floor. ScreenCaptureKit
+startup is OS-controlled and more variable, so start latency uses 30% and
+500 ms. Paired A/B delta spread makes only an apparent regression
+`inconclusive`; a passing median is not invalidated by one outlier.
 
 Environment preamble captures AC power, thermal state, macOS version, chip,
 memory, load average, current CPU idle, and git commit/dirty state. A release

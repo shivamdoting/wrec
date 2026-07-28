@@ -149,10 +149,10 @@ window.isReleasedWhenClosed = false
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
 let visibilityTimer = Timer(timeInterval: 1, repeats: true) { _ in
-    if !app.isActive {
+    if !app.isActive || !window.isKeyWindow {
         app.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
-    window.orderFrontRegardless()
 }
 RunLoop.main.add(visibilityTimer, forMode: .common)
 
