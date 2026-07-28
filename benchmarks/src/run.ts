@@ -158,7 +158,7 @@ const stimulusTitle = "wrec-bench-stimulus";
 const environmentSettleTimeoutMs = 5 * 60_000;
 const environmentSettlePollMs = 2_000;
 const minimumCpuIdlePercent = 65;
-const stableCpuSamples = 3;
+const cpuIdleWindowSize = 5;
 const measuredReps = 5;
 const captureAttempts = 3;
 const captureCooldownMs = 1_500;
@@ -1070,8 +1070,8 @@ const waitForStableCpu = async (suite: SuiteName) => {
   if (suite !== "release") return null;
 
   const started = Date.now();
-  let stableSamples = 0;
   let idle = await currentCpuIdlePercent();
+  let samples = [idle];
   if (idle < minimumCpuIdlePercent) {
     console.log(
       `waiting for CPU idle to settle: ${idle.toFixed(1)}% < ${minimumCpuIdlePercent}%`,
@@ -1079,19 +1079,27 @@ const waitForStableCpu = async (suite: SuiteName) => {
   }
 
   while (Date.now() - started < environmentSettleTimeoutMs) {
-    stableSamples = idle >= minimumCpuIdlePercent ? stableSamples + 1 : 0;
-    if (stableSamples >= stableCpuSamples) {
+    const window =
+      samples.length >= cpuIdleWindowSize
+        ? samples.slice(-cpuIdleWindowSize)
+        : [];
+    const medianIdle = medianNumber(window);
+    if (
+      window.length === cpuIdleWindowSize &&
+      medianIdle >= minimumCpuIdlePercent
+    ) {
       console.log(
-        `pre-measurement CPU idle: ${idle.toFixed(1)}% (${stableCpuSamples} stable samples)`,
+        `pre-measurement CPU idle: ${medianIdle.toFixed(1)}% median (${cpuIdleWindowSize} samples)`,
       );
-      return idle;
+      return medianIdle;
     }
     await Bun.sleep(environmentSettlePollMs);
     idle = await currentCpuIdlePercent();
+    samples.push(idle);
   }
 
   throw new Error(
-    `CPU idle did not stay above ${minimumCpuIdlePercent}% within ${environmentSettleTimeoutMs / 60_000} minutes (last ${idle.toFixed(1)}%)`,
+    `median CPU idle did not reach ${minimumCpuIdlePercent}% within ${environmentSettleTimeoutMs / 60_000} minutes (last ${idle.toFixed(1)}%)`,
   );
 };
 
@@ -1105,6 +1113,12 @@ const currentCpuIdlePercent = async () => {
     );
   }
   return idle;
+};
+
+const medianNumber = (values: number[]) => {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor(sorted.length / 2)];
 };
 
 const baseWrecEnv = () => {
@@ -1552,7 +1566,7 @@ const environmentGuards = (
     },
     {
       name: "env_cpu_idle",
-      threshold: `CPU idle >= ${minimumCpuIdlePercent}% for ${stableCpuSamples} samples`,
+      threshold: `median CPU idle >= ${minimumCpuIdlePercent}% over ${cpuIdleWindowSize} samples`,
       measured: cpuIdlePercent,
       status:
         typeof cpuIdlePercent === "number" &&

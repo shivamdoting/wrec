@@ -136,8 +136,8 @@ floor makes the affected gate `inconclusive`.
 
 Environment preamble captures AC power, thermal state, macOS version, chip,
 memory, load average, current CPU idle, and git commit/dirty state. A release
-run begins only after CPU idle stays above 65% for three samples. Battery,
-thermal, or CPU-idle failures abort before a result is written.
+run begins only after median CPU idle stays above 65% across five samples.
+Battery, thermal, or CPU-idle failures abort before a result is written.
 
 ## Options
 
