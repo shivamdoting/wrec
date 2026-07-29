@@ -1,9 +1,10 @@
 name: Nightly
 
+# Nightly is published on demand only. It force-moves the `nightly` tag and
+# clobbers the rolling release's assets, so it ships to early-access users the
+# moment it runs — that is a release decision, not a side effect of a push.
+# Trigger it deliberately with `gh workflow run Nightly [--ref <ref>]`.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
