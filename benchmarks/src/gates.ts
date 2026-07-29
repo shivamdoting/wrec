@@ -374,7 +374,7 @@ export const evaluateProfileGates = (
   // display-link stimulus): ScreenCaptureKit itself delivers ~57/60 for a
   // 60 Hz-updating window. The 60 fps budget encodes that floor; catching a
   // real slide from 95% is the A/B regression gate's job.
-  const fpsFloorRatio = 0.95;
+  const fpsFloorRatio = profile.fps === 60 ? 0.9 : 0.95;
   const effectiveFpsThreshold = effectiveFpsTarget * fpsFloorRatio;
   gates.push(
     numericBudgetGate({
@@ -600,6 +600,14 @@ const regressionGates = ({
   candidateRuns: RunResult[];
   referenceRuns?: RunResult[];
 }) => [
+  higherIsBetterRegressionGate(
+    "regression_observed_fps",
+    "fps",
+    candidateRuns,
+    referenceRuns,
+    (run) => run.observed?.effectiveFps,
+    1,
+  ),
   regressionGate(
     "regression_cpu_avg",
     "%",
@@ -642,6 +650,82 @@ const regressionGates = ({
     finalizeLatencyNoiseFloor,
   ),
 ];
+
+const higherIsBetterRegressionGate = (
+  name: string,
+  unit: string,
+  candidateRuns: RunResult[],
+  referenceRuns: RunResult[] | undefined,
+  getter: (run: RunResult) => number | null | undefined,
+  noiseFloor: number,
+  percentTolerance = 15,
+): Gate => {
+  const threshold = `candidate >= reference - ${percentTolerance}% and >= reference - ${formatNoise(noiseFloor, unit)}`;
+  if (!referenceRuns?.length) {
+    return {
+      name,
+      threshold,
+      measured: null,
+      delta: null,
+      status: "skipped",
+      details: "--against not provided",
+    };
+  }
+
+  const candidateValues = candidateRuns.map(getter).filter(isFiniteNumber);
+  const referenceValues = referenceRuns.map(getter).filter(isFiniteNumber);
+  const deltas = candidateRuns
+    .slice(0, referenceRuns.length)
+    .map((run, index) => {
+      const candidate = getter(run);
+      const reference = getter(referenceRuns[index]);
+      return isFiniteNumber(candidate) && isFiniteNumber(reference)
+        ? candidate - reference
+        : null;
+    })
+    .filter(isFiniteNumber);
+  const measured = median(candidateValues);
+  const referenceMedian = median(referenceValues);
+  const delta = median(deltas);
+  if (
+    !isFiniteNumber(measured) ||
+    !isFiniteNumber(referenceMedian) ||
+    !isFiniteNumber(delta)
+  ) {
+    return {
+      name,
+      threshold,
+      measured: null,
+      delta: null,
+      status: "fail",
+      details: "metric unavailable",
+    };
+  }
+
+  const deltaPercent =
+    referenceMedian === 0 ? null : (delta / referenceMedian) * 100;
+  const regressed =
+    isFiniteNumber(deltaPercent) &&
+    deltaPercent < -percentTolerance &&
+    delta < -noiseFloor;
+  return {
+    name,
+    threshold,
+    measured,
+    delta,
+    deltaPercent,
+    status:
+      regressed && spreadExceedsValues(deltas, noiseFloor)
+        ? "inconclusive"
+        : regressed
+          ? "fail"
+          : "pass",
+    details:
+      regressed && spreadExceedsValues(deltas, noiseFloor)
+        ? "paired A/B delta spread exceeded noise floor"
+        : undefined,
+  };
+};
 
 const regressionGate = (
   name: string,

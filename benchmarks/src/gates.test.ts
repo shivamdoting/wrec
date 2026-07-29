@@ -106,4 +106,57 @@ describe("release gate hardening", () => {
     expect(status("start_latency_ms")).toBe("pass");
     expect(status("max_pts_gap_ms")).toBe("pass");
   });
+
+  test("calibrates native 60 fps while retaining an A/B regression gate", () => {
+    const nativeProfile: ProfileSpec = {
+      name: "high-native60-hevc",
+      quality: "high",
+      resolution: "native",
+      fps: 60,
+      codec: "hevc",
+    };
+    const nativeRun = (
+      rep: number,
+      variant: "candidate" | "reference",
+      effectiveFps: number,
+    ) => {
+      const base = run(rep, 1_500, 200);
+      return {
+        ...base,
+        id: `${variant}-${rep}`,
+        variant,
+        profile: nativeProfile.name,
+        decode: {
+          ...base.decode!,
+          dimensions: { width: 2560, height: 1440 },
+        },
+        observed: {
+          ...base.observed!,
+          effectiveFps,
+          stimulusAchievedFps: 58,
+          captureCompleteness: effectiveFps / 58,
+          dimensions: { width: 2560, height: 1440 },
+        },
+      } satisfies RunResult;
+    };
+    const candidate = [52, 52.5, 53].map((fps, index) =>
+      nativeRun(index + 1, "candidate", fps),
+    );
+    const reference = [55.5, 56, 56.5].map((fps, index) =>
+      nativeRun(index + 1, "reference", fps),
+    );
+    const gates = evaluateProfileGates(
+      nativeProfile,
+      10_000,
+      { width: 2560, height: 1440 },
+      candidate,
+      reference,
+    );
+    const status = (name: string) =>
+      gates.find((gate) => gate.name === name)?.status;
+
+    expect(status("observed_fps")).toBe("pass");
+    expect(status("capture_completeness")).toBe("pass");
+    expect(status("regression_observed_fps")).toBe("pass");
+  });
 });

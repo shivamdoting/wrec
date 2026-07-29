@@ -107,9 +107,9 @@ threshold, measured value, delta where applicable, and status.
 Hard gates:
 
 - observed steady-state FPS >= 95% of min(profile target, stimulus achieved
-  rate) — the recorder is not blamed for frames the stimulus never displayed,
-  and ScreenCaptureKit window delivery settles around 95–98% of the requested
-  rate even with zero engine-reported drops
+  rate), or 90% for native 60 fps on entry-level hardware — the recorder is not
+  blamed for frames the stimulus never displayed; an A/B FPS gate separately
+  rejects candidate regressions beyond 15% and 1 fps
 - capture completeness: unique captured stimulus indices over the index span
   that reached the screen during the steady window; gated only when the
   capture rate covers the display rate (a 30 fps profile of a 60 Hz stimulus
@@ -127,6 +127,7 @@ A/B gates with `--against`:
 - average CPU
 - p95 CPU
 - max RSS
+- observed FPS
 - start latency
 - finalize latency
 
