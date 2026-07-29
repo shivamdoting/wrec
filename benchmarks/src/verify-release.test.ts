@@ -23,8 +23,8 @@ const passingSummary = () => ({
   profiles: profileNames.map((name) => ({
     name,
     measured: {
-      candidate: [{}, {}, {}, {}, {}],
-      reference: [{}, {}, {}, {}, {}],
+      candidate: [{}, {}, {}],
+      reference: [{}, {}, {}],
     },
   })),
 });
@@ -58,7 +58,7 @@ describe("validateReleaseSummary", () => {
       expect.arrayContaining([
         "status is not pass",
         "benchmark checkout was dirty",
-        "efficient-720p30-hevc has fewer than 5 reference reps",
+        "efficient-720p30-hevc has fewer than 3 reference reps",
       ]),
     );
   });

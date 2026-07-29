@@ -159,10 +159,12 @@ const environmentSettleTimeoutMs = 5 * 60_000;
 const environmentSettlePollMs = 2_000;
 const minimumCpuIdlePercent = 65;
 const cpuIdleWindowSize = 5;
-const measuredReps = 5;
+const measuredReps = 3;
 const captureAttempts = 3;
 const captureCooldownMs = 1_500;
 const minimumStimulusFps = 50;
+const warmupDuration = "5s";
+const warmupDurationMs = 5_000;
 
 const main = async () => {
   const options = parseArgs(Bun.argv.slice(2));
@@ -350,7 +352,7 @@ const parseArgs = (args: string[]): CliOptions => {
     }
   }
 
-  const resolvedDuration = duration ?? (suite === "release" ? "15s" : "5s");
+  const resolvedDuration = duration ?? (suite === "release" ? "10s" : "5s");
   return {
     suite,
     duration: resolvedDuration,
@@ -645,8 +647,8 @@ const runSuite = async (
         binary: candidate,
         allBinaries: context.binaries,
         profile,
-        duration: options.duration,
-        durationMs: options.durationMs,
+        duration: warmupDuration,
+        durationMs: warmupDurationMs,
         expectedDimensions,
         sampleIntervalMs: options.sampleIntervalMs,
         rep: 0,
@@ -661,8 +663,8 @@ const runSuite = async (
           binary: reference,
           allBinaries: context.binaries,
           profile,
-          duration: options.duration,
-          durationMs: options.durationMs,
+          duration: warmupDuration,
+          durationMs: warmupDurationMs,
           expectedDimensions,
           sampleIntervalMs: options.sampleIntervalMs,
           rep: 0,

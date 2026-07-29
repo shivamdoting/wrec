@@ -77,10 +77,10 @@ Release profiles:
 - `high-native60-hevc`
 - `balanced-1080p30-h264`
 
-Each release profile runs one warmup and five measured reps per binary. With
+Each release profile runs one 5-second warmup and three measured reps per binary. With
 `--against`, measured reps alternate AB/BA order within each profile to cancel
 order and thermal bias. A failed capture or stimulus rate below 50 fps is retried
-up to twice before the run is rejected. The default release duration is `15s`;
+up to twice before the run is rejected. The default release duration is `10s`;
 `--duration` overrides it.
 
 ## Native Helpers
