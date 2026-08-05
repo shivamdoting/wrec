@@ -158,31 +158,14 @@ struct MenuBarLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(nsImage: WrecMark.menuBarImage)
-            if !WrecChannel.current.badge.isEmpty, !model.phase.isActiveSession {
-                Text(WrecChannel.current == .nightly ? "N" : "D")
-                    .font(.system(size: 9, weight: .bold))
-            }
+            Image(systemName: "record.circle")
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: 14, weight: .medium))
+                .frame(width: 16, height: 16)
             if !model.menuBarText.isEmpty {
                 Text(model.menuBarText)
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
             }
         }
     }
-}
-
-/// The wrec mark: a plain filled rectangle, full icon height. It must be a
-/// template NSImage — a SwiftUI shape in a `MenuBarExtra` label paints
-/// literal black and disappears against a dark menu bar; a template image is
-/// recolored by the system for whichever appearance the bar has.
-enum WrecMark {
-    @MainActor static let menuBarImage: NSImage = {
-        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
-            NSColor.black.setFill()
-            rect.fill()
-            return true
-        }
-        image.isTemplate = true
-        return image
-    }()
 }

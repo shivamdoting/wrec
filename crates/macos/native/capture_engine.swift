@@ -162,6 +162,12 @@ enum Exit {
     static let noPermission: Int32 = 77 // EX_NOPERM: TCC permission missing
 }
 
+fileprivate enum CaptureStopReason {
+    case requested
+    case userStopped
+    case failed(message: String, streamStopped: Bool)
+}
+
 final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     let queue = DispatchQueue(label: "wrec.capture.writer", qos: .userInitiated)
 
@@ -170,6 +176,9 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private let audioInput: AVAssetWriterInput?
     private let micInput: AVAssetWriterInput?
     private let finished = DispatchSemaphore(value: 0)
+    private let stopSignal = DispatchSemaphore(value: 0)
+    private let stopLock = NSLock()
+    private var stopReason: CaptureStopReason?
     private var didStart = false
     private var didFinish = false
     private var frameCount: Int64 = 0
@@ -197,6 +206,12 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         self.outputWidth = width
         self.outputHeight = height
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        // Graceful stops still finish at the exact last sample. If the helper
+        // is killed or the machine dies, ten-second movie fragments leave the
+        // file playable through the last fragment instead of unopenable.
+        // Ten seconds is Apple's recommended minimum for efficient writes to
+        // external storage.
+        writer.movieFragmentInterval = CMTime(value: 10, timescale: 1)
 
         let bitrate = targetBitrate(width: width, height: height, fps: fps, quality: quality, codec: codec)
         let compression: [String: Any] = [
@@ -261,7 +276,39 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        emitFailure("stream stopped with error: \(error)")
+        let error = error as NSError
+        if error.domain == SCStreamErrorDomain,
+            error.code == SCStreamError.userStopped.rawValue
+        {
+            requestStop(.userStopped)
+        } else {
+            requestStop(
+                .failed(
+                    message: "stream stopped with error: \(error)",
+                    streamStopped: true
+                ))
+        }
+    }
+
+    fileprivate func requestStop(_ reason: CaptureStopReason) {
+        stopLock.lock()
+        let isFirstRequest = stopReason == nil
+        if isFirstRequest {
+            stopReason = reason
+        }
+        stopLock.unlock()
+
+        if isFirstRequest {
+            stopSignal.signal()
+        }
+    }
+
+    fileprivate func waitForStop() -> CaptureStopReason {
+        stopSignal.wait()
+        stopLock.lock()
+        let reason = stopReason ?? .requested
+        stopLock.unlock()
+        return reason
     }
 
     // Writer errors are fatal for the file; signal once, then keep logging.
@@ -272,6 +319,9 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         didReportWriterFailure = true
         emitFailure(message)
+        // No more samples can be written after AVAssetWriter fails. Stop the
+        // stream promptly; already committed movie fragments remain playable.
+        requestStop(.failed(message: message, streamStopped: false))
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -756,10 +806,35 @@ func run() async {
 
         try await stream.startCapture()
 
-        // Parent process writes commands to stdin. EOF also stops.
-        await waitForStopSignal(recorder: recorder)
+        // Parent process writes commands to stdin. The user can also end the
+        // stream from macOS's purple sharing control; both paths must converge
+        // here so AVAssetWriter always gets a chance to finalize the movie.
+        let stopReason = await waitForStopSignal(recorder: recorder)
+        var stopFailure: String?
+        switch stopReason {
+        case .requested:
+            do {
+                try await stream.stopCapture()
+            } catch {
+                stopFailure = "failed to stop stream: \(error)"
+            }
+        case .userStopped:
+            logLine("recording stopped from macOS sharing controls")
+            emitEvent([
+                "event": "log",
+                "message": "recording stopped from macOS sharing controls",
+            ])
+        case .failed(let message, let streamStopped):
+            stopFailure = message
+            if !streamStopped {
+                do {
+                    try await stream.stopCapture()
+                } catch {
+                    logLine("failed to stop stream after recorder failure: \(error)")
+                }
+            }
+        }
 
-        try await stream.stopCapture()
         micIndicator.hide()
         guard recorder.finish(timeout: .seconds(15)) else {
             emitFailure("timed out waiting for writer finalization")
@@ -767,6 +842,10 @@ func run() async {
         }
         if recorder.hadWriterFailure() {
             Foundation.exit(Exit.ioError)
+        }
+        if let stopFailure {
+            emitFailure(stopFailure)
+            Foundation.exit(Exit.software)
         }
     } catch {
         emitFailure("error: \(error)")
@@ -879,8 +958,19 @@ func initializeGraphicsClient() {
     NSApplication.shared.setActivationPolicy(.prohibited)
 }
 
-func waitForStopSignal(recorder: SampleRecorder) async {
-    let stopped = DispatchSemaphore(value: 0)
+fileprivate func waitForStopSignal(recorder: SampleRecorder) async -> CaptureStopReason {
+    // Catchable process termination takes the normal finalization path.
+    // SIGKILL and machine failure are covered by incremental movie fragments.
+    Darwin.signal(SIGINT, SIG_IGN)
+    Darwin.signal(SIGTERM, SIG_IGN)
+    let signalQueue = DispatchQueue(label: "wrec.capture.signals", qos: .userInitiated)
+    let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
+    let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalQueue)
+    interruptSource.setEventHandler { recorder.requestStop(.requested) }
+    terminationSource.setEventHandler { recorder.requestStop(.requested) }
+    interruptSource.resume()
+    terminationSource.resume()
+
     DispatchQueue.global(qos: .userInitiated).async {
         while let line = readLine() {
             switch line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
@@ -889,18 +979,21 @@ func waitForStopSignal(recorder: SampleRecorder) async {
             case "resume":
                 recorder.resume()
             case "stop":
-                stopped.signal()
+                recorder.requestStop(.requested)
                 return
             default:
                 continue
             }
         }
-        stopped.signal()
+        recorder.requestStop(.requested)
     }
 
-    await Task.detached(priority: .userInitiated) {
-        stopped.wait()
+    let reason = await Task.detached(priority: .userInitiated) {
+        recorder.waitForStop()
     }.value
+    interruptSource.cancel()
+    terminationSource.cancel()
+    return reason
 }
 
 func targetBitrate(width: Int, height: Int, fps: Int32, quality: String, codec: String) -> Int {
