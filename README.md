@@ -52,6 +52,9 @@ and a JSON-friendly CLI for scripts and agents.
 - Resolution controls for 720p, 1080p, 2K, 4K, and native capture.
 - Cursor capture, system audio capture, microphone capture, and Wrec-window hiding toggles.
 - Pause, resume, stop, queued jobs, and recording status.
+- Recoverable movie output: clean stops finalize exactly, while ten-second
+  fragments preserve playable media through the last committed fragment after
+  an abrupt interruption.
 - JSON output for target discovery, job control, errors, metrics, and logs.
 - Local recording history and metrics stored separately from media files.
 
@@ -67,6 +70,11 @@ For an active job, the daemon launches a separate native Swift capture engine.
 ScreenCaptureKit delivers frames directly to AVAssetWriter, which performs
 hardware encoding and writes the `.mov` file. Rust coordinates the recording
 but never copies or processes video frames.
+
+Normal stops, macOS's sharing-control stop, capture errors, and catchable
+termination signals all converge on AVAssetWriter finalization. The writer also
+commits ten-second movie fragments, so an uncatchable process or machine failure
+leaves the file playable through its last completed fragment.
 
 The app bundle contains `wrec-app`, `daemon`, and `capture-engine`. The
 standalone CLI package contains `wrec`, `daemon`, and `capture-engine`, so both

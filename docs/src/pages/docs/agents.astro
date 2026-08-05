@@ -60,6 +60,10 @@ const contractRows = [
     "Expect one active job",
     "The daemon runs one active recording. Extra recordings queue by default unless --no-queue is passed.",
   ],
+  [
+    "Inspect output after failure",
+    "A failed recording can still have a playable partial .mov at output_path. Preserve and inspect it before retrying or cleaning up.",
+  ],
 ];
 
 const commandRows = [
@@ -93,6 +97,11 @@ const commandRows = [
   [
     "wrec daemon serve",
     "Run the coordinator in the foreground, for debugging.",
+  ],
+  ["wrec update --check --json", "Check for a newer installed CLI release."],
+  [
+    "wrec update [--force] [--json]",
+    "Install or reinstall the latest CLI release.",
   ],
   ["wrec help, -h, --help", "Print CLI help."],
   ["wrec -V, --version", "Print the CLI version."],
@@ -169,7 +178,10 @@ const statusRows = [
   ["paused", "Capture is paused."],
   ["finishing", "Stop requested; capture engine is finalizing the file."],
   ["completed", "Terminal success state. Output is finalized."],
-  ["failed", "Terminal failure state. Inspect error events and daemon log."],
+  [
+    "failed",
+    "Terminal failure state. Inspect error events, daemon log, and output_path; a playable partial movie may have been preserved.",
+  ],
   [
     "cancelled",
     "Terminal failure state for a queued job cancelled before recording.",
@@ -342,6 +354,13 @@ const errorJson = `{"event":"error","code":"target_not_found","message":"no wind
     <code>cancelled</code>. Detached mode exits after submission; inspect the
     job later to determine final success.
   </p>
+  <p>
+    A failed job does not imply that its media is unusable. Clean controls,
+    macOS Stop Sharing, stream failures, and catchable termination signals run
+    writer finalization. If finalization cannot run, ten-second movie fragments
+    preserve the file through the last committed fragment. Check
+    <code>output_path</code> before discarding or retrying.
+  </p>
 
   <h2>Target selectors</h2>
   <p>
@@ -414,7 +433,8 @@ const errorJson = `{"event":"error","code":"target_not_found","message":"no wind
   <h2>Defaults</h2>
   <p>
     Fresh config defaults to display capture, 30 fps, HEVC, Balanced, 1080p,
-    cursor on, system audio on, hide wrec on, and
+    cursor on, system audio on, microphone off, hide wrec on, nerd stats off,
+    auto-open after recording off, and
     <code>~/Movies/&lt;app name&gt;</code> as the output folder (<code
       >~/Movies/Wrec</code
     > for the release app). See

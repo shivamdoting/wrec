@@ -19,6 +19,10 @@ const architectureNotes = [
     "The daemon launches a separate Swift capture-engine process for each active job. ScreenCaptureKit feeds AVAssetWriter directly; Rust never copies, transforms, or encodes video frames.",
   ],
   [
+    "Stops preserve media",
+    "Normal controls, macOS Stop Sharing, capture failures, and catchable termination signals converge on writer finalization. Ten-second movie fragments keep an abruptly interrupted file playable through its last committed fragment.",
+  ],
+  [
     "Separate packages share one runtime shape",
     "The app package carries wrec-app, daemon, and capture-engine. The standalone CLI package carries wrec, daemon, and capture-engine.",
   ],
@@ -61,7 +65,9 @@ const architectureNotes = [
     </li>
     <li>
       <strong>The <code>.mov</code> file</strong> is written by AVAssetWriter while
-      status and metrics travel back through the daemon to either client.
+      status and metrics travel back through the daemon to either client. Clean stops
+      finish at the exact last sample; ten-second fragments bound media loss when
+      finalization cannot run.
     </li>
   </ol>
 

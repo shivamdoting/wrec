@@ -40,12 +40,13 @@ cargo run -p cli -- targets --json   # run the agent-friendly CLI`;
     </li>
     <li>
       <strong>Capture</strong> — the daemon spawns a native capture engine (ScreenCaptureKit
-      → AVAssetWriter) that writes a hardware-encoded
+      → AVAssetWriter) that writes a hardware-encoded, incrementally recoverable
       <code>.mov</code>.
     </li>
     <li>
       <strong>Control the job</strong> — pause, resume, stop, or cancel from either
-      client. Every state change streams as a JSON job event.
+      client. Stopping from macOS's purple sharing control follows the same safe finalization
+      path. Every state change streams as a JSON job event.
     </li>
     <li>
       <strong>Collect the file</strong> — recordings land in
@@ -53,6 +54,11 @@ cargo run -p cli -- targets --json   # run the agent-friendly CLI`;
       kept separate from the media files.
     </li>
   </ol>
+  <p>
+    Clean stops finalize at the last written sample. The writer also commits
+    ten-second movie fragments, so an abrupt process or machine failure
+    preserves playable media through the last completed fragment.
+  </p>
 
   <h2>Install</h2>
   <p>The native menu-bar app installs with:</p>

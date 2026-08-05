@@ -73,5 +73,9 @@ Keep it current with `wrec update` (`wrec update --check --json` reports
   unless `--no-queue` is passed.
 - Recordings are hardware-encoded `.mov` files, `~/Movies/Wrec` by default.
   The final location is `output_path` on the job snapshot.
+- A failed job can still leave a playable partial movie at `output_path`.
+  Normal stops finalize exactly, catchable failures still run the finalization
+  path, and abrupt failures preserve media through the last committed
+  ten-second fragment. Inspect the file before discarding it or retrying.
 - A duration recording keeps running if stdin closes, so append `</dev/null`
   for non-interactive runs.

@@ -1,6 +1,6 @@
 # wrec implementation notes
 
-## Current v0 backend
+## Current backend
 
 Cargo compiles the Swift capture engine from
 `crates/macos/native/capture_engine.swift` into the build output. The daemon
@@ -8,7 +8,7 @@ starts that compiled capture engine at runtime. Packaged app builds copy
 `daemon` and `capture-engine` into `Wrec*.app/Contents/MacOS`; standalone CLI
 packages copy `wrec`, `daemon`, and `capture-engine` into the CLI runtime.
 
-Why this route for v0:
+Why this route:
 
 - Uses real native macOS ScreenCaptureKit immediately.
 - Keeps the frame path inside Apple's native stack.
@@ -18,7 +18,7 @@ Why this route for v0:
 Current recording path:
 
 ```text
-Rust GPUI app / CLI / agents
+SwiftUI menu-bar app / Rust CLI / agents
   -> control protocol
   -> daemon
   -> spawn compiled Swift capture engine
@@ -34,20 +34,18 @@ hiding, microphone setting, and mic-indicator setting from the daemon. It keeps
 ScreenCaptureKit queue depth low and drops samples when the writer is
 backpressured rather than allowing memory to grow.
 
-The app and CLI stay above the `control` crate. The daemon is the only process
-that owns target listing, permission requests (screen recording and, before a
-microphone job starts, microphone access), job queueing, recording state, store
-writes, and macOS recorder startup.
+The app and CLI stay above the `control` crate. The daemon owns target listing,
+job queueing, recording state, store writes, permission operations, and macOS
+recorder startup. The app owns the user-facing permission flow; keeping the
+daemon and capture engine in its launch chain makes macOS attribute Screen
+Recording permission to the matching Wrec channel rather than an internal
+helper.
 
-The next backend improvement is to keep AVAssetWriter, but reduce avoidable work
-around it:
-
-- Enforce preset limits so efficient/balanced recordings cannot accidentally
-  run at native 5K or 60 FPS.
-- Benchmark CPU, peak RSS, bitrate, and output size across the preset matrix.
-- Investigate AVAssetWriter session boundaries for pause/resume. If `endSession`
-  at pause and `startSession` at resume produce a gap-free file, we can remove
-  the current post-pause per-sample retiming copy.
+The capture engine routes normal stops, macOS Stop Sharing, stream failures,
+stdin closure, and SIGINT/SIGTERM through one AVAssetWriter finalization path.
+It also writes ten-second movie fragments. SIGKILL or machine failure cannot run
+finalization, but the `.mov` remains playable through its last committed
+fragment.
 
 ## Requirements
 
@@ -59,22 +57,15 @@ around it:
 ## Run
 
 ```bash
-cd Developer/ccing/wrec
-cargo build -p daemon --bin daemon
-cargo run -p app
+cargo dev
+cargo run -p cli -- targets --json
 ```
 
-If GPUI shader compilation fails, select full Xcode:
+If Swift or the native capture engine cannot find the Apple toolchain, select
+full Xcode:
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-```
-
-If `metal` still reports a missing Metal Toolchain, download Apple's Metal
-component:
-
-```bash
-xcodebuild -downloadComponent MetalToolchain
 ```
 
 ## Package

@@ -16,9 +16,9 @@ const markerBits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1];
 
     <h3>1 · a window that counts out loud</h3>
     <p>
-      a stimulus window redraws 60 times a second, synced to the display. each
-      redraw paints its own frame number as a strip of big black/white blocks —
-      1 bit per block, with guard patterns at both ends:
+      a stimulus window redraws at the display refresh rate. each redraw paints
+      its own frame number as a strip of big black/white blocks — 1 bit per
+      block, with guard patterns at both ends:
     </p>
     <div class="marker" aria-hidden="true">
       {markerBits.map((bit) => <span class:list={[bit ? "on" : "off"]} />)}
@@ -26,7 +26,9 @@ const markerBits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1];
     <p>
       the number advances once per <em>rendered</em> frame, so every index that reaches
       the screen is consecutive. the window also holds a power assertion — a dimming
-      display would otherwise read as a frame-rate collapse.
+      display would otherwise read as a frame-rate collapse. all but one point of
+      the window sits beyond the display edge, and it never activates or accepts input,
+      so the bench does not flash over or steal focus from the user's work.
     </p>
 
     <h3>2 · wrec records it, black box</h3>
@@ -59,9 +61,10 @@ const markerBits = [1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1];
 
     <h3>5 · a/b, not vibes</h3>
     <p>
-      for a release, candidate and reference binaries run interleaved — A B A B
-      A B, three reps each per profile, same session — and gates compare paired
-      medians. a regression fails only if the candidate is &gt;15% worse
+      for a release, candidate and reference binaries run three paired reps per
+      profile in alternating A/B and B/A order, in the same session — and gates
+      compare paired medians. a regression fails only if the candidate is
+      &gt;15% worse
       <em>and</em> beyond an absolute noise floor. thermal drift and background load
       hit both binaries equally, so they cancel.
     </p>
