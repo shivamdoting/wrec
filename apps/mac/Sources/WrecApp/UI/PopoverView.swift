@@ -202,27 +202,27 @@ private struct ConfigSection: View {
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
             GridRow {
-                FieldLabel("SOURCE")
+                FieldLabel("Source")
                 Segmented(
                     options: CaptureSourceKind.allCases.map(\.label),
                     selection: sourceBinding
                 )
             }
             GridRow {
-                FieldLabel("TARGET")
+                FieldLabel("Target")
                 PopUp(options: model.visibleTargets.map(\.name), selection: targetBinding)
                     .frame(maxWidth: .infinity)
             }
             GridRow {
-                FieldLabel("FORMAT")
+                FieldLabel("Format")
                 enumPicker(\.codec, Codec.allCases) { $0.label }
             }
             GridRow {
-                FieldLabel("PRESET")
+                FieldLabel("Preset")
                 enumPicker(\.quality, Quality.allCases) { $0.label }
             }
             GridRow {
-                FieldLabel("SIZE")
+                FieldLabel("Size")
                 enumPicker(
                     \.resolution, Resolution.allCases.filter(model.settings.resolutionAllowed)
                 ) { $0.label }
@@ -234,11 +234,11 @@ private struct ConfigSection: View {
                 }
             }
             GridRow {
-                FieldLabel("AUDIO")
+                FieldLabel("Audio")
                 HStack(spacing: 6) {
                     toggle(\.includeSystemAudio)
                     Spacer(minLength: 0)
-                    FieldLabel("MICROPHONE", width: nil)
+                    FieldLabel("Microphone", width: nil)
                     micToggle
                 }
             }

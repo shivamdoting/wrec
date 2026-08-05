@@ -189,14 +189,11 @@ final class RecorderModel {
     func refreshScreenPermission(requestIfNeeded: Bool) async {
         var granted = CGPreflightScreenCaptureAccess()
         if requestIfNeeded && !granted {
-            // Bring the menu-bar app forward so macOS can present the first-use
-            // consent sheet. After a denial, TCC does not show it again; open
-            // the exact Settings pane so Grant always has a visible action.
+            // Bring the menu-bar app forward so macOS can present its consent
+            // sheet. That sheet owns the Open System Settings action; opening
+            // Settings ourselves would put both interfaces on screen at once.
             NSApp.activate(ignoringOtherApps: true)
             granted = CGRequestScreenCaptureAccess()
-            if !granted {
-                Platform.openScreenRecordingPrivacySettings()
-            }
         }
         screenPermission = granted ? .granted : .missing
         if granted, targets.isEmpty {

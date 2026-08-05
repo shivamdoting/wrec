@@ -58,9 +58,6 @@ enum SkillInstallStatus: Equatable {
 
 enum Platform {
     static let githubURL = URL(string: "https://github.com/shivamdoting/wrec")!
-    private static let screenRecordingPrivacyURL = URL(
-        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-    )!
     private static let managedMarker = "# managed by wrec"
     private static var installedBin: String { "/usr/local/bin/\(WrecChannel.current.cliName)" }
     private static var installedLib: String { "/usr/local/lib/\(WrecChannel.current.runtimeName)" }
@@ -146,10 +143,6 @@ enum Platform {
 
     static func open(_ url: URL) {
         NSWorkspace.shared.open(url)
-    }
-
-    static func openScreenRecordingPrivacySettings() {
-        open(screenRecordingPrivacyURL)
     }
 
     static func copyToClipboard(_ text: String) {
