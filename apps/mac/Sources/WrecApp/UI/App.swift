@@ -171,7 +171,7 @@ struct MenuBarLabel: View {
 /// A template NSImage lets macOS recolor it for light and dark menu bars.
 enum WrecMark {
     @MainActor static let menuBarImage: NSImage = {
-        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
             NSColor.black.setFill()
             rect.fill()
             return true
