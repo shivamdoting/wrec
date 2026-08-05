@@ -158,14 +158,25 @@ struct MenuBarLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "record.circle")
-                .symbolRenderingMode(.monochrome)
-                .font(.system(size: 14, weight: .medium))
-                .frame(width: 16, height: 16)
+            Image(nsImage: WrecMark.menuBarImage)
             if !model.menuBarText.isEmpty {
                 Text(model.menuBarText)
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
             }
         }
     }
+}
+
+/// The original wrec mark: a plain filled square, without a channel letter.
+/// A template NSImage lets macOS recolor it for light and dark menu bars.
+enum WrecMark {
+    @MainActor static let menuBarImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+            NSColor.black.setFill()
+            rect.fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }

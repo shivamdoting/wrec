@@ -110,9 +110,9 @@ final class RecorderModel {
         observeJobChangedNotifications()
 
         await refreshMicPermission()
-        // When granted, this also runs the first target sweep (they're
-        // empty at launch) — no second one needed here.
-        await refreshScreenPermission(requestIfNeeded: true)
+        // Permission prompts belong behind the explicit Grant button. When
+        // access already exists, this also runs the first target sweep.
+        await refreshScreenPermission(requestIfNeeded: false)
         await adoptRunningJob()
 
         // Displays are the one target class that changes without the user
@@ -187,9 +187,17 @@ final class RecorderModel {
     // MARK: - Permissions
 
     func refreshScreenPermission(requestIfNeeded: Bool) async {
-        let granted =
-            CGPreflightScreenCaptureAccess()
-            || (requestIfNeeded && CGRequestScreenCaptureAccess())
+        var granted = CGPreflightScreenCaptureAccess()
+        if requestIfNeeded && !granted {
+            // Bring the menu-bar app forward so macOS can present the first-use
+            // consent sheet. After a denial, TCC does not show it again; open
+            // the exact Settings pane so Grant always has a visible action.
+            NSApp.activate(ignoringOtherApps: true)
+            granted = CGRequestScreenCaptureAccess()
+            if !granted {
+                Platform.openScreenRecordingPrivacySettings()
+            }
+        }
         screenPermission = granted ? .granted : .missing
         if granted, targets.isEmpty {
             await refreshTargets()

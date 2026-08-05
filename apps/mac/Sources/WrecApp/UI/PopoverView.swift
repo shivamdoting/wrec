@@ -59,7 +59,7 @@ private struct HeaderRow: View {
                 .fixedSize()
             if !WrecChannel.current.badge.isEmpty {
                 Text(WrecChannel.current.badge)
-                    .font(.pixel(9))
+                    .font(.pixel(13))
                     .foregroundStyle(.secondary)
                     .fixedSize()
             }
