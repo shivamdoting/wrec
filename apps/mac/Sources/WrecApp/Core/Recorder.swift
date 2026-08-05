@@ -187,13 +187,11 @@ final class RecorderModel {
     // MARK: - Permissions
 
     func refreshScreenPermission(requestIfNeeded: Bool) async {
-        var granted = CGPreflightScreenCaptureAccess()
+        let granted = CGPreflightScreenCaptureAccess()
         if requestIfNeeded && !granted {
-            // Bring the menu-bar app forward so macOS can present its consent
-            // sheet. That sheet owns the Open System Settings action; opening
-            // Settings ourselves would put both interfaces on screen at once.
-            NSApp.activate(ignoringOtherApps: true)
-            granted = CGRequestScreenCaptureAccess()
+            // Take the user straight to the toggle instead of putting Apple's
+            // intermediate permission sheet in front of System Settings.
+            Platform.openScreenRecordingPrivacySettings()
         }
         screenPermission = granted ? .granted : .missing
         if granted, targets.isEmpty {
