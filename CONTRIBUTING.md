@@ -101,8 +101,10 @@ bun run release:check --against /path/to/previous-release/wrec
 ```
 
 Only a passing run exits successfully. Commit the generated benchmark summary,
-then create the version tag; the release workflow validates the same summary
-against the tagged commit before packaging.
+then create the version tag; the release workflow validates that no measured
+Rust/native recorder or benchmark-harness input changed after the run. Docs,
+SwiftUI-shell UX, packaging, and release-metadata follow-ups do not invalidate
+the performance result.
 
 ## Packaging
 

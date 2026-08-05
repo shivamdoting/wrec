@@ -11,9 +11,11 @@ This directory contains the pre-release performance gate for wrec.
 - `.tmp/`, `node_modules/` — generated, git-ignored.
 
 Every `v*` release requires a bench: the release workflow fails unless
-`results/` contains a passing, non-dirty release-suite summary for a commit
-whose only difference from the tagged commit is the `benchmarks/` directory,
-and it attaches that summary to the GitHub release as
+`results/` contains a passing, non-dirty release-suite summary with no later
+changes to the measured Rust/native recorder or benchmark harness. Docs,
+SwiftUI-shell UX, packaging, and release-metadata changes do not invalidate a
+run because they are outside the binary and harness being measured. The
+workflow attaches the accepted summary to the GitHub release as
 `wrec-bench-<version>.json`.
 
 The suite is intentionally black-box. It drives wrec only through the public CLI,
@@ -53,8 +55,10 @@ bun run release:check --against /path/to/previous-release/wrec
 This builds the candidate from the current checkout, runs the complete interleaved
 A/B suite, and validates the resulting summary against `HEAD`. A failed or
 inconclusive run exits non-zero. Commit the new file in `results/` before creating
-the version tag; the release workflow runs the same verifier and refuses to
-publish without it.
+the version tag. Later changes under `crates/`, `.cargo/`, Cargo manifests, or
+the measurement harness invalidate it; docs, the SwiftUI shell, packaging, and
+release metadata do not. The release workflow runs the same verifier and
+refuses to publish without a covered passing run.
 
 AC power remains the default for trusted release measurements. When battery
 power is intentionally acceptable for a specific release, make that exception

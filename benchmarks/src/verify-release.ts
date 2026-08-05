@@ -24,6 +24,31 @@ const isRecord = (value: unknown): value is JsonRecord =>
 const stringValue = (value: unknown) =>
   typeof value === "string" ? value : "";
 
+// A release benchmark measures the Cargo-built CLI, daemon, native capture
+// engine, and the harness that drives them. SwiftUI shell, docs, packaging,
+// and release metadata changes do not alter that measured binary or run.
+// Keep this list explicit so harmless UX/docs follow-ups do not force another
+// seven-minute capture suite while real recorder or harness changes always do.
+const affectsMeasuredBenchmark = (file: string) => {
+  if (
+    file === "Cargo.toml" ||
+    file === "Cargo.lock" ||
+    file === "package.json" ||
+    file.startsWith(".cargo/") ||
+    file.startsWith("crates/") ||
+    file.startsWith("benchmarks/native/")
+  ) {
+    return true;
+  }
+  if (!file.startsWith("benchmarks/src/")) return false;
+  // These two files validate an already-produced summary; they do not build,
+  // run, sample, decode, aggregate, or gate the benchmark itself.
+  return ![
+    "benchmarks/src/verify-release.ts",
+    "benchmarks/src/verify-release.test.ts",
+  ].includes(file);
+};
+
 export const validateReleaseSummary = (value: unknown) => {
   const errors: string[] = [];
   if (!isRecord(value)) {
@@ -149,13 +174,19 @@ export const verifyReleaseBench = async (
       options.releaseCommit,
       "--",
       ".",
-      ":(exclude)benchmarks",
     ]);
     if (diff.exitCode !== 0) {
       throw new Error(`git diff failed: ${diff.stderr.trim()}`);
     }
-    if (diff.stdout.trim()) {
-      rejected.push(`${name}: non-benchmark code changed after the run`);
+    const relevantChanges = diff.stdout
+      .split("\n")
+      .map((file) => file.trim())
+      .filter(Boolean)
+      .filter(affectsMeasuredBenchmark);
+    if (relevantChanges.length) {
+      rejected.push(
+        `${name}: benchmark-relevant code changed after the run (${relevantChanges.slice(0, 3).join(", ")})`,
+      );
       continue;
     }
 

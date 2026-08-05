@@ -92,7 +92,7 @@ describe("verifyReleaseBench", () => {
     }
   });
 
-  test("rejects a result when code changed after it was recorded", async () => {
+  test("rejects a result when measured code changed after it was recorded", async () => {
     const resultsDir = await mkdtemp(
       path.join(os.tmpdir(), "wrec-release-check-"),
     );
@@ -111,7 +111,60 @@ describe("verifyReleaseBench", () => {
             stderr: "",
           }),
         ),
-      ).rejects.toThrow("non-benchmark code changed after the run");
+      ).rejects.toThrow("benchmark-relevant code changed after the run");
+    } finally {
+      await rm(resultsDir, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts docs and SwiftUI shell changes after a passing run", async () => {
+    const resultsDir = await mkdtemp(
+      path.join(os.tmpdir(), "wrec-release-check-"),
+    );
+    try {
+      await writeFile(
+        path.join(resultsDir, "2026-07-22-valid.json"),
+        JSON.stringify(passingSummary()),
+      );
+
+      const selected = await verifyReleaseBench(
+        { releaseCommit: "HEAD", repoRoot: resultsDir, resultsDir },
+        (args) => ({
+          exitCode: 0,
+          stdout:
+            args[0] === "diff"
+              ? "README.md\ndocs/src/pages/index.astro\napps/mac/Sources/WrecApp/UI/App.swift\nbenchmarks/results/new.json\nbenchmarks/src/verify-release.ts\n"
+              : "",
+          stderr: "",
+        }),
+      );
+
+      expect(path.basename(selected)).toBe("2026-07-22-valid.json");
+    } finally {
+      await rm(resultsDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects benchmark harness changes after a passing run", async () => {
+    const resultsDir = await mkdtemp(
+      path.join(os.tmpdir(), "wrec-release-check-"),
+    );
+    try {
+      await writeFile(
+        path.join(resultsDir, "2026-07-22-valid.json"),
+        JSON.stringify(passingSummary()),
+      );
+
+      await expect(
+        verifyReleaseBench(
+          { releaseCommit: "HEAD", repoRoot: resultsDir, resultsDir },
+          (args) => ({
+            exitCode: 0,
+            stdout: args[0] === "diff" ? "benchmarks/src/gates.ts\n" : "",
+            stderr: "",
+          }),
+        ),
+      ).rejects.toThrow("benchmark-relevant code changed after the run");
     } finally {
       await rm(resultsDir, { recursive: true, force: true });
     }

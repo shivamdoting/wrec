@@ -108,9 +108,10 @@ jobs:
       # CI runners have no Screen Recording permission, so the bench runs on a
       # real Mac before tagging (`bun run bench release --against <previous>`)
       # and commits its summary to benchmarks/results/. This step refuses to
-      # release code that was never benched: the newest clean, passing release
-      # summary must cover a commit whose only difference from the release
-      # commit is the benchmarks/ directory itself.
+      # release recorder code that was never benched: a clean, passing release
+      # summary must cover the measured Rust/native pipeline and harness.
+      # SwiftUI-shell UX, docs, packaging, and release metadata are outside the
+      # benchmark's binary/process scope and do not invalidate that result.
       - name: Verify release bench
         id: bench
         run: >-
