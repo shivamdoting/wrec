@@ -87,9 +87,12 @@ up to twice before the run is rejected. The default release duration is `10s`;
 
 The harness compiles two Swift helpers into `.tmp/` with `swiftc` at run time:
 
-- `native/stimulus.swift`: an AppKit floating window titled
-  `wrec-bench-stimulus`. It redraws at 60 Hz and includes a large binary marker
-  strip encoding the current stimulus frame index.
+- `native/stimulus.swift`: an AppKit layer-0 window titled
+  `wrec-bench-stimulus`. It redraws at the display refresh rate and includes a
+  large binary marker strip encoding the current stimulus frame index. Only one
+  point remains on-screen, keeping WindowServer composition and
+  ScreenCaptureKit capture live without flashing over or taking focus from the
+  user's work.
 - `native/decode.swift`: an AVFoundation decoder that walks every video frame in
   the recorded `.mov` and emits JSON with codec, dimensions, duration, PTS, and
   decoded stimulus indices.

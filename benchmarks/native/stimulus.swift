@@ -122,10 +122,11 @@ guard let screen = NSScreen.main else {
 }
 
 let visible = screen.visibleFrame
-let origin = NSPoint(
-    x: min(max(visible.minX + 24, visible.minX), visible.maxX - canvasWidth),
-    y: min(max(visible.maxY - canvasHeight - 48, visible.minY), visible.maxY - canvasHeight)
-)
+// A single point stays on the physical display so WindowServer keeps
+// compositing the full backing surface for ScreenCaptureKit. The remaining
+// 1279×720 points sit beyond the right edge, so the benchmark never flashes
+// over the user's work or steals focus.
+let origin = NSPoint(x: visible.maxX - 1, y: visible.minY)
 let window = NSWindow(
     contentRect: NSRect(origin: origin, size: NSSize(width: canvasWidth, height: canvasHeight)),
     styleMask: [.borderless],
@@ -142,19 +143,8 @@ window.backgroundColor = .black
 window.hasShadow = false
 window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 window.isReleasedWhenClosed = false
-// An accessory app is not activated by `orderFrontRegardless`, so another
-// normal-layer window can remain above the stimulus and SCK throttles the
-// occluded target. Keep the stimulus on layer 0 for target discovery, but make
-// its app active so every rendered frame actually reaches the display.
-window.makeKeyAndOrderFront(nil)
-app.activate(ignoringOtherApps: true)
-let visibilityTimer = Timer(timeInterval: 1, repeats: true) { _ in
-    if !app.isActive || !window.isKeyWindow {
-        app.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-    }
-}
-RunLoop.main.add(visibilityTimer, forMode: .common)
+window.ignoresMouseEvents = true
+window.orderFrontRegardless()
 
 // A Timer at 1/60 s gets coalesced to ~58 fps by the runloop, which starves a
 // 60 fps capture of frames it then gets blamed for missing. A display link
