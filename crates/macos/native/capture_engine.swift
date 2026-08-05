@@ -558,6 +558,10 @@ final class SampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
 
+            // The one-second heartbeat can fall just before a stop. Publish
+            // the final counters from this same serialized writer queue so
+            // self-reported frames describe the finished file exactly.
+            self.emitMetrics()
             self.didFinish = true
             self.metricsTimer?.cancel()
             self.metricsTimer = nil
