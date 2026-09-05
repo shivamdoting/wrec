@@ -21,6 +21,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum RecordingStatus {
+    Cancelled,
     Starting,
     Recording,
     Completed,
@@ -30,6 +31,7 @@ pub enum RecordingStatus {
 impl RecordingStatus {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::Starting => "starting",
             Self::Recording => "recording",
             Self::Completed => "completed",
@@ -198,6 +200,16 @@ impl Store {
             stopped_at_ms,
             file_size_bytes: None,
             error_message: Some(error_message),
+        });
+    }
+
+    pub fn mark_recording_cancelled(&self, id: u64, stopped_at_ms: i64) {
+        self.send(StoreCommand::MarkRecordingFinished {
+            id,
+            status: RecordingStatus::Cancelled,
+            stopped_at_ms,
+            file_size_bytes: None,
+            error_message: None,
         });
     }
 
@@ -1158,6 +1170,25 @@ mod tests {
         assert_eq!(row.0, "failed");
         assert_eq!(row.1.as_deref(), Some("engine crashed"));
         assert_eq!(row.2, None);
+    }
+
+    #[test]
+    fn cancelled_selection_is_persisted_without_a_capture_error() {
+        let db = TempDb::new("cancelled");
+        {
+            let store = Store::open(db.path()).unwrap();
+            store.upsert_recording(sample_recording(1));
+            store.mark_recording_cancelled(1, 4_000);
+        }
+        let (status, error): (String, Option<String>) = read_connection(&db)
+            .query_row(
+                "SELECT status, error_message FROM recordings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        assert_eq!(error, None);
     }
 
     #[test]

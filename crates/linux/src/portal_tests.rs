@@ -209,11 +209,7 @@ fn portal_roundtrip_and_cancellation_close_sessions() {
             stop.send(true).unwrap();
         };
         let (result, ()) = tokio::join!(cancelled, cancel);
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("stopped during source selection"));
+        assert!(matches!(result, Err(RecorderError::Cancelled)));
         assert_eq!(mock.closes.load(Ordering::Relaxed), 3);
     });
 }

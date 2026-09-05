@@ -1,7 +1,7 @@
 use crate::{backend, portal::PipeWireStream, Command};
 use domain::{
-    CaptureDimensions, Codec, Quality, RecorderEvent, RecorderMetrics, RecorderSettings,
-    RecordingSession, Resolution, Result,
+    CaptureDimensions, Codec, Quality, RecorderError, RecorderEvent, RecorderMetrics,
+    RecorderSettings, RecordingSession, Resolution, Result,
 };
 use gstreamer::{self as gst, prelude::*};
 use std::{
@@ -122,7 +122,7 @@ pub(crate) fn record(
     stop: &watch::Receiver<bool>,
 ) -> Result<()> {
     if *stop.borrow() {
-        return Err(backend("stopped before recording started"));
+        return Err(RecorderError::Cancelled);
     }
     let settings = settings.clone().with_preset_limits();
     let pipeline = PipelineGuard(gst::Pipeline::new());
@@ -207,7 +207,9 @@ pub(crate) fn record(
         .map_err(backend)?;
     let result = run(&pipeline.0, session, events, commands, stop, &counters);
     let _ = pipeline.0.set_state(gst::State::Null);
-    if counters.frames.load(Ordering::Relaxed) == 0 {
+    if matches!(result, Err(RecorderError::Cancelled))
+        || counters.frames.load(Ordering::Relaxed) == 0
+    {
         let _ = std::fs::remove_file(&session.output_path);
     }
     result
@@ -331,8 +333,8 @@ fn run(
     let mut last_metrics = Instant::now();
     loop {
         if *stop.borrow() && stopping.is_none() {
-            if !started {
-                return Err(backend("stopped before the first encoded frame"));
+            if !started && counters.frames.load(Ordering::Relaxed) == 0 {
+                return Err(RecorderError::Cancelled);
             }
             // Live sources must run to drain their pending buffers and finalize a paused movie.
             pipeline.set_state(gst::State::Playing).map_err(backend)?;

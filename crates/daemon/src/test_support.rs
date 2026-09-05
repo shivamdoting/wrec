@@ -199,13 +199,18 @@ impl RecorderEngine for FakeEngine {
                 message: "stopping recording".into(),
             })
             .unwrap();
-        self.events
-            .send(RecorderEvent::Exited {
+        let event = if !self.start_gate.load(Ordering::Relaxed) {
+            RecorderEvent::Cancelled {
+                session_id: session.id,
+            }
+        } else {
+            RecorderEvent::Exited {
                 session_id: session.id,
                 success: true,
                 status: "exit status: 0".into(),
-            })
-            .unwrap();
+            }
+        };
+        self.events.send(event).unwrap();
         Ok(())
     }
 }

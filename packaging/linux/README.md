@@ -64,6 +64,9 @@ native display or window IDs. Only source types advertised by the portal
 appear in `targets`. The duration starts after the first encoded frame,
 so time spent choosing a source does not shorten the recording. The picker
 times out after two minutes and `wrec job stop <id>` cancels it.
+Stopping before capture begins produces a cancelled job, without a movie.
+Once capture starts, `--duration` counts wall time, including pauses; the
+movie itself omits paused time.
 
 Permission status is `unknown` outside a recording because portal grants
 belong to individual sessions. `permission.request` does not open a second

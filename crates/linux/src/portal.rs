@@ -6,7 +6,7 @@ use ashpd::{
     },
     WindowIdentifier,
 };
-use domain::{CaptureSourceKind, CaptureTarget, Result};
+use domain::{CaptureSourceKind, CaptureTarget, RecorderError, Result};
 use std::{os::fd::OwnedFd, time::Duration};
 use tokio::sync::watch;
 
@@ -95,7 +95,7 @@ pub(crate) async fn open(
     stop: &mut watch::Receiver<bool>,
 ) -> Result<Capture> {
     if *stop.borrow() {
-        return Err(backend("stopped before source selection"));
+        return Err(RecorderError::Cancelled);
     }
     let portal = tokio::time::timeout(Duration::from_secs(5), Screencast::new())
         .await
@@ -158,7 +158,7 @@ pub(crate) async fn open(
     };
     let result = tokio::select! {
         result = selected => result,
-        _ = stop.changed() => Err(backend("stopped during source selection")),
+        _ = stop.changed() => Err(RecorderError::Cancelled),
         _ = tokio::time::sleep(Duration::from_secs(120)) => Err(backend("Desktop source selection timed out after 120s; start again and choose a source.")),
     };
     match result {

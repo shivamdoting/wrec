@@ -73,7 +73,7 @@ impl RecorderEngine for LinuxRecorder {
         settings: RecorderSettings,
     ) -> Result<RecordingSession> {
         if self.active.is_none() && self.stop_requested {
-            return Err(backend("stopped before recording startup"));
+            return Err(RecorderError::Cancelled);
         }
         if let Some(active) = &self.active {
             if !active.worker.is_finished() {
@@ -159,6 +159,10 @@ impl RecorderEngine for LinuxRecorder {
                 })();
                 let (success, status) = match result {
                     Ok(()) => (true, "recording finalized".to_string()),
+                    Err(RecorderError::Cancelled) => {
+                        let _ = completion_events.send(RecorderEvent::Cancelled { session_id: id });
+                        return;
+                    }
                     Err(error) => (false, error.to_string()),
                 };
                 let _ = completion_events.send(RecorderEvent::Exited {
@@ -195,7 +199,61 @@ impl Drop for LinuxRecorder {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
             let _ = active.stop.send(true);
-            let _ = active.worker.join();
+            // The coordinator waits for finalization before normal shutdown.
+            // A stuck native call must not turn destruction into an unbounded join.
+            if active.worker.is_finished() {
+                let _ = active.worker.join();
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destruction_requests_stop_without_waiting_for_a_stuck_worker() {
+        let (events, _) = mpsc::channel();
+        let (commands, _) = mpsc::sync_channel(1);
+        let (stop, stopped) = watch::channel(false);
+        let (release, waiting) = mpsc::sync_channel::<()>(1);
+        let worker = thread::spawn(move || {
+            let _ = waiting.recv_timeout(Duration::from_secs(1));
+        });
+        let recorder = LinuxRecorder {
+            events,
+            active: Some(Active {
+                commands,
+                stop,
+                worker,
+            }),
+            stop_requested: false,
+        };
+        let at = std::time::Instant::now();
+        drop(recorder);
+        let elapsed = at.elapsed();
+        let _ = release.send(());
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "destructor waited {elapsed:?}"
+        );
+        assert!(*stopped.borrow());
+    }
+
+    #[test]
+    fn stop_before_start_preserves_cancellation() {
+        let (events, _) = mpsc::channel();
+        let mut recorder = LinuxRecorder::new(events);
+        recorder.stop().unwrap();
+        let target = CaptureTarget {
+            id: 0,
+            kind: domain::CaptureSourceKind::Display,
+            name: "picker".into(),
+        };
+        assert!(matches!(
+            recorder.start(target, RecorderSettings::default()),
+            Err(RecorderError::Cancelled)
+        ));
     }
 }

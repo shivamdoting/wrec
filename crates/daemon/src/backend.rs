@@ -39,6 +39,7 @@ pub struct RecordingOverrides {
 
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    Cancelled,
     Starting {
         output_path: PathBuf,
     },
@@ -86,6 +87,14 @@ impl WrecBackend {
 
     pub fn handle_recorder_event(&mut self, event: &RecorderEvent) -> BackendEvent {
         match event {
+            RecorderEvent::Cancelled { session_id } => {
+                if let Some(store) = &self.store {
+                    store.mark_recording_cancelled(*session_id, now_ms());
+                }
+                self.active_session_id = None;
+                self.active_output_path = None;
+                BackendEvent::Cancelled
+            }
             RecorderEvent::Starting {
                 session_id,
                 target,

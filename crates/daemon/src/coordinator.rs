@@ -10,7 +10,7 @@ use control::{
     daemon_log_path, now_ms, socket_path, wrec_home, AgentError, AgentWarning, EventLevel,
     JobStatus, RecordingOptions, StartRecordingParams, PROTOCOL_VERSION,
 };
-use domain::{CaptureTarget, RecorderEngine, RecorderEvent};
+use domain::{CaptureTarget, RecorderEngine, RecorderError, RecorderEvent};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -565,6 +565,18 @@ fn run_job<R: RecordingRuntime>(
     };
     if let Err(err) = start_result {
         drain_recorder_events(&state, job_id, &rx);
+        if matches!(err, RecorderError::Cancelled) {
+            if let Ok(mut state) = lock_state(&state) {
+                if let Some(job) = state.jobs.get_mut(&job_id) {
+                    job.mark_cancelled();
+                }
+                if state.active_job_id == Some(job_id) {
+                    state.active_job_id = None;
+                }
+            }
+            notify_job_changed();
+            return;
+        }
         finish_job_failed(&state, job_id, format!("recording failed to start: {err}"));
         return;
     }
@@ -646,6 +658,14 @@ fn handle_recorder_event<R: RecordingRuntime>(
     }
 
     let done = match backend_event {
+        BackendEvent::Cancelled => {
+            job.output_path = None;
+            job.mark_cancelled();
+            if active_matches {
+                state.active_job_id = None;
+            }
+            true
+        }
         BackendEvent::Starting { output_path, .. } => {
             job.output_path = Some(output_path.clone());
             job.push_event(
@@ -972,7 +992,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         Coordinator::job_stop(state.clone(), id).unwrap();
-        wait_for_status(&state, id, JobStatus::Completed);
+        wait_for_status(&state, id, JobStatus::Cancelled);
     }
 
     #[cfg(target_os = "linux")]
