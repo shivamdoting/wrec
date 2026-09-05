@@ -241,7 +241,7 @@ impl WrecBackend {
 
     fn mark_recording_started(&self, session_id: u64) {
         if let Some(store) = &self.store {
-            store.mark_recording_started(session_id);
+            store.mark_recording_started(session_id, now_ms());
         }
     }
 

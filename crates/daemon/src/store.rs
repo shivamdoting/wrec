@@ -121,6 +121,7 @@ enum StoreCommand {
     UpsertRecording(RecordingRecord),
     MarkRecordingStarted {
         id: u64,
+        started_at_ms: i64,
     },
     MarkRecordingFinished {
         id: u64,
@@ -174,8 +175,8 @@ impl Store {
         self.send(StoreCommand::UpsertRecording(recording));
     }
 
-    pub fn mark_recording_started(&self, id: u64) {
-        self.send(StoreCommand::MarkRecordingStarted { id });
+    pub fn mark_recording_started(&self, id: u64, started_at_ms: i64) {
+        self.send(StoreCommand::MarkRecordingStarted { id, started_at_ms });
     }
 
     pub fn mark_recording_completed(
@@ -403,7 +404,9 @@ fn writer_loop(conn: Connection, receiver: mpsc::Receiver<StoreCommand>) {
         let kind = command.kind();
         let result = match command {
             StoreCommand::UpsertRecording(recording) => upsert_recording(&conn, &recording),
-            StoreCommand::MarkRecordingStarted { id } => mark_recording_started(&conn, id),
+            StoreCommand::MarkRecordingStarted { id, started_at_ms } => {
+                mark_recording_started(&conn, id, started_at_ms)
+            }
             StoreCommand::MarkRecordingFinished {
                 id,
                 status,
@@ -496,10 +499,14 @@ fn upsert_recording(conn: &Connection, recording: &RecordingRecord) -> rusqlite:
     Ok(())
 }
 
-fn mark_recording_started(conn: &Connection, id: u64) -> rusqlite::Result<()> {
+fn mark_recording_started(conn: &Connection, id: u64, started_at_ms: i64) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE recordings SET status = ?1, error_message = NULL WHERE id = ?2",
-        params![RecordingStatus::Recording.as_str(), u64_to_i64(id)],
+        "UPDATE recordings SET status = ?1, started_at_ms = ?3, error_message = NULL WHERE id = ?2",
+        params![
+            RecordingStatus::Recording.as_str(),
+            u64_to_i64(id),
+            started_at_ms
+        ],
     )?;
     Ok(())
 }
@@ -518,7 +525,7 @@ fn mark_recording_finished(
         SET
             status = ?1,
             stopped_at_ms = ?2,
-            duration_ms = MAX(0, ?2 - started_at_ms),
+            duration_ms = CASE WHEN status = 'starting' AND ?1 != 'completed' THEN 0 ELSE MAX(0, ?2 - started_at_ms) END,
             file_size_bytes = COALESCE(?3, file_size_bytes),
             error_message = ?4
         WHERE id = ?5
@@ -937,9 +944,9 @@ mod tests {
         {
             let store = Store::open(db.path()).expect("first open");
             store.upsert_recording(sample_recording(1));
-            store.mark_recording_started(1);
+            store.mark_recording_started(1, 1_000);
             store.upsert_recording(sample_recording(2));
-            store.mark_recording_started(2);
+            store.mark_recording_started(2, 1_000);
             store.mark_recording_completed(2, 2000, Some(64));
         }
 
@@ -1050,7 +1057,7 @@ mod tests {
             let store = Store::open(db.path()).expect("open store");
             store.upsert_recording(sample_recording(1));
             store.mark_recording_failed(1, 2_000, "engine crashed".to_string());
-            store.mark_recording_started(1);
+            store.mark_recording_started(1, 1_000);
         }
 
         let conn = read_connection(&db);
@@ -1064,6 +1071,36 @@ mod tests {
 
         assert_eq!(status, "recording");
         assert_eq!(error, None);
+    }
+
+    #[test]
+    fn history_duration_excludes_picker_delay_and_cancelled_attempts() {
+        let db = TempDb::new("picker-duration");
+        {
+            let store = Store::open(db.path()).unwrap();
+            store.upsert_recording(sample_recording(1)); // Attempt at 1s.
+            store.mark_recording_started(1, 61_000); // Picker took one minute.
+            store.mark_recording_completed(1, 66_000, Some(1));
+            store.upsert_recording(sample_recording(2));
+            store.mark_recording_cancelled(2, 61_000);
+        }
+        let conn = read_connection(&db);
+        let recorded: (i64, i64) = conn
+            .query_row(
+                "SELECT started_at_ms, duration_ms FROM recordings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recorded, (61_000, 5_000));
+        let cancelled: (String, i64) = conn
+            .query_row(
+                "SELECT status, duration_ms FROM recordings WHERE id = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cancelled, ("cancelled".into(), 0));
     }
 
     #[test]
@@ -1196,7 +1233,7 @@ mod tests {
         let db = TempDb::new("missing-row");
         {
             let store = Store::open(db.path()).expect("open store");
-            store.mark_recording_started(99);
+            store.mark_recording_started(99, 1_000);
             store.mark_recording_completed(99, 5_000, Some(1));
             store.update_dimensions(
                 99,
