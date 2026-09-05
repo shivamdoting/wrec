@@ -1,5 +1,6 @@
 use control::AgentError;
 use domain::{CaptureTarget, PermissionStatus, RecorderEngine, RecorderError, RecorderEvent};
+#[cfg(target_os = "macos")]
 use macos::MacosRecorder;
 use std::sync::mpsc;
 
@@ -18,9 +19,11 @@ pub(crate) trait RecordingRuntime: Clone + Send + Sync + 'static {
     fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine;
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Default)]
 pub(crate) struct MacosRuntime;
 
+#[cfg(target_os = "macos")]
 impl RecordingRuntime for MacosRuntime {
     type Engine = MacosRecorder;
 
@@ -70,6 +73,7 @@ impl RecordingRuntime for MacosRuntime {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn permission_error(error: RecorderError) -> AgentError {
     match error {
         RecorderError::MissingScreenRecordingPermission => {
@@ -100,11 +104,70 @@ fn permission_error(error: RecorderError) -> AgentError {
 /// (Wrec.app or the terminal running `wrec daemon start`), not to the daemon
 /// binary itself, so a denial here otherwise leaves no trail in daemon.log
 /// pointing anyone at the actual app to go re-approve.
+#[cfg(any(target_os = "macos", test))]
 fn warn_screen_recording_permission_missing() {
     tracing::warn!(
         "screen recording permission is not granted; grant it to the app that launched this \
          daemon (Wrec.app, or the terminal/shell running `wrec`), then retry"
     );
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use LinuxRuntime as PlatformRuntime;
+#[cfg(target_os = "macos")]
+pub(crate) use MacosRuntime as PlatformRuntime;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Default)]
+pub(crate) struct LinuxRuntime;
+
+#[cfg(target_os = "linux")]
+impl RecordingRuntime for LinuxRuntime {
+    type Engine = linux::LinuxRecorder;
+
+    fn list_targets(&self) -> Result<Vec<CaptureTarget>, AgentError> {
+        linux::list_targets().map_err(linux_error)
+    }
+
+    fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError> {
+        linux::check_desktop().map_err(linux_error)?;
+        // The portal grants access per session when recording starts.
+        Ok(PermissionStatus::Unknown)
+    }
+
+    fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError> {
+        self.screen_recording_permission_status()
+    }
+
+    fn microphone_permission_status(&self) -> Result<PermissionStatus, AgentError> {
+        // Native PulseAudio clients have no separate TCC permission prompt.
+        // The audio server checks access when pulsesrc connects.
+        Ok(PermissionStatus::Granted)
+    }
+
+    fn request_microphone_permission(&self) -> Result<PermissionStatus, AgentError> {
+        self.microphone_permission_status()
+    }
+
+    fn open_microphone_settings(&self) -> Result<(), AgentError> {
+        Err(linux_error(RecorderError::Backend(
+            "Select the microphone in your desktop's sound settings.".into(),
+        )))
+    }
+
+    fn new_engine(&self, events: mpsc::Sender<RecorderEvent>) -> Self::Engine {
+        linux::LinuxRecorder::new(events)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_error(error: RecorderError) -> AgentError {
+    AgentError {
+        code: "linux_capture_unavailable".into(),
+        message: error.to_string(),
+        recoverable: true,
+        next: "Run wrec inside a Wayland desktop with PipeWire and the desktop's ScreenCast portal installed. See packaging/linux/README.md.".into(),
+    }
 }
 
 #[cfg(test)]

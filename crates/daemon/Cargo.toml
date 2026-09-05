@@ -10,13 +10,18 @@ control = { path = "../control" }
 config = { path = "../config" }
 domain = { path = "../domain" }
 libc = "0.2"
-macos = { path = "../macos" }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror.workspace = true
 tracing.workspace = true
 wrec-channel.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+macos = { path = "../macos" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux = { path = "../linux" }
 
 [[bin]]
 name = "daemon"

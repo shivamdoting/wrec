@@ -14,6 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux:
+    name: Linux CLI and capture lifecycle
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg dbus-daemon
+      - name: Build and test
+        run: |
+          cargo fmt --check
+          cargo check --workspace --locked
+          cargo test --workspace --locked
+          dbus-run-session -- cargo test -p linux portal_roundtrip --locked -- --ignored
+          ./scripts/package-cli-linux.sh
+      - name: Test packaged CLI
+        run: |
+          stage="$(mktemp -d)"
+          trap 'rm -rf "$stage"' EXIT
+          tar -xzf dist/cli/linux/wrec-cli-x86_64-unknown-linux-gnu.tar.gz -C "$stage"
+          python3 scripts/test-cli-linux.py "$stage"
+      - name: Upload Linux CLI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrec-cli-linux
+          path: dist/cli/linux/*.tar.gz
+
   rust:
     name: Rust checks
     runs-on: blacksmith-6vcpu-macos-latest

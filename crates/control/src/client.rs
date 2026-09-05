@@ -255,6 +255,7 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
         next: "Create the directory manually or set WREC_HOME to a writable path.".into(),
     })?;
 
+    #[cfg(target_os = "macos")]
     if std::env::var_os("WREC_DAEMON_BIN").is_none()
         && std::env::var_os("WREC_HEADLESS").as_deref() != Some(std::ffi::OsStr::new("1"))
     {
@@ -338,6 +339,7 @@ pub fn ensure_daemon() -> Result<(), AgentError> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn launch_app_daemon(client: &DaemonClient) -> Result<(), AgentError> {
     let channel = Channel::current();
     let status = Command::new("/usr/bin/open")
@@ -605,6 +607,13 @@ fn daemon_candidates(current: &Path) -> Vec<PathBuf> {
     [
         Some(current_dir.join("daemon")),
         profile_dir.map(|dir| dir.join("daemon")),
+        #[cfg(target_os = "linux")]
+        current_dir.parent().map(|prefix| {
+            prefix
+                .join("lib")
+                .join(Channel::current().runtime_dir_name())
+                .join("daemon")
+        }),
         Some(installed_daemon_path()),
     ]
     .into_iter()
@@ -623,7 +632,7 @@ fn daemon_executable_launch(path: PathBuf) -> Option<DaemonLaunch> {
         return None;
     }
 
-    if cargo_profile_dir(&path).is_some() {
+    if cfg!(target_os = "linux") || cargo_profile_dir(&path).is_some() {
         return Some(DaemonLaunch::executable(path));
     }
 
@@ -756,7 +765,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
+    fn linux_package_finds_runtime_relative_to_install_prefix() {
+        let candidates = daemon_candidates(std::path::Path::new("/opt/wrec/bin/wrec"));
+        assert!(candidates.contains(
+            &PathBuf::from("/opt/wrec/lib")
+                .join(wrec_channel::Channel::current().runtime_dir_name())
+                .join("daemon")
+        ));
+        let dir = std::env::temp_dir().join(format!("wrec-linux-daemon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let daemon = dir.join("daemon");
+        std::fs::write(&daemon, "").unwrap();
+        let launch = daemon_executable_launch(daemon.clone()).unwrap();
+        assert_eq!(launch.program, daemon);
+        assert!(launch.envs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn packaged_daemon_launch_requires_sibling_capture_engine() {
         let dir = std::env::temp_dir().join(format!(
             "wrec-control-packaged-daemon-{}",

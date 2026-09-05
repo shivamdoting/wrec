@@ -1,6 +1,8 @@
+#[cfg(target_os = "macos")]
+use domain::{CaptureDimensions, CaptureSourceKind, RecorderMetrics};
 use domain::{
-    CaptureDimensions, CaptureSourceKind, CaptureTarget, PermissionStatus, RecorderEngine,
-    RecorderError, RecorderEvent, RecorderMetrics, RecorderSettings, RecordingSession, Result,
+    CaptureTarget, PermissionStatus, RecorderEngine, RecorderError, RecorderEvent,
+    RecorderSettings, RecordingSession, Result,
 };
 
 static LAST_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
