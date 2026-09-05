@@ -7,7 +7,7 @@ use domain::{
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex, MutexGuard, PoisonError,
     },
 };
@@ -41,12 +41,15 @@ pub(crate) struct FakeRuntime {
     mic_request_result: Arc<Mutex<PermissionStatus>>,
     mic_requests: Arc<AtomicU64>,
     mic_settings_opens: Arc<AtomicU64>,
+    pub(crate) start_gate: Arc<AtomicBool>,
 }
 
 pub(crate) struct FakeEngine {
     events: mpsc::Sender<RecorderEvent>,
     next_session_id: Arc<AtomicU64>,
     active: Option<RecordingSession>,
+    start_gate: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
 }
 
 impl FakeRuntime {
@@ -63,6 +66,7 @@ impl FakeRuntime {
             mic_request_result: Arc::new(Mutex::new(PermissionStatus::Granted)),
             mic_requests: Arc::new(AtomicU64::new(0)),
             mic_settings_opens: Arc::new(AtomicU64::new(0)),
+            start_gate: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -125,6 +129,8 @@ impl RecordingRuntime for FakeRuntime {
             events,
             next_session_id: self.next_session_id.clone(),
             active: None,
+            start_gate: self.start_gate.clone(),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -155,12 +161,21 @@ impl RecorderEngine for FakeEngine {
                 output_path: session.output_path.clone(),
             })
             .unwrap();
-        self.events
-            .send(RecorderEvent::Started {
+        let events = self.events.clone();
+        let gate = self.start_gate.clone();
+        let stopped = self.stopped.clone();
+        std::thread::spawn(move || {
+            while !gate.load(Ordering::Relaxed) {
+                if stopped.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let _ = events.send(RecorderEvent::Started {
                 session_id: id,
                 dimensions: None,
-            })
-            .unwrap();
+            });
+        });
         Ok(session)
     }
 
@@ -173,6 +188,7 @@ impl RecorderEngine for FakeEngine {
     }
 
     fn stop(&mut self) -> RecorderResult<()> {
+        self.stopped.store(true, Ordering::Relaxed);
         let session = self
             .active
             .take()
@@ -183,13 +199,18 @@ impl RecorderEngine for FakeEngine {
                 message: "stopping recording".into(),
             })
             .unwrap();
-        self.events
-            .send(RecorderEvent::Exited {
+        let event = if !self.start_gate.load(Ordering::Relaxed) {
+            RecorderEvent::Cancelled {
+                session_id: session.id,
+            }
+        } else {
+            RecorderEvent::Exited {
                 session_id: session.id,
                 success: true,
                 status: "exit status: 0".into(),
-            })
-            .unwrap();
+            }
+        };
+        self.events.send(event).unwrap();
         Ok(())
     }
 }

@@ -32,6 +32,9 @@ Wrec records displays or windows with a native ScreenCaptureKit pipeline, writes
 hardware-encoded `.mov` files, and gives you both a native SwiftUI menu-bar app
 and a JSON-friendly CLI for scripts and agents.
 
+The Linux CLI records Wayland and X11 desktops. It prefers VA-API or NVIDIA
+hardware encoding and falls back to software encoding when needed. See [Linux setup and limitations](packaging/linux/README.md).
+
 > [!NOTE]
 > Wrec is still early public software. Release builds are not notarized, so
 > macOS blocks the first launch of an app downloaded with a browser. The

@@ -286,10 +286,16 @@ pub enum RecorderEvent {
         success: bool,
         status: String,
     },
+    Cancelled {
+        session_id: u64,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecorderError {
+    #[error("recording cancelled before capture started")]
+    Cancelled,
+
     #[error("screen recording permission is not granted")]
     MissingScreenRecordingPermission,
 
