@@ -176,8 +176,8 @@ impl<R: RecordingRuntime> Coordinator<R> {
         let (job, should_launch) = {
             let config = load_config();
             let overrides = recording_overrides(&params.options);
-            let (settings, warning) = build_settings_report(&config.settings, &overrides);
-            let warnings = warning
+            let (mut settings, warning) = build_settings_report(&config.settings, &overrides);
+            let mut warnings = warning
                 .map(|message| AgentWarning {
                     code: "preset_limited".into(),
                     message,
@@ -185,6 +185,9 @@ impl<R: RecordingRuntime> Coordinator<R> {
                 })
                 .into_iter()
                 .collect::<Vec<_>>();
+            lock_state(&state)?
+                .runtime
+                .prepare_settings(&mut settings, &mut warnings);
             let targets = list_targets_with_cache(&state, true)?;
             let target = resolve_record_target(
                 &targets,
@@ -702,7 +705,11 @@ fn handle_recorder_event<R: RecordingRuntime>(
             output_path,
             ..
         } => {
-            job.output_path = output_path.or_else(|| job.output_path.clone());
+            job.output_path = output_path.or_else(|| {
+                job.output_path
+                    .clone()
+                    .filter(|path| success || path.is_file())
+            });
             if success {
                 job.mark_completed(format!("capture engine exited: {status}"));
             } else {

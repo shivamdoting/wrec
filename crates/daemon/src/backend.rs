@@ -184,9 +184,12 @@ impl WrecBackend {
                 success,
                 status,
             } => {
-                let output_path = self.active_output_path.clone();
                 let failed_before_exit = self.failed_session_ids.remove(session_id);
                 let success = *success && !failed_before_exit;
+                let output_path = self
+                    .active_output_path
+                    .clone()
+                    .filter(|path| success || path.is_file());
 
                 if success {
                     self.mark_recording_completed(*session_id, output_path.as_deref());
@@ -614,5 +617,37 @@ mod tests {
         });
 
         assert!(matches!(event, BackendEvent::Exited { success: false, .. }));
+    }
+
+    #[test]
+    fn failed_start_omits_missing_output_and_failed_capture_keeps_existing_output() {
+        let path =
+            std::env::temp_dir().join(format!("wrec-failure-artifact-{}", std::process::id()));
+        for (stage, artifact) in [
+            ("portal rejected", false),
+            ("setup failed", false),
+            ("zero-frame timeout", false),
+            ("capture failed after frames", true),
+        ] {
+            if artifact {
+                std::fs::write(&path, b"partial movie fragment").unwrap();
+            }
+            let mut backend = WrecBackend {
+                store: None,
+                active_session_id: Some(1),
+                active_output_path: Some(path.clone()),
+                failed_session_ids: HashSet::new(),
+            };
+            let event = backend.handle_recorder_event(&RecorderEvent::Exited {
+                session_id: 1,
+                success: false,
+                status: stage.into(),
+            });
+            let BackendEvent::Exited { output_path, .. } = event else {
+                panic!("expected exit")
+            };
+            assert_eq!(output_path.is_some(), artifact, "{stage}");
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

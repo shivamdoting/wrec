@@ -31,7 +31,8 @@ jobs:
           sudo apt-get install -y pkg-config libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg dbus-daemon
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav ffmpeg dbus-daemon xvfb x11-apps
       - name: Build and test
         run: |
           cargo fmt --check
@@ -45,6 +46,7 @@ jobs:
           trap 'rm -rf "$stage"' EXIT
           tar -xzf dist/cli/linux/wrec-cli-x86_64-unknown-linux-gnu.tar.gz -C "$stage"
           python3 scripts/test-cli-linux.py "$stage"
+          python3 scripts/test-capture-linux.py "$stage/bin/wrec"
       - name: Upload Linux CLI package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

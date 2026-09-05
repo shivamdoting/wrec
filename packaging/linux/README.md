@@ -1,55 +1,66 @@
 # Linux CLI and daemon
 
-The Linux backend records a Wayland display or window selected through the
-desktop's ScreenCast portal. It requires PipeWire DMA-BUF capture, GStreamer
-1.24 or newer, and an Intel or AMD GPU with VA-API encoding support. This is
-an initial backend; hardware compatibility and efficiency still need measurements
-on real desktops. There is no Linux GUI in this release.
+The Linux backend records Wayland desktops through the ScreenCast portal and
+PipeWire, or X11 displays and windows through XShm/XImage. It selects an installed
+encoder automatically: Intel/AMD VA-API, NVIDIA NVENC, then software encoding.
+A working desktop and the required native plugins are needed. There is no Linux
+GUI yet. Hardware compatibility and efficiency still need measurements on real
+desktops; software fallback makes recording possible without a supported GPU,
+but uses more CPU.
 
-The pipeline is `pipewiresrc → DMA-BUF → vapostproc → VA encoder → qtmux`.
-Rust manages sessions and buffer metadata and never maps video pixels. The
-source negotiates four to eight buffers, the video queue holds at most two
-frames, and the encoder uses no B-frames. This bounds application queues;
-the compositor and driver have their own allocations. Colour conversion and
-scaling can still allocate GPU surfaces, so this is not a claim of zero total
-copies. The backend rejects CPU frame buffers and has no software video fallback.
+On compatible Wayland/VA-API systems, the preferred pipeline is
+`pipewiresrc → DMA-BUF → vapostproc → VA encoder → qtmux`. Rust manages sessions
+and buffer metadata without mapping video pixels. The source negotiates four to
+eight buffers and the video queue holds at most two frames. Conversion and scaling
+can allocate GPU surfaces; this does not imply zero total copies.
+
+When shared GPU buffers cannot be imported, wrec retries with system-memory
+capture and hardware encoding. NVIDIA uses CUDA conversion when available,
+otherwise CPU conversion before NVENC. Software encoding uses x264/OpenH264 for
+H.264 and x265 for HEVC. Retries happen only before the first encoded frame and
+preserve the requested codec. Job events identify the attempted and selected
+paths. X11 capture uses system memory even when encoding runs on the GPU.
 
 ## Install dependencies and build
 
-Ubuntu 24.04 or newer is a starting point. The desktop must already have a
-working PipeWire service and its own `xdg-desktop-portal` backend, such as
-`xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`. Use the backend for your
-desktop; do not install an arbitrary mix of portal backends.
-
-Use the current stable Rust toolchain.
+Use GStreamer 1.22 or newer and current stable Rust. GStreamer 1.24 or newer is
+recommended for the DMA-BUF/VA path. Ubuntu 24.04 is a starting point; package
+names differ across distributions.
 
 ```bash
 sudo apt install build-essential pkg-config libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev gstreamer1.0-tools \
   gstreamer1.0-pipewire gstreamer1.0-plugins-base \
-  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
-  pipewire-pulse vainfo
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly gstreamer1.0-libav
 cargo build --release -p cli -p daemon
 ```
 
-Install the VA-API driver for your GPU. Distribution codec packaging and GPU
-capabilities vary. Inspect `vainfo`, `gst-inspect-1.0 vapostproc`, and
-`gst-inspect-1.0 vah264enc` or `vah264lpenc`. HEVC needs `vah265enc` or
-`vah265lpenc`. If the `va` plugin lists zero elements, check the driver and
-access to `/dev/dri/renderD*` from the same user running wrec.
+Wayland needs PipeWire and the ScreenCast portal backend for the desktop, such as
+`xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`. Use the backend for your
+desktop. X11 needs an accessible X server and the `ximagesrc` plugin.
 
-Build a relocatable CLI archive with:
+Install the driver for your GPU. Check `vainfo` and
+`gst-inspect-1.0 vah264enc` / `vah264lpenc` for Intel/AMD, or
+`gst-inspect-1.0 nvh264enc` for NVIDIA. HEVC uses the corresponding H.265 encoder.
+If hardware elements are absent, inspect `x264enc`, `openh264enc`, or `x265enc`.
+Distribution codec packaging and GPU capabilities vary. VA-API also needs access
+to `/dev/dri/renderD*`; NVIDIA needs its driver and encode libraries. Missing
+hardware plugins do not prevent software recording.
 
 ```bash
 ./scripts/package-cli-linux.sh
 ```
 
 Extract the archive into a prefix such as `~/.local`. It contains `bin/wrec`
-and `lib/wrec/daemon`. Put the prefix's `bin` directory on PATH. Native
-GStreamer and driver libraries remain system dependencies. Run the CLI in
-the logged-in desktop session; it starts the daemon automatically and
-inherits the session's Wayland, D-Bus, PipeWire, and audio environment.
-After changing sessions, stop and restart the daemon.
+and `lib/wrec/daemon`. Put the prefix's `bin` directory on PATH. Native libraries
+remain system dependencies. The archive targets the build machine's architecture
+and libc; it is not a universal binary for every Linux distribution.
+
+Run the CLI in the logged-in desktop session. It starts the daemon automatically
+and inherits the display, D-Bus, PipeWire, and audio environment. After changing
+sessions, stop and restart the daemon. A container without the desktop sockets or
+GPU device access cannot record the host desktop merely because the host has a GPU.
 
 ## Record
 
@@ -59,57 +70,56 @@ wrec record --target display:0 --codec h264 --duration 10s
 wrec record --target window:0 --codec h264 --no-system-audio
 ```
 
-`display:0` and `window:0` open the desktop's source picker. They are not
-native display or window IDs. Only source types advertised by the portal
-appear in `targets`. The duration starts after the first encoded frame,
-so time spent choosing a source does not shorten the recording. The picker
-times out after two minutes and `wrec job stop <id>` cancels it.
-Stopping before capture begins produces a cancelled job, without a movie.
-Once capture starts, `--duration` counts wall time, including pauses; the
-movie itself omits paused time.
+On Wayland, `display:0` and `window:0` open the desktop's source picker; only
+advertised source types appear. On X11, use the window ID returned by `targets`
+instead of `window:0`; named windows and X screen roots are enumerated directly.
+A multi-monitor X screen is captured as one desktop. Wayland is preferred when
+both session variables exist, because XWayland cannot capture the whole desktop.
 
-Permission status is `unknown` outside a recording because portal grants
-belong to individual sessions. `permission.request` does not open a second
-picker. Every recording asks for a source; restore tokens, app-name selection,
-unattended capture, and arbitrary window enumeration are not implemented.
+The duration starts after the first encoded frame, so time spent choosing a
+source does not shorten recording. The portal picker times out after two minutes;
+`wrec job stop <id>` cancels it. Stopping before capture begins produces a cancelled
+job without a movie. After capture starts, `--duration` counts wall time including
+pauses; the movie omits paused time. Failed starts do not report nonexistent files.
 
-System audio records the default output monitor through `pipewire-pulse`.
-`--mic` adds the default microphone as a separate AAC track. Audio encoding
-runs on the CPU. Use `--no-system-audio` to omit system audio; microphone capture
-remains opt-in. Configure devices in the desktop's sound settings. A Linux
-wrec window-hiding filter and custom microphone indicator are not provided;
-the desktop controls its own screen-sharing indication.
+Wayland permission status is `unknown` outside a recording because grants belong
+to individual sessions. Every recording asks for a source. Restore tokens,
+unattended Wayland capture, and Wayland app-name selection are not implemented.
 
-Pause and resume use the pipeline clock so paused time is omitted. Stop
-drains the encoders and finalizes the movie, including when paused. The
-writer emits ten-second movie fragments. An interrupted recording may only
-be playable through its last completed fragment. A static desktop requests
-one keepalive frame per second to keep the movie timeline advancing.
+System audio uses the default PulseAudio output monitor, including through
+`pipewire-pulse`. `--mic` adds the default microphone as a separate AAC track.
+Audio encoding runs on the CPU. Use `--no-system-audio` when no audio service is
+available. Configure devices in desktop sound settings. Linux cannot apply the
+shared wrec window-hiding or custom microphone-indicator options; job settings
+report them disabled with a warning. The desktop controls its sharing indicator.
 
-X11, NVIDIA/NVENC, HDR capture, and desktop-specific capture shortcuts are
-outside this first backend. A compositor/driver combination that cannot
-share importable DMA-BUFs fails with an error. There is no silent fallback.
+Stop drains the encoders and finalizes the movie, including when paused. The
+writer emits ten-second movie fragments; an interrupted recording may only be
+playable through its last completed fragment. PipeWire requests one keepalive
+frame per second on a static desktop. HDR is not supported.
 
 ## Validate
 
 ```bash
-sudo apt install ffmpeg dbus-daemon
+sudo apt install ffmpeg dbus-daemon xvfb x11-apps
 cargo fmt --check
 cargo check --workspace --locked
 cargo test --workspace --locked
-dbus-run-session -- cargo test -p linux portal_roundtrip -- --ignored
+dbus-run-session -- cargo test -p linux portal_roundtrip --locked -- --ignored
+cargo build -p cli -p daemon
+python3 scripts/test-capture-linux.py target/debug/wrec
 ```
 
-The movie tests use synthetic video and a software encoder only inside the
-test module. They check pause timing, stop while paused, real AAC tracks,
-file readability, capture errors, and rejection of CPU buffers. The portal
-test uses a mock ScreenCast service on an isolated D-Bus and checks source
-options, denial, cancellation, and session cleanup. These tests do not prove
-that a desktop exports DMA-BUFs or that a driver can import them.
+The isolated Xvfb test records actual X11 display/window pixels through the CLI
+and daemon, checks H.264/HEVC decoding and timestamps, and exercises pause/resume
+and stopping while paused. It expects a machine without a hardware encoder so
+software fallback is exercised. CI also tests the extracted package and headless
+errors. Native pipeline tests cover AAC tracks, timing, capture errors, and strict
+DMA-BUF rejection; an isolated mock portal covers options and session cleanup.
 
-Before calling a GPU/desktop combination supported, record actual displays
-and windows, include a static screen and motion, check cursor on/off, audio
-and microphone sync, pause/resume, stop from the desktop sharing control,
-and inspect files with `ffprobe`. Measure CPU, RSS, GPU memory, power, and
-compositor overhead at 1080p30 and 4K60. Compare against an idle baseline on
-the same machine and report the GPU, driver, desktop, and library versions.
+These checks do not validate GPU buffer import or a real desktop portal. Before
+calling a GPU/desktop combination validated, record displays and windows, static
+screens and motion, cursor on/off, audio/microphone sync, and stopping from the
+desktop sharing control. Measure CPU, RSS, GPU memory, power, and compositor cost
+at 1080p30 and 4K60 against an idle baseline. Report GPU, driver, desktop, encoder,
+and library versions. VA-API and NVIDIA performance remain unverified here.

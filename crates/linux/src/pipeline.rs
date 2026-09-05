@@ -1,7 +1,12 @@
-use crate::{backend, portal::PipeWireStream, Command};
+use crate::{
+    backend,
+    encoding::{self, Mode},
+    portal::PipeWireStream,
+    Command,
+};
 use domain::{
-    CaptureDimensions, Codec, Quality, RecorderError, RecorderEvent, RecorderMetrics,
-    RecorderSettings, RecordingSession, Resolution, Result,
+    CaptureDimensions, Codec, RecorderError, RecorderEvent, RecorderMetrics, RecorderSettings,
+    RecordingSession, Resolution, Result,
 };
 use gstreamer::{self as gst, prelude::*};
 use std::{
@@ -15,25 +20,13 @@ use std::{
 };
 use tokio::sync::watch;
 
-fn element(factory: &str) -> Result<gst::Element> {
+pub(crate) fn element(factory: &str) -> Result<gst::Element> {
     gst::ElementFactory::make(factory).build().map_err(|error| backend(format!("GStreamer element {factory} is unavailable: {error}. Install the Linux runtime dependencies in packaging/linux/README.md.")))
-}
-
-fn encoder_name(codec: Codec) -> Result<&'static str> {
-    let names = match codec {
-        Codec::H264 => ["vah264lpenc", "vah264enc"],
-        Codec::Hevc => ["vah265lpenc", "vah265enc"],
-    };
-    names.into_iter().find(|name| gst::ElementFactory::find(name).is_some())
-        .ok_or_else(|| backend(format!("No VA-API {} hardware encoder is available. Install GStreamer's va plugin and an Intel/AMD encoding driver, and check access to /dev/dri/renderD*. NVIDIA/NVENC and software video encoding are not supported by this backend.", codec.as_arg())))
 }
 
 pub(crate) fn check_plugins(settings: &RecorderSettings) -> Result<()> {
     gst::init().map_err(backend)?;
-    encoder_name(settings.codec)?;
     for factory in [
-        "pipewiresrc",
-        "vapostproc",
         "capsfilter",
         "queue",
         parser_name(settings.codec),
@@ -79,17 +72,6 @@ fn output_size(width: i32, height: i32, resolution: Resolution) -> (i32, i32) {
     (even(width), even(height))
 }
 
-fn video_caps(size: Option<(i32, i32)>) -> gst::Caps {
-    let builder = gst::Caps::builder("video/x-raw")
-        .features(["memory:VAMemory"])
-        .field("format", "NV12")
-        .field("pixel-aspect-ratio", gst::Fraction::new(1, 1));
-    match size {
-        Some((w, h)) => builder.field("width", w).field("height", h).build(),
-        None => builder.build(),
-    }
-}
-
 fn video_queue() -> Result<gst::Element> {
     let queue = element("queue")?;
     queue.set_property("max-size-buffers", 2u32);
@@ -111,15 +93,75 @@ struct Counters {
     frames: AtomicU64,
     dropped: AtomicU64,
     dimensions: Mutex<Option<CaptureDimensions>>,
+    last_pts: Mutex<Option<gst::ClockTime>>,
+}
+
+pub(crate) enum CaptureInput {
+    PipeWire(PipeWireStream),
+    X11 { display: String, xid: u64 },
+}
+
+struct Attempt {
+    mode: Mode,
+    counters: Arc<Counters>,
 }
 
 pub(crate) fn record(
-    capture: &PipeWireStream,
+    capture: &CaptureInput,
     session: &RecordingSession,
     settings: &RecorderSettings,
     events: &mpsc::Sender<RecorderEvent>,
     commands: mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
+) -> Result<()> {
+    if matches!(capture, CaptureInput::X11 { .. }) {
+        crate::x11::initialize()?;
+    }
+    check_plugins(settings)?;
+    let modes = encoding::modes(settings.codec, matches!(capture, CaptureInput::PipeWire(_)));
+    if modes.is_empty() {
+        return Err(backend(format!("No {} encoder is installed. Install GStreamer VA/NVENC plugins or x264/x265/openh264 for software compatibility; see packaging/linux/README.md.", settings.codec.as_arg())));
+    }
+    let mut last_error = None;
+    for mode in modes {
+        if *stop.borrow() {
+            return Err(RecorderError::Cancelled);
+        }
+        let attempt = Attempt {
+            mode,
+            counters: Arc::new(Counters::default()),
+        };
+        let _ = events.send(RecorderEvent::Log {
+            session_id: Some(session.id),
+            message: format!("capture-engine: trying {}", mode.description()),
+        });
+        let result = record_attempt(
+            capture, session, settings, events, &commands, stop, &attempt,
+        );
+        if result.is_ok()
+            || matches!(result, Err(RecorderError::Cancelled))
+            || attempt.counters.frames.load(Ordering::Relaxed) > 0
+        {
+            return result;
+        }
+        let error = result.unwrap_err();
+        let _ = events.send(RecorderEvent::Log {
+            session_id: Some(session.id),
+            message: format!("capture-engine: {} could not start: {error}", mode.factory),
+        });
+        last_error = Some(error);
+    }
+    Err(last_error.unwrap_or_else(|| backend("No recording pipeline could start")))
+}
+
+fn record_attempt(
+    capture: &CaptureInput,
+    session: &RecordingSession,
+    settings: &RecorderSettings,
+    events: &mpsc::Sender<RecorderEvent>,
+    commands: &mpsc::Receiver<Command>,
+    stop: &watch::Receiver<bool>,
+    attempt: &Attempt,
 ) -> Result<()> {
     if *stop.borrow() {
         return Err(RecorderError::Cancelled);
@@ -127,48 +169,51 @@ pub(crate) fn record(
     let settings = settings.clone().with_preset_limits();
     let pipeline = PipelineGuard(gst::Pipeline::new());
     pipeline.0.use_clock(Some(&gst::SystemClock::obtain()));
-    let source = element("pipewiresrc")?;
-    source.set_property("fd", capture.fd.as_raw_fd());
-    // The portal returns a node ID, whereas target-object expects an object serial.
-    source.set_property("path", capture.node.to_string());
-    source.set_property("always-copy", false);
-    source.set_property("min-buffers", 4i32);
-    source.set_property("max-buffers", 8i32);
-    source.set_property("keepalive-time", 1000i32);
-    source.set_property("resend-last", true);
+    let mode = attempt.mode;
+    let source = match capture {
+        CaptureInput::PipeWire(capture) => {
+            let source = element("pipewiresrc")?;
+            source.set_property("fd", capture.fd.as_raw_fd());
+            source.set_property("path", capture.node.to_string());
+            source.set_property("always-copy", false);
+            source.set_property("min-buffers", 4i32);
+            source.set_property("max-buffers", 8i32);
+            source.set_property("keepalive-time", 1000i32);
+            source.set_property("resend-last", true);
+            source
+        }
+        CaptureInput::X11 { display, xid } => {
+            let source = element("ximagesrc")?;
+            source.set_property("display-name", display);
+            source.set_property("xid", *xid);
+            source.set_property("show-pointer", settings.include_cursor);
+            source.set_property("use-damage", true);
+            source
+        }
+    };
     source.set_property("do-timestamp", true);
     let input = element("capsfilter")?;
-    input.set_property(
-        "caps",
-        gst::Caps::builder("video/x-raw")
-            .features(["memory:DMABuf"])
-            .field(
-                "framerate",
-                gst::Fraction::new(settings.fps.as_u32() as i32, 1),
-            )
-            .build(),
+    let caps = gst::Caps::builder("video/x-raw").field(
+        "framerate",
+        gst::Fraction::new(settings.fps.as_u32() as i32, 1),
     );
-    let queue = video_queue()?;
-    let converter = element("vapostproc")?;
-    converter.set_property("add-borders", true);
-    let output = element("capsfilter")?;
-    output.set_property("caps", video_caps(None));
-    let encoder_factory = encoder_name(settings.codec)?;
-    let encoder = element(encoder_factory)?;
-    encoder.set_property_from_str("rate-control", "cqp");
-    let qp = match settings.quality {
-        Quality::Efficient => 30u32,
-        Quality::Balanced => 25u32,
-        Quality::High => 20u32,
+    let caps = if mode.dmabuf {
+        caps.features(["memory:DMABuf"]).build()
+    } else {
+        caps.build()
     };
-    for property in ["qpi", "qpp", "qpb"] {
-        encoder.set_property(property, qp);
-    }
-    encoder.set_property("key-int-max", settings.fps.as_u32() * 2);
-    encoder.set_property("b-frames", 0u32);
+    input.set_property("caps", caps);
+    let queue = video_queue()?;
+    let converters = mode.converters()?;
+    let output = element("capsfilter")?;
+    output.set_property("caps", mode.caps(None));
+    let encoder = mode.encoder(&settings)?;
     let parser = element(parser_name(settings.codec))?;
     let mux = element("qtmux")?;
     mux.set_property("fragment-duration", 10000u32);
+    // Preserve sub-frame timestamps around pause/resume instead of rounding
+    // them to the default frame-rate-derived track timescale.
+    mux.set_property("trak-timescale", 1_000_000u32);
     let sink = element("filesink")?;
     sink.set_property(
         "location",
@@ -178,19 +223,28 @@ pub(crate) fn record(
             .ok_or_else(|| backend("recording output path must be UTF-8"))?,
     );
     sink.set_property("sync", false);
-    let chain = [
-        &source, &input, &queue, &converter, &output, &encoder, &parser, &mux, &sink,
-    ];
-    pipeline.0.add_many(chain).map_err(backend)?;
-    gst::Element::link_many(chain).map_err(|error| backend(format!("Cannot link the DMA-BUF/VA-API pipeline: {error}. Use GStreamer 1.24 or newer with DMA-BUF support in vapostproc.")))?;
+    let mut chain = vec![&source, &input, &queue];
+    chain.extend(converters.iter());
+    chain.extend([&output, &encoder, &parser, &mux, &sink]);
+    pipeline
+        .0
+        .add_many(chain.iter().copied())
+        .map_err(backend)?;
+    gst::Element::link_many(chain.iter().copied()).map_err(backend)?;
     if settings.include_system_audio {
         add_audio(&pipeline.0, &mux, Some("@DEFAULT_MONITOR@"))?;
     }
     if settings.include_microphone {
         add_audio(&pipeline.0, &mux, None)?;
     }
-    let counters = Arc::new(Counters::default());
-    attach_capture_probe(&source, &output, settings.resolution, counters.clone());
+    let counters = attempt.counters.clone();
+    attach_capture_probe(
+        &source,
+        &output,
+        settings.resolution,
+        mode,
+        counters.clone(),
+    );
     attach_encoded_probe(&parser, counters.clone());
     // One overrun accompanies each incoming frame that replaces the oldest frame.
     let dropped = counters.clone();
@@ -198,7 +252,13 @@ pub(crate) fn record(
         dropped.dropped.fetch_add(1, Ordering::Relaxed);
         None
     });
-    let _ = events.send(RecorderEvent::Log { session_id: Some(session.id), message: format!("capture-engine: PipeWire DMA-BUF → vapostproc → {encoder_factory}; 8 capture buffers, 2 queued frames, no CPU video fallback") });
+    let _ = events.send(RecorderEvent::Log {
+        session_id: Some(session.id),
+        message: format!(
+            "capture-engine: selected {}; video queue limited to 2 frames",
+            mode.description()
+        ),
+    });
     // Reserve a unique file so a collision never truncates an existing recording.
     std::fs::OpenOptions::new()
         .write(true)
@@ -269,6 +329,7 @@ fn attach_capture_probe(
     source: &gst::Element,
     output: &gst::Element,
     resolution: Resolution,
+    mode: Mode,
     counters: Arc<Counters>,
 ) {
     let output = output.clone();
@@ -280,21 +341,29 @@ fn attach_capture_probe(
                         if width >= 2 && height >= 2 {
                             let mut dimensions = counters.dimensions.lock().unwrap();
                             // A MOV track has a fixed canvas. Window resizes are
-                            // scaled/letterboxed by VA into the initial output size.
+                            // scaled/letterboxed into the initial output size.
                             let (w, h) = dimensions.map(|d| (d.output_width as i32, d.output_height as i32))
                                 .unwrap_or_else(|| output_size(width, height, resolution));
                             dimensions.get_or_insert(CaptureDimensions { native_width: width.into(), native_height: height.into(), output_width: w.into(), output_height: h.into() });
                             drop(dimensions);
-                            output.set_property("caps", video_caps(Some((w, h))));
+                            output.set_property("caps", mode.caps(Some((w, h))));
                         }
                     }
                 }
             }
         }
         if let Some(gst::PadProbeData::Buffer(buffer)) = &info.data {
-            if buffer.n_memory() == 0 || buffer.iter_memories().any(|memory| !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>()) {
+            if let Some(pts) = buffer.pts() {
+                let mut previous = counters.last_pts.lock().unwrap();
+                if previous.is_some_and(|last| pts <= last || pts.saturating_sub(last) < gst::ClockTime::from_useconds(1)) {
+                    counters.dropped.fetch_add(1, Ordering::Relaxed);
+                    return gst::PadProbeReturn::Drop;
+                }
+                *previous = Some(pts);
+            }
+            if mode.dmabuf && (buffer.n_memory() == 0 || buffer.iter_memories().any(|memory| !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>())) {
                 if let Some(element) = pad.parent_element() {
-                    gst::element_error!(element, gst::StreamError::Format, ("PipeWire delivered a non-DMA-BUF frame. This backend requires GPU buffer sharing; check the compositor and graphics driver."));
+                    gst::element_error!(element, gst::StreamError::Format, ("PipeWire delivered a non-DMA-BUF frame. This attempt requires GPU buffer sharing; another available mode will be tried before capture starts."));
                 }
                 return gst::PadProbeReturn::Drop;
             }
@@ -319,7 +388,7 @@ fn run(
     pipeline: &gst::Pipeline,
     session: &RecordingSession,
     events: &mpsc::Sender<RecorderEvent>,
-    commands: mpsc::Receiver<Command>,
+    commands: &mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
     counters: &Counters,
 ) -> Result<()> {
@@ -490,7 +559,7 @@ mod tests {
                     &guard.0,
                     &worker_session,
                     &events_tx,
-                    commands_rx,
+                    &commands_rx,
                     &stopped,
                     &counters,
                 )
@@ -691,6 +760,11 @@ mod tests {
             &pipeline.0.by_name("source").unwrap(),
             &output,
             Resolution::Native,
+            Mode {
+                kind: encoding::Kind::Va,
+                factory: "vah264enc",
+                dmabuf: true,
+            },
             Arc::new(Counters::default()),
         );
         pipeline.0.set_state(gst::State::Playing).unwrap();

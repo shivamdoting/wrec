@@ -17,7 +17,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="wrec-linux-smoke-") as directory:
         env = os.environ.copy()
         for key in ("WREC_DAEMON_BIN", "WREC_CAPTURE_ENGINE_PATH", "WREC_HEADLESS",
-                    "WREC_CHANNEL", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"):
+                    "WREC_CHANNEL", "WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR"):
             env.pop(key, None)
         env["WREC_HOME"] = str(Path(directory) / "home")
         env["WREC_DATA_DIR"] = str(Path(directory) / "data")
@@ -28,6 +28,11 @@ def main():
             assert (result.returncode == 0) == success, (args, result.stdout, result.stderr)
             return result
 
+        # A sibling executable must not shadow the archive's own runtime.
+        decoy = prefix / "bin" / "daemon"
+        assert not decoy.exists(), decoy
+        decoy.write_text("#!/bin/sh\nexit 99\n")
+        decoy.chmod(0o755)
         pid = None
         try:
             status = json.loads(run("daemon", "start", "--json").stdout)
@@ -38,11 +43,11 @@ def main():
             print("PASS: packaged CLI automatically launches its relative Linux daemon")
 
             result = run("targets", "--json", success=False)
-            assert "Wayland desktop session" in result.stdout + result.stderr
+            assert "Wayland or X11 desktop session" in result.stdout + result.stderr
             print("PASS: headless target discovery returns a useful error")
 
             result = run("record", "--target", "display:0", "--duration", "1s", "--json", success=False)
-            assert "Wayland desktop session" in result.stdout + result.stderr
+            assert "Wayland or X11 desktop session" in result.stdout + result.stderr
             assert not list(Path(directory).rglob("*.mov"))
             print("PASS: unsupported capture fails without a recording artifact")
 
@@ -71,6 +76,7 @@ def main():
             pid = None
             print("PASS: restarted daemon handles SIGTERM and removes the socket")
         finally:
+            decoy.unlink()
             if pid is not None:
                 try:
                     os.kill(pid, signal.SIGTERM)

@@ -1,7 +1,10 @@
 #![cfg(target_os = "linux")]
 
+mod desktop;
+mod encoding;
 mod pipeline;
 mod portal;
+mod x11;
 
 use domain::{
     CaptureTarget, RecorderEngine, RecorderError, RecorderEvent, RecorderSettings,
@@ -18,7 +21,7 @@ use std::{
 };
 use tokio::sync::watch;
 
-pub use portal::{check_desktop, list_targets};
+pub use desktop::{check_desktop, list_targets};
 
 pub(crate) fn backend(error: impl std::fmt::Display) -> RecorderError {
     RecorderError::Backend(error.to_string())
@@ -85,8 +88,9 @@ impl RecorderEngine for LinuxRecorder {
         }
         self.stop_requested = false;
         check_desktop()?;
-        portal::validate_target(&target)?;
-        pipeline::check_plugins(&settings)?;
+        if desktop::detect()? == desktop::Desktop::Wayland {
+            portal::validate_target(&target)?;
+        }
         std::fs::create_dir_all(&settings.output_dir).map_err(backend)?;
         static LAST_ID: AtomicU64 = AtomicU64::new(0);
         let now = SystemTime::now()
@@ -119,6 +123,17 @@ impl RecorderEngine for LinuxRecorder {
                     output_path: worker_session.output_path.clone(),
                 });
                 let result = (|| {
+                    if desktop::detect()? == desktop::Desktop::X11 {
+                        let (display, xid) = x11::source(&target)?;
+                        return pipeline::record(
+                            &pipeline::CaptureInput::X11 { display, xid },
+                            &worker_session,
+                            &settings,
+                            &events,
+                            receiver,
+                            &stopped,
+                        );
+                    }
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -135,7 +150,7 @@ impl RecorderEngine for LinuxRecorder {
                             };
                             let mut recording = tokio::task::spawn_blocking(move || {
                                 pipeline::record(
-                                    &stream,
+                                    &pipeline::CaptureInput::PipeWire(stream),
                                     &worker_session,
                                     &settings,
                                     &events,

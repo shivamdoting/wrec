@@ -605,15 +605,18 @@ fn daemon_candidates(current: &Path) -> Vec<PathBuf> {
         .filter(|_| current_dir.file_name().is_some_and(|name| name == "deps"));
 
     [
+        #[cfg(target_os = "linux")]
+        current_dir
+            .parent()
+            .filter(|_| current_dir.file_name().is_some_and(|name| name == "bin"))
+            .map(|prefix| {
+                prefix
+                    .join("lib")
+                    .join(Channel::current().runtime_dir_name())
+                    .join("daemon")
+            }),
         Some(current_dir.join("daemon")),
         profile_dir.map(|dir| dir.join("daemon")),
-        #[cfg(target_os = "linux")]
-        current_dir.parent().map(|prefix| {
-            prefix
-                .join("lib")
-                .join(Channel::current().runtime_dir_name())
-                .join("daemon")
-        }),
         Some(installed_daemon_path()),
     ]
     .into_iter()
@@ -632,6 +635,13 @@ fn daemon_executable_launch(path: PathBuf) -> Option<DaemonLaunch> {
         return None;
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path).ok()?.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+    }
     if cfg!(target_os = "linux") || cargo_profile_dir(&path).is_some() {
         return Some(DaemonLaunch::executable(path));
     }
@@ -727,10 +737,18 @@ mod tests {
     }
 
     #[test]
-    fn daemon_candidates_prefer_sibling_daemon() {
+    fn daemon_candidates_prefer_the_platform_package_layout() {
         let candidates = daemon_candidates(&PathBuf::from("/tmp/wrec/bin/wrec"));
 
+        #[cfg(target_os = "macos")]
         assert_eq!(candidates[0], PathBuf::from("/tmp/wrec/bin/daemon"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/tmp/wrec/lib")
+                .join(wrec_channel::Channel::current().runtime_dir_name())
+                .join("daemon")
+        );
     }
 
     #[test]
@@ -755,6 +773,11 @@ mod tests {
         let daemon = debug.join("daemon");
         std::fs::create_dir_all(&debug).unwrap();
         std::fs::write(&daemon, "").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let launch = daemon_executable_launch(daemon.clone()).unwrap();
 
@@ -778,6 +801,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let daemon = dir.join("daemon");
         std::fs::write(&daemon, "").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let launch = daemon_executable_launch(daemon.clone()).unwrap();
         assert_eq!(launch.program, daemon);
         assert!(launch.envs.is_empty());
@@ -795,6 +823,11 @@ mod tests {
         let capture_engine = dir.join("capture-engine");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&daemon, "").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         assert!(daemon_executable_launch(daemon.clone()).is_none());
 

@@ -7,6 +7,13 @@ use std::sync::mpsc;
 pub(crate) trait RecordingRuntime: Clone + Send + Sync + 'static {
     type Engine: RecorderEngine + Send + 'static;
 
+    fn prepare_settings(
+        &self,
+        _settings: &mut domain::RecorderSettings,
+        _warnings: &mut Vec<control::AgentWarning>,
+    ) {
+    }
+
     fn list_targets(&self) -> Result<Vec<CaptureTarget>, AgentError>;
     fn screen_recording_permission_status(&self) -> Result<PermissionStatus, AgentError>;
     fn request_screen_recording_permission(&self) -> Result<PermissionStatus, AgentError>;
@@ -125,6 +132,22 @@ pub(crate) struct LinuxRuntime;
 impl RecordingRuntime for LinuxRuntime {
     type Engine = linux::LinuxRecorder;
 
+    fn prepare_settings(
+        &self,
+        settings: &mut domain::RecorderSettings,
+        warnings: &mut Vec<control::AgentWarning>,
+    ) {
+        if settings.hide_wrec || (settings.include_microphone && settings.show_mic_indicator) {
+            warnings.push(control::AgentWarning {
+                code: "linux_settings_unavailable".into(),
+                message: "Linux does not provide Wrec-window exclusion or a custom microphone indicator; these settings are disabled for this job.".into(),
+                next: "Use the desktop's sharing controls and sound settings.".into(),
+            });
+        }
+        settings.hide_wrec = false;
+        settings.show_mic_indicator = false;
+    }
+
     fn list_targets(&self) -> Result<Vec<CaptureTarget>, AgentError> {
         linux::list_targets().map_err(linux_error)
     }
@@ -166,7 +189,7 @@ fn linux_error(error: RecorderError) -> AgentError {
         code: "linux_capture_unavailable".into(),
         message: error.to_string(),
         recoverable: true,
-        next: "Run wrec inside a Wayland desktop with PipeWire and the desktop's ScreenCast portal installed. See packaging/linux/README.md.".into(),
+        next: "Run wrec inside a Wayland desktop with its ScreenCast portal, or an X11 desktop with DISPLAY set. See packaging/linux/README.md.".into(),
     }
 }
 
