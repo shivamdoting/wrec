@@ -134,10 +134,7 @@ impl RecorderEngine for LinuxRecorder {
                             &stopped,
                         );
                     }
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(backend)?;
+                    let runtime = portal::runtime()?;
                     runtime.block_on(async {
                         let capture = Arc::new(
                             portal::open(&target, settings.include_cursor, &mut stopped).await?,

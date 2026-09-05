@@ -179,6 +179,12 @@ fn portal_roundtrip_and_cancellation_close_sessions() {
             .build()
             .await
             .unwrap();
+        tokio::task::spawn_blocking(|| {
+            assert!(!list_targets().unwrap().is_empty());
+            assert!(!list_targets().unwrap().is_empty());
+        })
+        .await
+        .unwrap();
         let target = CaptureTarget {
             id: 0,
             name: "picker".into(),

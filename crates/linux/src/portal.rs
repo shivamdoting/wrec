@@ -23,10 +23,19 @@ pub fn check_desktop() -> Result<()> {
     Ok(())
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
+pub(crate) fn runtime() -> Result<&'static tokio::runtime::Runtime> {
+    // ashpd caches its D-Bus connection globally. Its I/O tasks must outlive
+    // individual target queries and recordings, even when called on new threads.
+    static RUNTIME: std::sync::OnceLock<std::result::Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
         .map_err(backend)
 }
 

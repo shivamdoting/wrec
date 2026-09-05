@@ -72,6 +72,24 @@ fn output_size(width: i32, height: i32, resolution: Resolution) -> (i32, i32) {
     (even(width), even(height))
 }
 
+fn capture_caps(dmabuf: bool, pipewire: bool, fps: u32) -> gst::Caps {
+    let caps = gst::Caps::builder("video/x-raw").field(
+        // Wayland compositors advertise variable-rate frames (framerate=0/1).
+        // Bound their maximum rate without requiring a fixed-rate source.
+        if pipewire {
+            "max-framerate"
+        } else {
+            "framerate"
+        },
+        gst::Fraction::new(fps as i32, 1),
+    );
+    if dmabuf {
+        caps.features(["memory:DMABuf"]).build()
+    } else {
+        caps.build()
+    }
+}
+
 fn video_queue() -> Result<gst::Element> {
     let queue = element("queue")?;
     queue.set_property("max-size-buffers", 2u32);
@@ -94,6 +112,45 @@ struct Counters {
     dropped: AtomicU64,
     dimensions: Mutex<Option<CaptureDimensions>>,
     last_pts: Mutex<Option<gst::ClockTime>>,
+    timeline: Mutex<Timeline>,
+}
+
+#[derive(Default)]
+struct Timeline {
+    paused_at: Option<gst::ClockTime>,
+    offset: gst::ClockTime,
+    accept_from: gst::ClockTime,
+}
+
+impl Timeline {
+    fn pause(&mut self, now: gst::ClockTime) {
+        self.paused_at.get_or_insert(now);
+    }
+
+    fn resume(&mut self, now: gst::ClockTime) {
+        if let Some(paused_at) = self.paused_at.take() {
+            self.offset += now.saturating_sub(paused_at);
+            self.accept_from = now;
+        }
+    }
+
+    fn position(&self, now: gst::ClockTime) -> gst::ClockTime {
+        self.paused_at.unwrap_or(now).saturating_sub(self.offset)
+    }
+
+    fn retime(&self, buffer: &mut gst::Buffer) -> bool {
+        if self.paused_at.is_some() || buffer.pts().is_some_and(|pts| pts < self.accept_from) {
+            return false;
+        }
+        if self.offset > gst::ClockTime::ZERO {
+            // make_mut copies a shared buffer header, retaining references to
+            // its memory. DMA-BUF pixels remain on the GPU.
+            let buffer = buffer.make_mut();
+            buffer.set_pts(buffer.pts().map(|pts| pts.saturating_sub(self.offset)));
+            buffer.set_dts(buffer.dts().map(|dts| dts.saturating_sub(self.offset)));
+        }
+        true
+    }
 }
 
 pub(crate) enum CaptureInput {
@@ -198,16 +255,14 @@ fn record_attempt(
     };
     source.set_property("do-timestamp", true);
     let input = element("capsfilter")?;
-    let caps = gst::Caps::builder("video/x-raw").field(
-        "framerate",
-        gst::Fraction::new(settings.fps.as_u32() as i32, 1),
+    input.set_property(
+        "caps",
+        capture_caps(
+            mode.dmabuf,
+            matches!(capture, CaptureInput::PipeWire(_)),
+            settings.fps.as_u32(),
+        ),
     );
-    let caps = if mode.dmabuf {
-        caps.features(["memory:DMABuf"]).build()
-    } else {
-        caps.build()
-    };
-    input.set_property("caps", caps);
     let queue = video_queue()?;
     let converters = mode.converters()?;
     let output = element("capsfilter")?;
@@ -236,13 +291,13 @@ fn record_attempt(
         .add_many(chain.iter().copied())
         .map_err(backend)?;
     gst::Element::link_many(chain.iter().copied()).map_err(backend)?;
+    let counters = attempt.counters.clone();
     if settings.include_system_audio {
-        add_audio(&pipeline.0, &mux, Some("@DEFAULT_MONITOR@"))?;
+        add_audio(&pipeline.0, &mux, Some("@DEFAULT_MONITOR@"), &counters)?;
     }
     if settings.include_microphone {
-        add_audio(&pipeline.0, &mux, None)?;
+        add_audio(&pipeline.0, &mux, None, &counters)?;
     }
-    let counters = attempt.counters.clone();
     attach_capture_probe(
         &source,
         &output,
@@ -290,20 +345,27 @@ fn attach_encoded_probe(parser: &gst::Element, counters: Arc<Counters>) {
         });
 }
 
-fn add_audio(pipeline: &gst::Pipeline, mux: &gst::Element, device: Option<&str>) -> Result<()> {
+fn add_audio(
+    pipeline: &gst::Pipeline,
+    mux: &gst::Element,
+    device: Option<&str>,
+    counters: &Arc<Counters>,
+) -> Result<()> {
     let source = element("pulsesrc")?;
     source.set_property("provide-clock", false);
     if let Some(device) = device {
         source.set_property("device", device);
     }
-    add_audio_source(pipeline, mux, &source)
+    add_audio_source(pipeline, mux, &source, counters)
 }
 
 fn add_audio_source(
     pipeline: &gst::Pipeline,
     mux: &gst::Element,
     source: &gst::Element,
+    counters: &Arc<Counters>,
 ) -> Result<()> {
+    attach_timing_probe(source, counters.clone());
     let convert = element("audioconvert")?;
     let resample = element("audioresample")?;
     let caps = element("capsfilter")?;
@@ -330,6 +392,26 @@ fn add_audio_source(
     Ok(())
 }
 
+fn retime(info: &mut gst::PadProbeInfo<'_>, counters: &Counters) -> bool {
+    if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+        return counters.timeline.lock().unwrap().retime(buffer);
+    }
+    true
+}
+
+fn attach_timing_probe(source: &gst::Element, counters: Arc<Counters>) {
+    source
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if retime(info, &counters) {
+                gst::PadProbeReturn::Ok
+            } else {
+                gst::PadProbeReturn::Drop
+            }
+        });
+}
+
 fn attach_capture_probe(
     source: &gst::Element,
     output: &gst::Element,
@@ -339,6 +421,7 @@ fn attach_capture_probe(
 ) {
     let output = output.clone();
     source.static_pad("src").unwrap().add_probe(gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::BUFFER, move |pad, info| {
+        if !retime(info, &counters) { return gst::PadProbeReturn::Drop; }
         if let Some(gst::PadProbeData::Event(event)) = &info.data {
             if let gst::EventView::Caps(caps) = event.view() {
                 if let Some(structure) = caps.caps().structure(0) {
@@ -377,16 +460,26 @@ fn attach_capture_probe(
     });
 }
 
-fn set_state(pipeline: &gst::Pipeline, state: gst::State) -> Result<()> {
-    pipeline.set_state(state).map_err(backend)?;
-    let (result, current, _) = pipeline.state(gst::ClockTime::from_seconds(3));
-    result.map_err(backend)?;
-    if current != state {
-        return Err(backend(format!(
-            "recording did not enter {state:?} within 3s"
-        )));
+fn state_error(pipeline: &gst::Pipeline, fallback: impl std::fmt::Display) -> RecorderError {
+    if let Some(message) = pipeline.bus().and_then(|bus| {
+        bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(100),
+            &[gst::MessageType::Error],
+        )
+    }) {
+        if let gst::MessageView::Error(error) = message.view() {
+            return backend(format!(
+                "{}: {} ({})",
+                error
+                    .src()
+                    .map(|src| src.name().to_string())
+                    .unwrap_or_default(),
+                error.error(),
+                error.debug().unwrap_or_default()
+            ));
+        }
     }
-    Ok(())
+    backend(fallback)
 }
 
 fn run(
@@ -397,7 +490,9 @@ fn run(
     stop: &watch::Receiver<bool>,
     counters: &Counters,
 ) -> Result<()> {
-    pipeline.set_state(gst::State::Playing).map_err(backend)?;
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|error| state_error(pipeline, error))?;
     let bus = pipeline
         .bus()
         .ok_or_else(|| backend("recording pipeline has no bus"))?;
@@ -410,22 +505,34 @@ fn run(
             if !started && counters.frames.load(Ordering::Relaxed) == 0 {
                 return Err(RecorderError::Cancelled);
             }
-            // Live sources must run to drain their pending buffers and finalize a paused movie.
-            pipeline.set_state(gst::State::Playing).map_err(backend)?;
+            // Reopen the input gate so EOS can carry the final frame. Keeping
+            // native sources PLAYING avoids PipeWire pause/resume renegotiation.
+            counters
+                .timeline
+                .lock()
+                .unwrap()
+                .resume(pipeline.current_running_time().unwrap_or_default());
             if !pipeline.send_event(gst::event::Eos::new()) {
                 return Err(backend("recording pipeline rejected finalization"));
             }
             stopping = Some(Instant::now());
         }
         if let Ok(command) = commands.try_recv() {
-            let (state, reply) = match command {
-                Command::Pause(reply) => (gst::State::Paused, reply),
-                Command::Resume(reply) => (gst::State::Playing, reply),
+            let (pause, reply) = match command {
+                Command::Pause(reply) => (true, reply),
+                Command::Resume(reply) => (false, reply),
             };
             let result = if stopping.is_some() || !started {
                 Err(backend("recording is not ready for pause/resume"))
             } else {
-                set_state(pipeline, state)
+                let now = pipeline.current_running_time().unwrap_or_default();
+                let mut timeline = counters.timeline.lock().unwrap();
+                if pause {
+                    timeline.pause(now);
+                } else {
+                    timeline.resume(now);
+                }
+                Ok(())
             };
             let _ = reply.send(result);
         }
@@ -480,10 +587,12 @@ fn emit_metrics(
     events: &mpsc::Sender<RecorderEvent>,
     counters: &Counters,
 ) {
-    let elapsed_secs = pipeline
-        .query_position::<gst::ClockTime>()
-        .map(|time| time.seconds())
-        .unwrap_or(0);
+    let elapsed_secs = counters
+        .timeline
+        .lock()
+        .unwrap()
+        .position(pipeline.current_running_time().unwrap_or_default())
+        .seconds();
     let output_bytes = file_size(&session.output_path);
     let _ = events.send(RecorderEvent::Metrics {
         session_id: session.id,
@@ -512,6 +621,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepts_variable_rate_portal_frames_and_caps_their_maximum() {
+        gst::init().unwrap();
+        let portal = gst::Caps::builder("video/x-raw")
+            .features(["memory:DMABuf"])
+            .field("framerate", gst::Fraction::new(0, 1))
+            .field("max-framerate", gst::Fraction::new(30, 1))
+            .build();
+        assert!(capture_caps(true, true, 30).can_intersect(&portal));
+        assert!(!capture_caps(true, false, 30).can_intersect(&portal));
+        assert_eq!(
+            capture_caps(true, true, 30)
+                .structure(0)
+                .unwrap()
+                .get::<gst::Fraction>("max-framerate")
+                .unwrap(),
+            gst::Fraction::new(30, 1)
+        );
+    }
+
+    #[test]
     fn dimensions_preserve_aspect_and_do_not_upscale() {
         assert_eq!(output_size(3840, 2160, Resolution::R1080p), (1920, 1080));
         assert_eq!(output_size(1080, 1920, Resolution::R1080p), (606, 1080));
@@ -526,6 +655,7 @@ mod tests {
         commands: mpsc::SyncSender<Command>,
         stop: watch::Sender<bool>,
         worker: Option<std::thread::JoinHandle<Result<()>>>,
+        counters: Arc<Counters>,
     }
 
     impl TestRecording {
@@ -540,24 +670,32 @@ mod tests {
             };
             // Synthetic software encoding is confined to tests. Exercise the same
             // bus/control/mux code without pretending this is a hardware benchmark.
-            let pipeline = gst::parse::launch("videotestsrc is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc ! h264parse name=parser ! qtmux name=mux fragment-duration=10000 ! filesink name=output sync=false")
+            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc ! h264parse name=parser ! qtmux name=mux fragment-duration=10000 trak-timescale=1000000 ! filesink name=output sync=false")
                 .unwrap().downcast::<gst::Pipeline>().unwrap();
             pipeline
                 .by_name("output")
                 .unwrap()
                 .set_property("location", session.output_path.to_str().unwrap());
+            let counters = Arc::new(Counters::default());
+            attach_timing_probe(&pipeline.by_name("video").unwrap(), counters.clone());
             for _ in 0..audio_tracks {
                 let source = element("audiotestsrc").unwrap();
                 source.set_property("is-live", true);
-                add_audio_source(&pipeline, &pipeline.by_name("mux").unwrap(), &source).unwrap();
+                add_audio_source(
+                    &pipeline,
+                    &pipeline.by_name("mux").unwrap(),
+                    &source,
+                    &counters,
+                )
+                .unwrap();
             }
-            let counters = Arc::new(Counters::default());
             attach_encoded_probe(&pipeline.by_name("parser").unwrap(), counters.clone());
             let (events_tx, events) = mpsc::channel();
             let (commands, commands_rx) = mpsc::sync_channel(1);
             let (stop, stopped) = watch::channel(false);
             let worker_pipeline = pipeline.clone();
             let worker_session = session.clone();
+            let worker_counters = counters.clone();
             let worker = std::thread::spawn(move || {
                 let guard = PipelineGuard(worker_pipeline);
                 run(
@@ -566,7 +704,7 @@ mod tests {
                     &events_tx,
                     &commands_rx,
                     &stopped,
-                    &counters,
+                    &worker_counters,
                 )
             });
             let recording = Self {
@@ -576,6 +714,7 @@ mod tests {
                 commands,
                 stop,
                 worker: Some(worker),
+                counters,
             };
             loop {
                 if matches!(
@@ -703,26 +842,23 @@ mod tests {
 
     #[test]
     fn pause_resume_omits_paused_time_and_stop_while_paused_finalizes() {
-        let mut recording = TestRecording::start(0);
+        let mut recording = TestRecording::start(2);
         std::thread::sleep(Duration::from_millis(400));
         recording.control(true);
-        let before = recording
-            .pipeline
-            .query_position::<gst::ClockTime>()
-            .unwrap();
+        std::thread::sleep(Duration::from_millis(100)); // Drain frames already accepted.
+        let before = recording.counters.frames.load(Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(600));
-        let after = recording
-            .pipeline
-            .query_position::<gst::ClockTime>()
-            .unwrap();
-        assert!(after.saturating_sub(before) < gst::ClockTime::from_mseconds(100));
+        let after = recording.counters.frames.load(Ordering::Relaxed);
+        assert_eq!(after, before, "video frames must stop while paused");
         recording.control(false);
         std::thread::sleep(Duration::from_millis(400));
         recording.control(true);
         let active_duration = recording
-            .pipeline
-            .query_position::<gst::ClockTime>()
+            .counters
+            .timeline
+            .lock()
             .unwrap()
+            .position(recording.pipeline.current_running_time().unwrap())
             .nseconds() as f64
             / 1_000_000_000.0;
         recording.finish().unwrap();

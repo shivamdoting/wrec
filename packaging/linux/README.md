@@ -4,8 +4,8 @@ The Linux backend records Wayland desktops through the ScreenCast portal and
 PipeWire, or X11 displays and windows through XShm/XImage. It selects an installed
 encoder automatically: Intel/AMD VA-API, NVIDIA NVENC, then software encoding.
 A working desktop and the required native plugins are needed. There is no Linux
-GUI yet. Hardware compatibility and efficiency still need measurements on real
-desktops; software fallback makes recording possible without a supported GPU,
+GUI yet. AMD Radeon capture has been tested on GNOME Wayland; Intel and NVIDIA hardware
+remain unverified. Software fallback makes recording possible without a supported GPU,
 but uses more CPU.
 
 On compatible Wayland/VA-API systems, the preferred pipeline is
@@ -80,7 +80,10 @@ The duration starts after the first encoded frame, so time spent choosing a
 source does not shorten recording. The portal picker times out after two minutes;
 `wrec job stop <id>` cancels it. Stopping before capture begins produces a cancelled
 job without a movie. After capture starts, `--duration` counts wall time including
-pauses; the movie omits paused time. Failed starts do not report nonexistent files.
+pauses; the movie omits paused time. Pause keeps the approved source streams alive but drops
+video and audio before conversion/encoding; timestamps remove the pause on resume.
+Rust only changes buffer metadata, preserving GPU memory. This also avoids
+PipeWire source renegotiation on resume. Failed starts do not report nonexistent files.
 
 Wayland permission status is `unknown` outside a recording because grants belong
 to individual sessions. Every recording asks for a source. Restore tokens,
@@ -117,9 +120,16 @@ software fallback is exercised. CI also tests the extracted package and headless
 errors. Native pipeline tests cover AAC tracks, timing, capture errors, and strict
 DMA-BUF rejection; an isolated mock portal covers options and session cleanup.
 
-These checks do not validate GPU buffer import or a real desktop portal. Before
-calling a GPU/desktop combination validated, record displays and windows, static
-screens and motion, cursor on/off, audio/microphone sync, and stopping from the
-desktop sharing control. Measure CPU, RSS, GPU memory, power, and compositor cost
-at 1080p30 and 4K60 against an idle baseline. Report GPU, driver, desktop, encoder,
-and library versions. VA-API and NVIDIA performance remain unverified here.
+Real hardware validation on Corex (Ryzen 9 5900H / Radeon Cezanne, Ubuntu 26.04,
+GNOME Wayland, GStreamer 1.28.2) recorded H.264 displays and an animated HEVC
+window through DMA-BUF and VA-API with no fallback. Video/audio decode and
+strictly increasing timestamps passed, including live system audio, pause/resume,
+and stopping while paused. The 1080p animated-window sample used about 4% of one
+CPU core and 129 MiB peak daemon RSS. It recorded about 31 fps with a requested
+60 fps ceiling; this is not sustained-60-fps validation or a general benchmark.
+
+Intel/NVIDIA, other compositors, live microphone sync, desktop sharing-control
+stops, HDR, sustained 60 fps, 4K, GPU memory and power need separate validation.
+For each configuration, compare CPU, RSS, GPU memory, power and compositor cost
+against an idle baseline, and report GPU, driver, desktop, encoder and library
+versions. Software/Xvfb tests alone cannot prove DMA-BUF import or GPU efficiency.
