@@ -18,7 +18,7 @@ pub fn check_desktop() -> Result<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none()
         || std::env::var_os("XDG_RUNTIME_DIR").is_none()
     {
-        return Err(backend("Linux recording requires a Wayland desktop session. X11 and headless capture are not supported."));
+        return Err(backend("Wayland capture requires WAYLAND_DISPLAY and XDG_RUNTIME_DIR from the logged-in desktop session."));
     }
     Ok(())
 }
@@ -72,10 +72,10 @@ pub(crate) fn validate_target(target: &CaptureTarget) -> Result<()> {
 }
 
 pub(crate) struct Capture {
-    pub stream: PipeWireStream,
+    node: u32,
     pub session: Session<'static, Screencast<'static>>,
     // Keep the portal connection alive until the pipeline and session close.
-    _portal: Screencast<'static>,
+    portal: Screencast<'static>,
 }
 
 pub(crate) struct PipeWireStream {
@@ -84,7 +84,21 @@ pub(crate) struct PipeWireStream {
 }
 
 impl Capture {
-    pub async fn close(self) {
+    pub async fn connect(&self) -> Result<PipeWireStream> {
+        let fd = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.portal.open_pipe_wire_remote(&self.session),
+        )
+        .await
+        .map_err(|_| backend("Opening the PipeWire remote timed out"))?
+        .map_err(backend)?;
+        Ok(PipeWireStream {
+            fd,
+            node: self.node,
+        })
+    }
+
+    pub async fn close(&self) {
         let _ = tokio::time::timeout(Duration::from_secs(3), self.session.close()).await;
     }
 }
@@ -150,11 +164,7 @@ pub(crate) async fn open(
             ));
         }
         let node = response.streams()[0].pipe_wire_node_id();
-        let fd = portal
-            .open_pipe_wire_remote(&session)
-            .await
-            .map_err(backend)?;
-        Ok((fd, node))
+        Ok(node)
     };
     let result = tokio::select! {
         result = selected => result,
@@ -162,10 +172,10 @@ pub(crate) async fn open(
         _ = tokio::time::sleep(Duration::from_secs(120)) => Err(backend("Desktop source selection timed out after 120s; start again and choose a source.")),
     };
     match result {
-        Ok((fd, node)) => Ok(Capture {
-            stream: PipeWireStream { fd, node },
+        Ok(node) => Ok(Capture {
+            node,
             session,
-            _portal: portal,
+            portal,
         }),
         Err(error) => {
             let _ = tokio::time::timeout(Duration::from_secs(3), session.close()).await;

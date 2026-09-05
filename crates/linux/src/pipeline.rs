@@ -97,7 +97,7 @@ struct Counters {
 }
 
 pub(crate) enum CaptureInput {
-    PipeWire(PipeWireStream),
+    PipeWire(Box<dyn Fn() -> Result<PipeWireStream> + Send>),
     X11 { display: String, xid: u64 },
 }
 
@@ -167,11 +167,16 @@ fn record_attempt(
         return Err(RecorderError::Cancelled);
     }
     let settings = settings.clone().with_preset_limits();
+    let stream = match capture {
+        CaptureInput::PipeWire(connect) => Some(connect()?),
+        CaptureInput::X11 { .. } => None,
+    };
     let pipeline = PipelineGuard(gst::Pipeline::new());
     pipeline.0.use_clock(Some(&gst::SystemClock::obtain()));
     let mode = attempt.mode;
     let source = match capture {
-        CaptureInput::PipeWire(capture) => {
+        CaptureInput::PipeWire(_) => {
+            let capture = stream.as_ref().unwrap();
             let source = element("pipewiresrc")?;
             source.set_property("fd", capture.fd.as_raw_fd());
             source.set_property("path", capture.node.to_string());

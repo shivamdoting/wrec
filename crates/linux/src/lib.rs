@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc,
+        mpsc, Arc,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -139,18 +139,21 @@ impl RecorderEngine for LinuxRecorder {
                         .build()
                         .map_err(backend)?;
                     runtime.block_on(async {
-                        let capture =
-                            portal::open(&target, settings.include_cursor, &mut stopped).await?;
+                        let capture = Arc::new(
+                            portal::open(&target, settings.include_cursor, &mut stopped).await?,
+                        );
                         let result = async {
                             let mut closed =
                                 capture.session.receive_closed().await.map_err(backend)?;
-                            let stream = portal::PipeWireStream {
-                                fd: capture.stream.fd.try_clone().map_err(backend)?,
-                                node: capture.stream.node,
-                            };
+                            let worker_capture = capture.clone();
+                            let runtime = tokio::runtime::Handle::current();
                             let mut recording = tokio::task::spawn_blocking(move || {
                                 pipeline::record(
-                                    &pipeline::CaptureInput::PipeWire(stream),
+                                    &pipeline::CaptureInput::PipeWire(Box::new(move || {
+                                        // Each retry needs a new protocol connection. Duplicating
+                                        // an already-used socket does not reset its remote state.
+                                        runtime.block_on(worker_capture.connect())
+                                    })),
                                     &worker_session,
                                     &settings,
                                     &events,

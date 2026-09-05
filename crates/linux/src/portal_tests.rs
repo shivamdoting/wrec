@@ -17,6 +17,7 @@ use zbus::{
 struct MockPortal {
     mode: Arc<AtomicU32>,
     closes: Arc<AtomicU32>,
+    remotes: Arc<AtomicU32>,
     selections: Arc<std::sync::Mutex<Vec<(u32, u32, bool)>>>,
 }
 
@@ -155,6 +156,7 @@ impl MockPortal {
         _session: OwnedObjectPath,
         _options: HashMap<String, OwnedValue>,
     ) -> zbus::zvariant::OwnedFd {
+        self.remotes.fetch_add(1, Ordering::Relaxed);
         let (socket, _peer) = UnixStream::pair().unwrap();
         let fd: OwnedFd = socket.into();
         fd.into()
@@ -188,7 +190,11 @@ fn portal_roundtrip_and_cancellation_close_sessions() {
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(capture.stream.node, 42);
+        assert_eq!(capture.connect().await.unwrap().node, 42);
+        assert_eq!(capture.connect().await.unwrap().node, 42);
+        assert_eq!(mock.remotes.load(Ordering::Relaxed), 2);
+        // Retrying the encoder opens a new remote, not a second source picker.
+        assert_eq!(mock.selections.lock().unwrap().len(), 1);
         capture.close().await;
         assert_eq!(mock.closes.load(Ordering::Relaxed), 1);
         assert_eq!(*mock.selections.lock().unwrap(), vec![(1, 2, false)]);
