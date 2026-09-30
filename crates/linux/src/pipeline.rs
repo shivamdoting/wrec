@@ -195,6 +195,7 @@ pub(crate) fn record(
         let result = record_attempt(
             capture, session, settings, events, &commands, stop, &attempt,
         );
+        release_freed_memory();
         if result.is_ok()
             || matches!(result, Err(RecorderError::Cancelled))
             || attempt.counters.frames.load(Ordering::Relaxed) > 0
@@ -210,6 +211,19 @@ pub(crate) fn record(
     }
     Err(last_error.unwrap_or_else(|| backend("No recording pipeline could start")))
 }
+
+#[cfg(target_env = "gnu")]
+fn release_freed_memory() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> std::os::raw::c_int;
+    }
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn release_freed_memory() {}
 
 fn record_attempt(
     capture: &CaptureInput,
@@ -227,6 +241,10 @@ fn record_attempt(
     let stream = match capture {
         CaptureInput::PipeWire(connect) => Some(connect()?),
         CaptureInput::X11 { .. } => None,
+    };
+    let source_watch = match capture {
+        CaptureInput::X11 { xid, .. } if *xid != 0 => Some(crate::x11::SourceWatch::new(*xid)?),
+        _ => None,
     };
     let pipeline = PipelineGuard(gst::Pipeline::new());
     pipeline.0.use_clock(Some(&gst::SystemClock::obtain()));
@@ -325,7 +343,15 @@ fn record_attempt(
         .create_new(true)
         .open(&session.output_path)
         .map_err(backend)?;
-    let result = run(&pipeline.0, session, events, commands, stop, &counters);
+    let result = run(
+        &pipeline.0,
+        session,
+        events,
+        commands,
+        stop,
+        &counters,
+        &|| source_watch.as_ref().is_some_and(|watch| watch.lost()),
+    );
     let _ = pipeline.0.set_state(gst::State::Null);
     if matches!(result, Err(RecorderError::Cancelled))
         || counters.frames.load(Ordering::Relaxed) == 0
@@ -482,6 +508,9 @@ fn state_error(pipeline: &gst::Pipeline, fallback: impl std::fmt::Display) -> Re
     backend(fallback)
 }
 
+const SOURCE_LOST: &str =
+    "The captured X11 window closed or became unavailable; the recording stopped.";
+
 fn run(
     pipeline: &gst::Pipeline,
     session: &RecordingSession,
@@ -489,6 +518,7 @@ fn run(
     commands: &mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
     counters: &Counters,
+    source_lost: &dyn Fn() -> bool,
 ) -> Result<()> {
     pipeline
         .set_state(gst::State::Playing)
@@ -501,6 +531,9 @@ fn run(
     let mut stopping = None;
     let mut last_metrics = Instant::now();
     loop {
+        if stopping.is_none() && source_lost() {
+            return Err(backend(SOURCE_LOST));
+        }
         if *stop.borrow() && stopping.is_none() {
             if !started && counters.frames.load(Ordering::Relaxed) == 0 {
                 return Err(RecorderError::Cancelled);
@@ -538,6 +571,7 @@ fn run(
         }
         if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match message.view() {
+                gst::MessageView::Error(_) if source_lost() => return Err(backend(SOURCE_LOST)),
                 gst::MessageView::Error(error) => {
                     return Err(backend(format!(
                         "{}: {} ({})",
@@ -705,6 +739,7 @@ mod tests {
                     &commands_rx,
                     &stopped,
                     &worker_counters,
+                    &|| false,
                 )
             });
             let recording = Self {

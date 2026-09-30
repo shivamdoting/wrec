@@ -7,6 +7,10 @@ A working desktop and the required native plugins are needed. There is no Linux
 GUI yet. AMD Radeon capture has been tested on GNOME Wayland; Intel and NVIDIA hardware
 remain unverified. Software fallback makes recording possible without a supported GPU,
 but uses more CPU.
+Software 4K HEVC can also need hundreds of MiB while encoding. On glibc builds,
+wrec asks the allocator to return freed heap pages after each recording pipeline
+has been fully torn down. This reduces idle memory retention, not the live
+encoder working set; other allocators retain their own reclamation policy.
 
 On compatible Wayland/VA-API systems, the preferred pipeline is
 `pipewiresrc → DMA-BUF → vapostproc → VA encoder → qtmux`. Rust manages sessions
