@@ -40,6 +40,25 @@ xdg-desktop-portal-wlr sends a frame only when the screen changes, so an
 attempt that receives the initial frame and fails leaves later attempts with
 no frame until something on screen changes.
 
+`pipewiresrc` pauses its stream briefly while starting. When that pause
+interrupts a capture, xdg-desktop-portal-wlr sends the unfinished buffer marked
+corrupted, with timestamp 0. GStreamer aligns a live source's timestamps to
+the first buffer it sees. When that buffer is the corrupted one, every real
+frame looks due hours in the future, so the source waits instead of delivering
+frames. This
+was seen with shared GPU buffers on xdg-desktop-portal-wlr 0.8.1 and PipeWire
+1.6.2. wrec stops an attempt whose first frame is marked corrupted before
+anything is encoded and moves on to the next available mode.
+
+wrec sets the movie's output size when the first source caps arrive. Changing
+a capsfilter normally asks every upstream element to renegotiate, and
+`pipewiresrc` answers by disconnecting and reconnecting its PipeWire stream,
+even with identical caps. xdg-desktop-portal-wlr 0.8.1 with
+ext-image-copy-capture then requests a new frame while the first one is still
+pending, breaks the Wayland protocol, and exits. wrec stops that request at
+the video queue, so the converters still renegotiate their output and the
+capture source keeps its stream. Other renegotiation requests pass through.
+
 ## Capture worker
 
 The daemon does not run native capture code. For each recording it starts a
@@ -88,8 +107,8 @@ daemon PID alone misses the capture pipeline. Find the worker with
 ## Install dependencies and build
 
 Use GStreamer 1.22 or newer and current stable Rust. The shared-buffer
-DMA-BUF/VA path needs GStreamer VA 1.24.6 or newer. Ubuntu 24.04 is a starting
-point; package names differ across distributions.
+DMA-BUF/VA path needs GStreamer VA 1.24.6 or newer. Ubuntu 24.04 is a starting point; package
+names differ across distributions.
 
 ```bash
 sudo apt install build-essential pkg-config libgstreamer1.0-dev \

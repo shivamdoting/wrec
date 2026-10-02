@@ -344,6 +344,7 @@ fn record_attempt(
         mode,
         counters.clone(),
     );
+    keep_source_configuration(&queue);
     if rewrites_timestamps(mode, &encoder) {
         keep_capture_timestamps(&encoder, &parser);
     }
@@ -549,6 +550,33 @@ fn attach_timing_probe(source: &gst::Element, counters: Arc<Counters>) {
         });
 }
 
+thread_local! {
+    static SETTING_CANVAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn set_canvas(output: &gst::Element, caps: gst::Caps) {
+    SETTING_CANVAS.with(|setting| setting.set(true));
+    output.set_property("caps", caps);
+    SETTING_CANVAS.with(|setting| setting.set(false));
+}
+
+fn keep_source_configuration(queue: &gst::Element) {
+    queue
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_, info| {
+            let canvas = info
+                .event()
+                .is_some_and(|event| event.type_() == gst::EventType::Reconfigure)
+                && SETTING_CANVAS.with(|setting| setting.get());
+            if canvas {
+                gst::PadProbeReturn::Handled
+            } else {
+                gst::PadProbeReturn::Ok
+            }
+        });
+}
+
 fn attach_capture_probe(
     source: &gst::Element,
     output: &gst::Element,
@@ -571,13 +599,19 @@ fn attach_capture_probe(
                                 .unwrap_or_else(|| output_size(width, height, resolution));
                             dimensions.get_or_insert(CaptureDimensions { native_width: width.into(), native_height: height.into(), output_width: w.into(), output_height: h.into() });
                             drop(dimensions);
-                            output.set_property("caps", mode.caps(Some((w, h))));
+                            set_canvas(&output, mode.caps(Some((w, h))));
                         }
                     }
                 }
             }
         }
         if let Some(gst::PadProbeData::Buffer(buffer)) = &info.data {
+            if buffer.flags().contains(gst::BufferFlags::CORRUPTED) && counters.last_pts.lock().unwrap().is_none() {
+                if let Some(element) = pad.parent_element() {
+                    gst::element_error!(element, gst::StreamError::Failed, ("{}", UNFINISHED_FIRST_FRAME));
+                }
+                return gst::PadProbeReturn::Drop;
+            }
             if let Some(pts) = buffer.pts() {
                 let mut previous = counters.last_pts.lock().unwrap();
                 if previous.is_some_and(|last| pts <= last || pts.saturating_sub(last) < gst::ClockTime::from_useconds(1)) {
@@ -618,6 +652,8 @@ fn state_error(pipeline: &gst::Pipeline, fallback: impl std::fmt::Display) -> Re
     }
     backend(fallback)
 }
+
+const UNFINISHED_FIRST_FRAME: &str = "The screen-capture source started with an unfinished frame. Its timestamp would stall capture timing, so this attempt stopped before encoding and another available mode will be tried.";
 
 const SOURCE_LOST: &str =
     "The captured X11 window closed, was minimized, or became unavailable; the recording stopped.";
@@ -1359,6 +1395,135 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(error.to_string().contains("injected capture failure"));
+    }
+
+    fn first_unfinished_frame(corrupted_offset: u64) -> Option<String> {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc num-buffers=3 name=source ! video/x-raw,width=320,height=180 ! fakesink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let source = pipeline.0.by_name("source").unwrap();
+        source
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+                    if buffer.offset() == corrupted_offset {
+                        buffer.make_mut().set_flags(gst::BufferFlags::CORRUPTED);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+        attach_capture_probe(
+            &source,
+            &element("capsfilter").unwrap(),
+            Resolution::Native,
+            Mode {
+                kind: encoding::Kind::Software,
+                factory: "x264enc",
+                dmabuf: false,
+            },
+            Arc::new(Counters::default()),
+        );
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        let message = pipeline
+            .0
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::Error, gst::MessageType::Eos],
+            )
+            .unwrap();
+        match message.view() {
+            gst::MessageView::Error(error) => Some(error.error().to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_unfinished_first_frame_fails_the_attempt_before_encoding() {
+        let error = first_unfinished_frame(0).expect("an unfinished first frame must fail");
+        assert!(error.contains(UNFINISHED_FIRST_FRAME), "{error}");
+        assert_eq!(first_unfinished_frame(1), None);
+    }
+
+    fn source_reconfigures_while_scaling_to_720p(keep_source: bool) -> (u64, (i32, i32)) {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc num-buffers=10 name=source ! video/x-raw,width=1920,height=1080,framerate=30/1 ! queue name=queue ! videoconvert ! videoscale add-borders=true ! capsfilter name=output ! fakesink name=sink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let source = pipeline.0.by_name("source").unwrap();
+        let output = pipeline.0.by_name("output").unwrap();
+        let mode = Mode {
+            kind: encoding::Kind::Software,
+            factory: "x264enc",
+            dmabuf: false,
+        };
+        output.set_property("caps", mode.caps(None));
+        let configured = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reconfigures = Arc::new(AtomicU64::new(0));
+        let (seen, counted) = (configured.clone(), reconfigures.clone());
+        source.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::EVENT_UPSTREAM,
+            move |_, info| {
+                match info.event().map(|event| event.type_()) {
+                    Some(gst::EventType::Caps) => seen.store(true, Ordering::SeqCst),
+                    Some(gst::EventType::Reconfigure) if seen.load(Ordering::SeqCst) => {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        attach_capture_probe(
+            &source,
+            &output,
+            Resolution::R720p,
+            mode,
+            Arc::new(Counters::default()),
+        );
+        if keep_source {
+            keep_source_configuration(&pipeline.0.by_name("queue").unwrap());
+        }
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        let message = pipeline
+            .0
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::Error, gst::MessageType::Eos],
+            )
+            .unwrap();
+        assert!(
+            matches!(message.view(), gst::MessageView::Eos(_)),
+            "{message:?}"
+        );
+        let caps = pipeline
+            .0
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .current_caps()
+            .unwrap();
+        let structure = caps.structure(0).unwrap();
+        (
+            reconfigures.load(Ordering::SeqCst),
+            (
+                structure.get::<i32>("width").unwrap(),
+                structure.get::<i32>("height").unwrap(),
+            ),
+        )
+    }
+
+    #[test]
+    fn setting_the_output_canvas_does_not_renegotiate_the_source() {
+        assert_eq!(
+            source_reconfigures_while_scaling_to_720p(true),
+            (0, (1280, 720))
+        );
+        let (reconfigures, canvas) = source_reconfigures_while_scaling_to_720p(false);
+        assert!(reconfigures > 0);
+        assert_eq!(canvas, (1280, 720));
     }
 
     #[test]
