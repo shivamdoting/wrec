@@ -17,13 +17,46 @@ pub(crate) struct Mode {
     pub dmabuf: bool,
 }
 
-pub(crate) fn modes(codec: Codec, pipewire: bool) -> Vec<Mode> {
-    modes_with(codec, pipewire, |name| {
+pub(crate) fn modes(codec: Codec, dmabuf: bool) -> Vec<Mode> {
+    modes_with(codec, dmabuf, |name| {
         gst::ElementFactory::find(name).is_some()
     })
 }
 
-fn modes_with(codec: Codec, pipewire: bool, has: impl Fn(&str) -> bool) -> Vec<Mode> {
+pub(crate) fn plugin_version(factory: &gst::ElementFactory) -> Option<Vec<u32>> {
+    factory.plugin().map(|plugin| {
+        plugin
+            .version()
+            .split('.')
+            .map_while(|part| part.parse().ok())
+            .collect()
+    })
+}
+
+fn imports_dma_buf(sink: &gst::CapsRef, version: &[u32]) -> bool {
+    let dma_drm = gst::Structure::builder("video/x-raw")
+        .field("format", "DMA_DRM")
+        .build();
+    version >= [1, 24, 6].as_slice()
+        && sink.iter_with_features().any(|(structure, features)| {
+            !features.is_any()
+                && features.contains("memory:DMABuf")
+                && structure.has_field("format")
+                && structure.can_intersect(&dma_drm)
+        })
+}
+
+pub(crate) fn va_imports_dma_buf() -> bool {
+    gst::ElementFactory::find("vapostproc").is_some_and(|factory| {
+        let version = plugin_version(&factory).unwrap_or_default();
+        factory.static_pad_templates().iter().any(|template| {
+            template.direction() == gst::PadDirection::Sink
+                && imports_dma_buf(&template.caps(), &version)
+        })
+    })
+}
+
+fn modes_with(codec: Codec, dmabuf: bool, has: impl Fn(&str) -> bool) -> Vec<Mode> {
     let (va, nv, software): (&[&str], &str, &[&str]) = match codec {
         Codec::H264 => (
             &["vah264lpenc", "vah264enc"],
@@ -38,7 +71,7 @@ fn modes_with(codec: Codec, pipewire: bool, has: impl Fn(&str) -> bool) -> Vec<M
         .copied()
         .filter(|name| has(name) && has("vapostproc"))
     {
-        if pipewire {
+        if dmabuf {
             modes.push(Mode {
                 kind: Kind::Va,
                 factory,
@@ -192,6 +225,27 @@ impl Mode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_gpu_buffers_need_explicit_dma_drm_and_a_sizeless_importer() {
+        gst::init().unwrap();
+        let caps = |description: &str| description.parse::<gst::Caps>().unwrap();
+        let native = caps("video/x-raw(memory:VAMemory), format={ NV12, P010_10LE }; video/x-raw(memory:DMABuf), format={ BGRA, RGBA, BGRx, RGBx, NV12, P010_10LE }; video/x-raw(ANY); video/x-raw(ANY), format={ BGRx, NV12 }");
+        let formatless = caps("video/x-raw(memory:DMABuf), width=[1, 16384]");
+        let modern = caps("video/x-raw(memory:VAMemory), format={ NV12, P010_10LE }; video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format={ NV12:0x0200000000000901, XR24:0x0200000000000901 }; video/x-raw, format={ BGRx, NV12 }");
+        assert!(!imports_dma_buf(&native, &[1, 22, 0]));
+        assert!(!imports_dma_buf(&native, &[1, 28, 2]));
+        assert!(!imports_dma_buf(&formatless, &[1, 28, 2]));
+        assert!(!imports_dma_buf(&modern, &[1, 24, 0]));
+        assert!(!imports_dma_buf(&modern, &[1, 24, 5]));
+        assert!(imports_dma_buf(&modern, &[1, 24, 6]));
+        assert!(imports_dma_buf(&modern, &[1, 28, 2]));
+        if let Some(factory) = gst::ElementFactory::find("vapostproc") {
+            if plugin_version(&factory).is_some_and(|version| version >= vec![1, 24, 6]) {
+                assert!(va_imports_dma_buf());
+            }
+        }
+    }
+
     #[test]
     fn prefers_hardware_and_retains_software_compatibility() {
         let modes = modes_with(Codec::H264, true, |_| true);

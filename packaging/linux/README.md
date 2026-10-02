@@ -25,6 +25,21 @@ H.264 and x265 for HEVC. Retries happen only before the first encoded frame and
 preserve the requested codec. Job events identify the attempted and selected
 paths. X11 capture uses system memory even when encoding runs on the GPU.
 
+wrec tries shared GPU buffers only when `vapostproc` lists DMA-BUF caps with
+`format=DMA_DRM` and comes from GStreamer VA 1.24.6 or later. `DMA_DRM` caps
+carry the pixel format and modifier with an explicit `drm-format`. GStreamer VA
+1.22 describes DMA-BUF with a plain format such as `BGRx` and no modifier.
+GStreamer VA before 1.24.6 imports a DMA-BUF only when each buffer's memory
+covers a whole video plane. 1.24.6 needs one byte and reads strides from video
+metadata. Producers decide the sizes that PipeWire reports for a DMA-BUF.
+xdg-desktop-portal-wlr reports a memory size of 0, so its buffers fail that
+older check, and the frame is lost before encoding starts. With older VA, wrec
+skips the shared-buffer attempt and starts with system-memory capture, still
+encoding on the GPU. The skipped attempt matters on a static screen.
+xdg-desktop-portal-wlr sends a frame only when the screen changes, so an
+attempt that receives the initial frame and fails leaves later attempts with
+no frame until something on screen changes.
+
 ## Capture worker
 
 The daemon does not run native capture code. For each recording it starts a
@@ -72,9 +87,9 @@ daemon PID alone misses the capture pipeline. Find the worker with
 
 ## Install dependencies and build
 
-Use GStreamer 1.22 or newer and current stable Rust. GStreamer 1.24 or newer is
-recommended for the DMA-BUF/VA path. Ubuntu 24.04 is a starting point; package
-names differ across distributions.
+Use GStreamer 1.22 or newer and current stable Rust. The shared-buffer
+DMA-BUF/VA path needs GStreamer VA 1.24.6 or newer. Ubuntu 24.04 is a starting
+point; package names differ across distributions.
 
 ```bash
 sudo apt install build-essential pkg-config libgstreamer1.0-dev \

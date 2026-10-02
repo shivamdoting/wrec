@@ -84,7 +84,9 @@ fn capture_caps(dmabuf: bool, pipewire: bool, fps: u32) -> gst::Caps {
         gst::Fraction::new(fps as i32, 1),
     );
     if dmabuf {
-        caps.features(["memory:DMABuf"]).build()
+        caps.features(["memory:DMABuf"])
+            .field("format", "DMA_DRM")
+            .build()
     } else {
         caps.build()
     }
@@ -197,7 +199,8 @@ pub(crate) fn record(
         crate::x11::initialize()?;
     }
     check_plugins(settings)?;
-    let modes = encoding::modes(settings.codec, matches!(capture, CaptureInput::PipeWire(_)));
+    let dmabuf = matches!(capture, CaptureInput::PipeWire(_)) && encoding::va_imports_dma_buf();
+    let modes = encoding::modes(settings.codec, dmabuf);
     if modes.is_empty() {
         return Err(backend(format!("No {} encoder is installed. Install GStreamer VA/NVENC plugins or x264/x265/openh264 for software compatibility; see packaging/linux/README.md.", settings.codec.as_arg())));
     }
@@ -405,15 +408,8 @@ fn rewrites_timestamps(mode: Mode, encoder: &gst::Element) -> bool {
     mode.kind == encoding::Kind::Va
         && encoder
             .factory()
-            .and_then(|factory| factory.plugin())
-            .is_some_and(|plugin| {
-                let version: Vec<u32> = plugin
-                    .version()
-                    .split('.')
-                    .map_while(|part| part.parse().ok())
-                    .collect();
-                version < vec![1, 24, 3]
-            })
+            .and_then(|factory| encoding::plugin_version(&factory))
+            .is_some_and(|version| version < vec![1, 24, 3])
 }
 
 fn segment(pad: &gst::Pad) -> Option<gst::FormattedSegment<gst::ClockTime>> {
@@ -789,6 +785,24 @@ mod tests {
                 .unwrap(),
             gst::Fraction::new(30, 1)
         );
+    }
+
+    #[test]
+    fn dma_buf_capture_requires_an_explicit_drm_format() {
+        gst::init().unwrap();
+        let capture = capture_caps(true, true, 60);
+        let caps = |description: &str| description.parse::<gst::Caps>().unwrap();
+        let legacy_source = caps("video/x-raw(memory:DMABuf), format=BGRx, width=1280, height=720, framerate=0/1, max-framerate=60/1");
+        let legacy_converter = caps("video/x-raw(memory:DMABuf), width=[1, 16384], height=[1, 16384], format={ BGRA, RGBA, BGRx, RGBx, NV12, P010_10LE }");
+        let modern_source = caps("video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=XR24:0x0200000000000901, width=1280, height=720, framerate=0/1, max-framerate=60/1");
+        let modern_converter = caps("video/x-raw(memory:DMABuf), width=[1, 16384], height=[1, 16384], format=DMA_DRM, drm-format={ NV12:0x0200000000000901, XR24:0x0200000000000901 }");
+        assert!(!capture.can_intersect(&legacy_source));
+        assert!(!capture.can_intersect(&legacy_converter));
+        assert!(capture.can_intersect(&modern_source));
+        assert!(capture.can_intersect(&modern_converter));
+        assert!(capture_caps(false, true, 60).can_intersect(&caps(
+            "video/x-raw, format=BGRx, width=1280, height=720, framerate=0/1, max-framerate=60/1"
+        )));
     }
 
     #[test]
