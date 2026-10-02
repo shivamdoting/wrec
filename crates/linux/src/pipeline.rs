@@ -341,6 +341,9 @@ fn record_attempt(
         mode,
         counters.clone(),
     );
+    if rewrites_timestamps(mode, &encoder) {
+        keep_capture_timestamps(&encoder, &parser);
+    }
     attach_encoded_probe(&parser, counters.clone());
     // One overrun accompanies each incoming frame that replaces the oldest frame.
     let dropped = counters.clone();
@@ -392,6 +395,91 @@ fn attach_encoded_probe(parser: &gst::Element, counters: Arc<Counters>) {
         .unwrap()
         .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
             counters.frames.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+}
+
+const CAPTURE_TIME: &str = "timestamp/x-wrec-capture";
+
+fn rewrites_timestamps(mode: Mode, encoder: &gst::Element) -> bool {
+    mode.kind == encoding::Kind::Va
+        && encoder
+            .factory()
+            .and_then(|factory| factory.plugin())
+            .is_some_and(|plugin| {
+                let version: Vec<u32> = plugin
+                    .version()
+                    .split('.')
+                    .map_while(|part| part.parse().ok())
+                    .collect();
+                version < vec![1, 24, 3]
+            })
+}
+
+fn segment(pad: &gst::Pad) -> Option<gst::FormattedSegment<gst::ClockTime>> {
+    pad.sticky_event::<gst::event::Segment>(0)
+        .and_then(|event| event.segment().clone().downcast::<gst::ClockTime>().ok())
+}
+
+const LOST_CAPTURE_TIME: &str = "A frame lost its capture timestamp in a VA encoder that replaces timestamps (GStreamer VA before 1.24.3). The recording stopped instead of writing video with incorrect timing.";
+
+fn lose_capture_time(pad: &gst::Pad) -> gst::PadProbeReturn {
+    if let Some(element) = pad.parent_element() {
+        gst::element_error!(element, gst::StreamError::Format, ("{}", LOST_CAPTURE_TIME));
+    }
+    gst::PadProbeReturn::Drop
+}
+
+fn keep_capture_timestamps(encoder: &gst::Element, parser: &gst::Element) {
+    let reference = gst::Caps::new_empty_simple(CAPTURE_TIME);
+    encoder
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let running_time = info
+                .buffer()
+                .and_then(|buffer| buffer.pts())
+                .zip(segment(pad))
+                .and_then(|(pts, segment)| segment.to_running_time(pts));
+            match (running_time, info.data.as_mut()) {
+                (Some(running_time), Some(gst::PadProbeData::Buffer(buffer))) => {
+                    gst::ReferenceTimestampMeta::add(
+                        buffer.make_mut(),
+                        &reference,
+                        running_time,
+                        gst::ClockTime::NONE,
+                    );
+                    gst::PadProbeReturn::Ok
+                }
+                _ => lose_capture_time(pad),
+            }
+        });
+    parser
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() else {
+                return lose_capture_time(pad);
+            };
+            let running_time = buffer
+                .iter_meta::<gst::ReferenceTimestampMeta>()
+                .find(|meta| {
+                    meta.reference()
+                        .structure(0)
+                        .is_some_and(|structure| structure.name() == CAPTURE_TIME)
+                })
+                .map(|meta| meta.timestamp());
+            let Some(pts) = running_time
+                .zip(segment(pad))
+                .and_then(|(running_time, segment)| {
+                    segment.position_from_running_time(running_time)
+                })
+            else {
+                return lose_capture_time(pad);
+            };
+            let buffer = buffer.make_mut();
+            buffer.set_pts(pts);
+            buffer.set_dts(pts);
             gst::PadProbeReturn::Ok
         });
 }
@@ -726,6 +814,10 @@ mod tests {
         }
 
         fn start_with_audio_delays(audio_delays: &[gst::ClockTime]) -> Self {
+            Self::start_with(audio_delays, false)
+        }
+
+        fn start_with(audio_delays: &[gst::ClockTime], counting_encoder: bool) -> Self {
             gst::init().unwrap();
             static ID: AtomicU64 = AtomicU64::new(0);
             let id = ID.fetch_add(1, Ordering::Relaxed);
@@ -736,7 +828,7 @@ mod tests {
             };
             // Synthetic software encoding is confined to tests. Exercise the same
             // bus/control/mux code without pretending this is a hardware benchmark.
-            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc ! h264parse name=parser")
+            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc name=encoder ! h264parse name=parser")
                 .unwrap().downcast::<gst::Pipeline>().unwrap();
             let mux = movie_mux().unwrap();
             let sink = element("filesink").unwrap();
@@ -746,6 +838,11 @@ mod tests {
             gst::Element::link_many([&pipeline.by_name("parser").unwrap(), &mux, &sink]).unwrap();
             let counters = Arc::new(Counters::default());
             attach_timing_probe(&pipeline.by_name("video").unwrap(), counters.clone());
+            let encoder = pipeline.by_name("encoder").unwrap();
+            if counting_encoder {
+                count_frames_like_old_va_encoders(&pipeline.by_name("video").unwrap(), &encoder);
+            }
+            keep_capture_timestamps(&encoder, &pipeline.by_name("parser").unwrap());
             for &delay in audio_delays {
                 let source = element("audiotestsrc").unwrap();
                 source.set_property("is-live", true);
@@ -827,6 +924,54 @@ mod tests {
         fn probe(&self) -> serde_json::Value {
             probe_movie(&self.session.output_path)
         }
+    }
+
+    fn count_frames_like_old_va_encoders(source: &gst::Element, encoder: &gst::Element) {
+        source.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER,
+            |_, info| match info.buffer().map(|buffer| buffer.offset() % 3) {
+                Some(2) => gst::PadProbeReturn::Drop,
+                _ => gst::PadProbeReturn::Ok,
+            },
+        );
+        let start = gst::ClockTime::from_seconds(60 * 60 * 1000);
+        let frame_duration = gst::ClockTime::SECOND / 30;
+        let first_pts = Mutex::new(None);
+        let count = AtomicU64::new(0);
+        encoder.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                match info.data.as_mut() {
+                    Some(gst::PadProbeData::Event(event)) => {
+                        if let gst::EventView::Segment(segment) = event.view() {
+                            let mut segment = segment
+                                .segment()
+                                .clone()
+                                .downcast::<gst::ClockTime>()
+                                .unwrap();
+                            segment.set_start(segment.start().map(|time| time + start));
+                            segment.set_position(segment.position().map(|time| time + start));
+                            segment.set_stop(segment.stop().map(|time| time + start));
+                            *event = gst::event::Segment::new(&segment);
+                        }
+                    }
+                    Some(gst::PadProbeData::Buffer(buffer)) => {
+                        let first = *first_pts
+                            .lock()
+                            .unwrap()
+                            .get_or_insert(buffer.pts().unwrap_or_default());
+                        let pts =
+                            start + first + frame_duration * count.fetch_add(1, Ordering::Relaxed);
+                        let buffer = buffer.make_mut();
+                        buffer.set_pts(pts);
+                        buffer.set_dts(pts);
+                        buffer.set_duration(frame_duration);
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
     }
 
     fn probe_movie(movie: &Path) -> serde_json::Value {
@@ -946,6 +1091,100 @@ mod tests {
         if let Err(panic) = checks {
             std::panic::resume_unwind(panic);
         }
+    }
+
+    fn end_seconds(probe: &serde_json::Value, codec: &str) -> f64 {
+        let stream = probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["codec_name"] == codec)
+            .unwrap();
+        let seconds = |key: &str| stream[key].as_str().unwrap().parse::<f64>().unwrap();
+        seconds("start_time") + seconds("duration")
+    }
+
+    #[test]
+    fn capture_timestamps_survive_encoders_that_count_frames() {
+        let mut recording = TestRecording::start_with(&[gst::ClockTime::ZERO], true);
+        std::thread::sleep(Duration::from_millis(1500));
+        recording.control(true);
+        std::thread::sleep(Duration::from_millis(700));
+        recording.control(false);
+        std::thread::sleep(Duration::from_millis(1500));
+        let active = recording
+            .counters
+            .timeline
+            .lock()
+            .unwrap()
+            .position(recording.pipeline.current_running_time().unwrap())
+            .nseconds() as f64
+            / 1_000_000_000.0;
+        recording.finish().unwrap();
+        let probe = recording.probe();
+        let (video, audio) = (end_seconds(&probe, "h264"), end_seconds(&probe, "aac"));
+        assert!(
+            (video - active).abs() < 0.2,
+            "video ends at {video}s after {active}s of active recording"
+        );
+        assert!(
+            (video - audio).abs() < 0.15,
+            "video ends at {video}s, audio at {audio}s"
+        );
+        let index = probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["codec_name"] == "h264")
+            .unwrap()["index"]
+            .clone();
+        let mut pts: Vec<i64> = probe["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|packet| packet["stream_index"] == index)
+            .map(|packet| packet["pts"].as_i64().unwrap())
+            .collect();
+        pts.sort_unstable();
+        let skipped = pts
+            .windows(2)
+            .filter(|pair| pair[1] - pair[0] > 50_000)
+            .count();
+        assert!(
+            skipped > 10,
+            "{skipped} video gaps show dropped capture frames"
+        );
+    }
+
+    #[test]
+    fn lost_capture_timestamps_fail_instead_of_speeding_up_video() {
+        let mut recording = TestRecording::start_with(&[gst::ClockTime::ZERO], true);
+        std::thread::sleep(Duration::from_millis(500));
+        recording
+            .pipeline
+            .by_name("encoder")
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+                    if let Some(meta) = buffer.make_mut().meta_mut::<gst::ReferenceTimestampMeta>()
+                    {
+                        meta.remove().unwrap();
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+        std::thread::sleep(Duration::from_secs(1));
+        let _ = recording.stop.send(true);
+        let error = recording
+            .worker
+            .take()
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains(LOST_CAPTURE_TIME), "{error}");
     }
 
     #[test]

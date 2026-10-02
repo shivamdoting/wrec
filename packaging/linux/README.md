@@ -97,6 +97,16 @@ Distribution codec packaging and GPU capabilities vary. VA-API also needs access
 to `/dev/dri/renderD*`; NVIDIA needs its driver and encode libraries. Missing
 hardware plugins do not prevent software recording.
 
+GStreamer VA encoders before 1.24.3 replace each frame's capture timestamp with
+its frame number times the nominal frame duration. When the screen delivers
+fewer frames than that rate, the movie plays faster than the recorded time.
+With these versions, wrec attaches each frame's capture time to the frame as a
+`GstReferenceTimestampMeta` and restores it after the encoder, so VA encoding
+keeps the original timing. VA 1.24.3 and later keep timestamps themselves and
+skip this step. If a frame loses its capture time inside an affected encoder,
+the recording fails with an error instead of writing faster video. This is not
+a minimum version, and it does not switch to software encoding.
+
 ```bash
 ./scripts/package-cli-linux.sh
 ```
