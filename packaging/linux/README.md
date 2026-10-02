@@ -59,7 +59,23 @@ pending, breaks the Wayland protocol, and exits. wrec stops that request at
 the video queue, so the converters still renegotiate their output and the
 capture source keeps its stream. Other renegotiation requests pass through.
 
+When the captured output or window changes size, `pipewiresrc` sends the new
+caps without asking downstream elements to set up their buffer pools again.
+GStreamer VA `vapostproc` then copies system-memory frames into a pool sized
+for the old caps and rejects the first resized frame. After a size change, wrec
+sends the allocation query that normal GStreamer negotiation would send, before
+the next frame, so the converters size their pools for the new frames.
+
 ## Capture worker
+
+xdg-desktop-portal-wlr 0.8.1 has an upstream startup race on its
+ext-image-copy-capture path. A consumer pause can leave a capture frame
+pending; resuming or starting the next consumer can then create a second
+frame and make the backend exit with "session already has a frame object".
+PipeWire's GStreamer source pauses and resumes during startup, so successful
+recordings on this stack do not establish reliable startup. wrec detects the
+backend loss and fails the job, but does not repair the portal. This remains
+an unresolved compatibility issue, separate from the fixes above.
 
 The daemon does not run native capture code. For each recording it starts a
 capture worker, which is the same daemon executable started again with a private
@@ -107,8 +123,8 @@ daemon PID alone misses the capture pipeline. Find the worker with
 ## Install dependencies and build
 
 Use GStreamer 1.22 or newer and current stable Rust. The shared-buffer
-DMA-BUF/VA path needs GStreamer VA 1.24.6 or newer. Ubuntu 24.04 is a starting point; package
-names differ across distributions.
+DMA-BUF/VA path needs GStreamer VA 1.24.6 or newer. Ubuntu 24.04 is a starting
+point; package names differ across distributions.
 
 ```bash
 sudo apt install build-essential pkg-config libgstreamer1.0-dev \

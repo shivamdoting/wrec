@@ -585,50 +585,79 @@ fn attach_capture_probe(
     counters: Arc<Counters>,
 ) {
     let output = output.clone();
-    source.static_pad("src").unwrap().add_probe(gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::BUFFER, move |pad, info| {
-        if !retime(info, &counters) { return gst::PadProbeReturn::Drop; }
-        if let Some(gst::PadProbeData::Event(event)) = &info.data {
-            if let gst::EventView::Caps(caps) = event.view() {
-                if let Some(structure) = caps.caps().structure(0) {
-                    if let (Ok(width), Ok(height)) = (structure.get::<i32>("width"), structure.get::<i32>("height")) {
-                        if width >= 2 && height >= 2 {
-                            let mut dimensions = counters.dimensions.lock().unwrap();
-                            // A MOV track has a fixed canvas. Window resizes are
-                            // scaled/letterboxed into the initial output size.
-                            let (w, h) = dimensions.map(|d| (d.output_width as i32, d.output_height as i32))
-                                .unwrap_or_else(|| output_size(width, height, resolution));
-                            dimensions.get_or_insert(CaptureDimensions { native_width: width.into(), native_height: height.into(), output_width: w.into(), output_height: h.into() });
-                            drop(dimensions);
-                            set_canvas(&output, mode.caps(Some((w, h))));
+    let resized = std::sync::atomic::AtomicBool::new(false);
+    source.static_pad("src").unwrap().add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::BUFFER,
+        move |pad, info| {
+            if !retime(info, &counters) {
+                return gst::PadProbeReturn::Drop;
+            }
+            if let Some(gst::PadProbeData::Event(event)) = &info.data {
+                if let gst::EventView::Caps(caps) = event.view() {
+                    if let Some(structure) = caps.caps().structure(0) {
+                        if let (Ok(width), Ok(height)) = (
+                            structure.get::<i32>("width"),
+                            structure.get::<i32>("height"),
+                        ) {
+                            if width >= 2 && height >= 2 {
+                                let mut dimensions = counters.dimensions.lock().unwrap();
+                                resized.store(dimensions.is_some(), Ordering::Relaxed);
+                                // A MOV track has a fixed canvas. Window resizes are
+                                // scaled/letterboxed into the initial output size.
+                                let (w, h) = dimensions
+                                    .map(|d| (d.output_width as i32, d.output_height as i32))
+                                    .unwrap_or_else(|| output_size(width, height, resolution));
+                                dimensions.get_or_insert(CaptureDimensions {
+                                    native_width: width.into(),
+                                    native_height: height.into(),
+                                    output_width: w.into(),
+                                    output_height: h.into(),
+                                });
+                                drop(dimensions);
+                                set_canvas(&output, mode.caps(Some((w, h))));
+                            }
                         }
                     }
                 }
             }
-        }
-        if let Some(gst::PadProbeData::Buffer(buffer)) = &info.data {
-            if buffer.flags().contains(gst::BufferFlags::CORRUPTED) && counters.last_pts.lock().unwrap().is_none() {
-                if let Some(element) = pad.parent_element() {
-                    gst::element_error!(element, gst::StreamError::Failed, ("{}", UNFINISHED_FIRST_FRAME));
+            if let Some(gst::PadProbeData::Buffer(buffer)) = &info.data {
+                if buffer.flags().contains(gst::BufferFlags::CORRUPTED)
+                    && counters.last_pts.lock().unwrap().is_none()
+                {
+                    return reject_capture(
+                        pad,
+                        info,
+                        gst::StreamError::Failed,
+                        UNFINISHED_FIRST_FRAME,
+                    );
                 }
-                return gst::PadProbeReturn::Drop;
-            }
-            if let Some(pts) = buffer.pts() {
-                let mut previous = counters.last_pts.lock().unwrap();
-                if previous.is_some_and(|last| pts <= last || pts.saturating_sub(last) < gst::ClockTime::from_useconds(1)) {
-                    counters.dropped.fetch_add(1, Ordering::Relaxed);
-                    return gst::PadProbeReturn::Drop;
+                if let Some(pts) = buffer.pts() {
+                    let mut previous = counters.last_pts.lock().unwrap();
+                    if previous.is_some_and(|last| {
+                        pts <= last || pts.saturating_sub(last) < gst::ClockTime::from_useconds(1)
+                    }) {
+                        counters.dropped.fetch_add(1, Ordering::Relaxed);
+                        return gst::PadProbeReturn::Drop;
+                    }
+                    *previous = Some(pts);
                 }
-                *previous = Some(pts);
-            }
-            if mode.dmabuf && (buffer.n_memory() == 0 || buffer.iter_memories().any(|memory| !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>())) {
-                if let Some(element) = pad.parent_element() {
-                    gst::element_error!(element, gst::StreamError::Format, ("PipeWire delivered a non-DMA-BUF frame. This attempt requires GPU buffer sharing; another available mode will be tried before capture starts."));
+                if mode.dmabuf
+                    && (buffer.n_memory() == 0
+                        || buffer.iter_memories().any(|memory| {
+                            !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>()
+                        }))
+                {
+                    return reject_capture(pad, info, gst::StreamError::Format, NON_DMA_BUF_FRAME);
                 }
-                return gst::PadProbeReturn::Drop;
+                if resized.swap(false, Ordering::Relaxed) {
+                    let mut allocation =
+                        gst::query::Allocation::new(pad.current_caps().as_ref(), true);
+                    pad.peer_query(&mut allocation);
+                }
             }
-        }
-        gst::PadProbeReturn::Ok
-    });
+            gst::PadProbeReturn::Ok
+        },
+    );
 }
 
 fn state_error(pipeline: &gst::Pipeline, fallback: impl std::fmt::Display) -> RecorderError {
@@ -651,6 +680,21 @@ fn state_error(pipeline: &gst::Pipeline, fallback: impl std::fmt::Display) -> Re
         }
     }
     backend(fallback)
+}
+
+const NON_DMA_BUF_FRAME: &str = "PipeWire delivered a non-DMA-BUF frame. This attempt requires GPU buffer sharing; another available mode will be tried before capture starts.";
+
+fn reject_capture(
+    pad: &gst::Pad,
+    info: &mut gst::PadProbeInfo<'_>,
+    error: gst::StreamError,
+    message: &str,
+) -> gst::PadProbeReturn {
+    if let Some(element) = pad.parent_element() {
+        gst::element_error!(element, error, ("{}", message));
+    }
+    info.flow_res = Err(gst::FlowError::Error);
+    gst::PadProbeReturn::Handled
 }
 
 const UNFINISHED_FIRST_FRAME: &str = "The screen-capture source started with an unfinished frame. Its timestamp would stall capture timing, so this attempt stopped before encoding and another available mode will be tried.";
@@ -1397,9 +1441,33 @@ mod tests {
         assert!(error.to_string().contains("injected capture failure"));
     }
 
-    fn first_unfinished_frame(corrupted_offset: u64) -> Option<String> {
+    fn downstream_buffers(pipeline: &gst::Pipeline) -> Arc<AtomicU64> {
+        let count = Arc::new(AtomicU64::new(0));
+        let counted = count.clone();
+        pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                gst::PadProbeReturn::Ok
+            });
+        count
+    }
+
+    fn settle(pipeline: &gst::Pipeline) {
+        pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(1), &[gst::MessageType::Eos]);
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    fn first_unfinished_frame(corrupted_offset: u64) -> (Option<String>, u64) {
         gst::init().unwrap();
-        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc num-buffers=3 name=source ! video/x-raw,width=320,height=180 ! fakesink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc num-buffers=3 name=source ! video/x-raw,width=320,height=180 ! fakesink name=sink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let delivered = downstream_buffers(&pipeline.0);
         let source = pipeline.0.by_name("source").unwrap();
         source
             .static_pad("src")
@@ -1433,17 +1501,21 @@ mod tests {
                 &[gst::MessageType::Error, gst::MessageType::Eos],
             )
             .unwrap();
-        match message.view() {
+        let error = match message.view() {
             gst::MessageView::Error(error) => Some(error.error().to_string()),
             _ => None,
-        }
+        };
+        settle(&pipeline.0);
+        (error, delivered.load(Ordering::SeqCst))
     }
 
     #[test]
     fn an_unfinished_first_frame_fails_the_attempt_before_encoding() {
-        let error = first_unfinished_frame(0).expect("an unfinished first frame must fail");
+        let (error, delivered) = first_unfinished_frame(0);
+        let error = error.expect("an unfinished first frame must fail");
         assert!(error.contains(UNFINISHED_FIRST_FRAME), "{error}");
-        assert_eq!(first_unfinished_frame(1), None);
+        assert_eq!(delivered, 0, "no frame may follow a rejected first frame");
+        assert_eq!(first_unfinished_frame(1), (None, 3));
     }
 
     fn source_reconfigures_while_scaling_to_720p(keep_source: bool) -> (u64, (i32, i32)) {
@@ -1526,10 +1598,158 @@ mod tests {
         assert_eq!(canvas, (1280, 720));
     }
 
+    fn resize_without_source_allocation(
+        converter: &str,
+    ) -> (
+        Vec<std::result::Result<gst::FlowSuccess, gst::FlowError>>,
+        u64,
+        u64,
+    ) {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::parse::launch(&format!("queue name=source ! queue name=queue ! {converter} ! capsfilter name=output ! fakesink name=sink")).unwrap().downcast::<gst::Pipeline>().unwrap());
+        let delivered = downstream_buffers(&pipeline.0);
+        let allocations = Arc::new(AtomicU64::new(0));
+        let counted = allocations.clone();
+        pipeline
+            .0
+            .by_name("queue")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(
+                gst::PadProbeType::QUERY_DOWNSTREAM | gst::PadProbeType::PUSH,
+                move |_, info| {
+                    if info
+                        .query()
+                        .is_some_and(|query| matches!(query.view(), gst::QueryView::Allocation(_)))
+                    {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+        let mode = Mode {
+            kind: if converter == "vapostproc" {
+                encoding::Kind::Va
+            } else {
+                encoding::Kind::Software
+            },
+            factory: "x264enc",
+            dmabuf: false,
+        };
+        let output = pipeline.0.by_name("output").unwrap();
+        output.set_property("caps", mode.caps(None));
+        attach_capture_probe(
+            &pipeline.0.by_name("source").unwrap(),
+            &output,
+            Resolution::Native,
+            mode,
+            Arc::new(Counters::default()),
+        );
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        let source = gst::Pad::builder(gst::PadDirection::Src).build();
+        source.set_active(true).unwrap();
+        source
+            .link(
+                &pipeline
+                    .0
+                    .by_name("source")
+                    .unwrap()
+                    .static_pad("sink")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(source.push_event(gst::event::StreamStart::new("capture")));
+        let mut results = Vec::new();
+        let mut pts = gst::ClockTime::ZERO;
+        for (index, (width, height)) in [(1920, 1080), (1920, 1080), (1280, 720), (1280, 720)]
+            .into_iter()
+            .enumerate()
+        {
+            if index == 0 || index == 2 {
+                let caps =
+                    format!("video/x-raw,format=RGBx,width={width},height={height},framerate=0/1")
+                        .parse::<gst::Caps>()
+                        .unwrap();
+                assert!(source.push_event(gst::event::Caps::new(&caps)));
+                if index == 0 {
+                    assert!(source
+                        .push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+                            gst::ClockTime,
+                        >::new())));
+                    source.peer_query(&mut gst::query::Allocation::new(Some(&caps), true));
+                }
+            }
+            if index == 2 {
+                allocations.store(0, Ordering::SeqCst);
+            }
+            let mut buffer = gst::Buffer::with_size((width * height * 4) as usize).unwrap();
+            buffer.get_mut().unwrap().set_pts(pts);
+            pts += gst::ClockTime::from_mseconds(33);
+            results.push(source.push(buffer));
+        }
+        assert!(source.push_event(gst::event::Eos::new()));
+        pipeline.0.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(5),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        (
+            results,
+            delivered.load(Ordering::SeqCst),
+            allocations.load(Ordering::SeqCst),
+        )
+    }
+
+    #[test]
+    fn a_source_resize_renegotiates_converter_allocation() {
+        let (results, delivered, allocations) =
+            resize_without_source_allocation("videoconvert ! videoscale add-borders=true");
+        assert!(results.iter().all(|result| result.is_ok()), "{results:?}");
+        assert_eq!((delivered, allocations), (4, 1));
+        if gst::ElementFactory::find("vapostproc").is_some() {
+            let (results, delivered, _) = resize_without_source_allocation("vapostproc");
+            assert!(results.iter().all(|result| result.is_ok()), "{results:?}");
+            assert_eq!(delivered, 4);
+        }
+    }
+
     #[test]
     fn rejects_cpu_buffers_before_pixel_processing() {
         gst::init().unwrap();
-        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc num-buffers=1 name=source ! video/x-raw,width=320,height=180 ! fakesink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc num-buffers=3 name=source ! video/x-raw,width=320,height=180 ! fakesink name=sink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let delivered = downstream_buffers(&pipeline.0);
+        pipeline
+            .0
+            .by_name("source")
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+                    if buffer.offset() >= 1 {
+                        let size = buffer.size();
+                        let path = std::env::temp_dir().join(format!(
+                            "wrec-dmabuf-{}-{}",
+                            std::process::id(),
+                            buffer.offset()
+                        ));
+                        let file = std::fs::File::options()
+                            .read(true)
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .unwrap();
+                        std::fs::remove_file(&path).unwrap();
+                        file.set_len(size as u64).unwrap();
+                        let memory = unsafe {
+                            gstreamer_allocators::DmaBufAllocator::new().alloc(file, size)
+                        }
+                        .unwrap();
+                        buffer.make_mut().replace_all_memory(memory);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
         let output = element("capsfilter").unwrap();
         attach_capture_probe(
             &pipeline.0.by_name("source").unwrap(),
@@ -1553,5 +1773,7 @@ mod tests {
             panic!("expected error")
         };
         assert!(error.error().to_string().contains("non-DMA-BUF"));
+        settle(&pipeline.0);
+        assert_eq!(delivered.load(Ordering::SeqCst), 0);
     }
 }
