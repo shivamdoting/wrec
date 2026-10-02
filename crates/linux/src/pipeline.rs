@@ -423,11 +423,12 @@ fn segment(pad: &gst::Pad) -> Option<gst::FormattedSegment<gst::ClockTime>> {
 
 const LOST_CAPTURE_TIME: &str = "A frame lost its capture timestamp in a VA encoder that replaces timestamps (GStreamer VA before 1.24.3). The recording stopped instead of writing video with incorrect timing.";
 
-fn lose_capture_time(pad: &gst::Pad) -> gst::PadProbeReturn {
+fn lose_capture_time(pad: &gst::Pad, info: &mut gst::PadProbeInfo<'_>) -> gst::PadProbeReturn {
     if let Some(element) = pad.parent_element() {
         gst::element_error!(element, gst::StreamError::Format, ("{}", LOST_CAPTURE_TIME));
     }
-    gst::PadProbeReturn::Drop
+    info.flow_res = Err(gst::FlowError::Error);
+    gst::PadProbeReturn::Handled
 }
 
 fn keep_capture_timestamps(encoder: &gst::Element, parser: &gst::Element) {
@@ -441,46 +442,47 @@ fn keep_capture_timestamps(encoder: &gst::Element, parser: &gst::Element) {
                 .and_then(|buffer| buffer.pts())
                 .zip(segment(pad))
                 .and_then(|(pts, segment)| segment.to_running_time(pts));
-            match (running_time, info.data.as_mut()) {
-                (Some(running_time), Some(gst::PadProbeData::Buffer(buffer))) => {
-                    gst::ReferenceTimestampMeta::add(
-                        buffer.make_mut(),
-                        &reference,
-                        running_time,
-                        gst::ClockTime::NONE,
-                    );
-                    gst::PadProbeReturn::Ok
-                }
-                _ => lose_capture_time(pad),
+            if let (Some(running_time), Some(gst::PadProbeData::Buffer(buffer))) =
+                (running_time, info.data.as_mut())
+            {
+                gst::ReferenceTimestampMeta::add(
+                    buffer.make_mut(),
+                    &reference,
+                    running_time,
+                    gst::ClockTime::NONE,
+                );
+                return gst::PadProbeReturn::Ok;
             }
+            lose_capture_time(pad, info)
         });
     parser
         .static_pad("sink")
         .unwrap()
         .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-            let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() else {
-                return lose_capture_time(pad);
-            };
-            let running_time = buffer
-                .iter_meta::<gst::ReferenceTimestampMeta>()
-                .find(|meta| {
-                    meta.reference()
-                        .structure(0)
-                        .is_some_and(|structure| structure.name() == CAPTURE_TIME)
+            let pts = info
+                .buffer()
+                .and_then(|buffer| {
+                    buffer
+                        .iter_meta::<gst::ReferenceTimestampMeta>()
+                        .find(|meta| {
+                            meta.reference()
+                                .structure(0)
+                                .is_some_and(|structure| structure.name() == CAPTURE_TIME)
+                        })
+                        .map(|meta| meta.timestamp())
                 })
-                .map(|meta| meta.timestamp());
-            let Some(pts) = running_time
                 .zip(segment(pad))
                 .and_then(|(running_time, segment)| {
                     segment.position_from_running_time(running_time)
-                })
-            else {
-                return lose_capture_time(pad);
-            };
-            let buffer = buffer.make_mut();
-            buffer.set_pts(pts);
-            buffer.set_dts(pts);
-            gst::PadProbeReturn::Ok
+                });
+            if let (Some(pts), Some(gst::PadProbeData::Buffer(buffer))) = (pts, info.data.as_mut())
+            {
+                let buffer = buffer.make_mut();
+                buffer.set_pts(pts);
+                buffer.set_dts(pts);
+                return gst::PadProbeReturn::Ok;
+            }
+            lose_capture_time(pad, info)
         });
 }
 
@@ -1185,6 +1187,48 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(error.to_string().contains(LOST_CAPTURE_TIME), "{error}");
+    }
+
+    #[test]
+    fn missing_capture_time_fails_the_push_with_a_stream_error() {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::Pipeline::new());
+        let encoder = element("identity").unwrap();
+        let parser = element("identity").unwrap();
+        let sink = element("fakesink").unwrap();
+        pipeline.0.add_many([&encoder, &parser, &sink]).unwrap();
+        parser.link(&sink).unwrap();
+        keep_capture_timestamps(&encoder, &parser);
+        let _ = pipeline.0.set_state(gst::State::Playing);
+        let source = gst::Pad::builder(gst::PadDirection::Src).build();
+        source.set_active(true).unwrap();
+        source.link(&parser.static_pad("sink").unwrap()).unwrap();
+        assert!(source.push_event(gst::event::StreamStart::new("capture")));
+        assert!(
+            source.push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+                gst::ClockTime,
+            >::new()))
+        );
+        let mut buffer = gst::Buffer::new();
+        buffer
+            .get_mut()
+            .unwrap()
+            .set_pts(gst::ClockTime::from_seconds(1));
+        assert_eq!(source.push(buffer), Err(gst::FlowError::Error));
+        let message = pipeline
+            .0
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(5), &[gst::MessageType::Error])
+            .unwrap();
+        let gst::MessageView::Error(error) = message.view() else {
+            panic!("expected error")
+        };
+        assert!(
+            error.error().to_string().contains(LOST_CAPTURE_TIME),
+            "{}",
+            error.error()
+        );
     }
 
     #[test]
