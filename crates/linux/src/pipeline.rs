@@ -73,16 +73,21 @@ fn output_size(width: i32, height: i32, resolution: Resolution) -> (i32, i32) {
 }
 
 fn capture_caps(dmabuf: bool, pipewire: bool, fps: u32) -> gst::Caps {
-    let caps = gst::Caps::builder("video/x-raw").field(
-        // Wayland compositors advertise variable-rate frames (framerate=0/1).
-        // Bound their maximum rate without requiring a fixed-rate source.
-        if pipewire {
-            "max-framerate"
-        } else {
-            "framerate"
-        },
-        gst::Fraction::new(fps as i32, 1),
-    );
+    let caps = gst::Caps::builder("video/x-raw");
+    // Wayland compositors advertise variable-rate frames (framerate=0/1).
+    // Bound their maximum rate without requiring a fixed-rate source.
+    let caps = if pipewire {
+        caps.field(
+            "max-framerate",
+            gst::List::new(
+                (1..=fps as i32)
+                    .rev()
+                    .map(|rate| gst::Fraction::new(rate, 1)),
+            ),
+        )
+    } else {
+        caps.field("framerate", gst::Fraction::new(fps as i32, 1))
+    };
     if dmabuf {
         caps.features(["memory:DMABuf"])
             .field("format", "DMA_DRM")
@@ -861,10 +866,66 @@ mod tests {
             capture_caps(true, true, 30)
                 .structure(0)
                 .unwrap()
-                .get::<gst::Fraction>("max-framerate")
+                .get::<gst::List>("max-framerate")
+                .unwrap()
+                .first()
+                .unwrap()
+                .get::<gst::Fraction>()
                 .unwrap(),
             gst::Fraction::new(30, 1)
         );
+    }
+
+    fn negotiated_ceiling(capture: &gst::Caps, portal: &str) -> Option<gst::Fraction> {
+        let portal = portal.parse::<gst::Caps>().unwrap();
+        let mut common = capture.intersect_with_mode(&portal, gst::CapsIntersectMode::First);
+        if common.is_empty() {
+            return None;
+        }
+        common.fixate();
+        common
+            .structure(0)
+            .unwrap()
+            .get::<gst::Fraction>("max-framerate")
+            .ok()
+    }
+
+    #[test]
+    fn portal_maximum_rates_below_the_request_become_the_ceiling() {
+        gst::init().unwrap();
+        for dmabuf in [false, true] {
+            let features = if dmabuf {
+                "(memory:DMABuf), format=DMA_DRM, drm-format=XR24:0x0200000000000901"
+            } else {
+                ", format=BGRx"
+            };
+            let portal = |maximum: &str| {
+                format!("video/x-raw{features}, framerate=0/1, max-framerate={maximum}")
+            };
+            for (fps, maximum, ceiling) in [
+                (30, "[1/1, 5/1]", 5),
+                (30, "[1/1, 24/1]", 24),
+                (30, "[1/1, 60/1]", 30),
+                (30, "[1/1, 144/1]", 30),
+                (60, "[1/1, 5/1]", 5),
+                (60, "[1/1, 60000/1001]", 59),
+                (60, "[1/1, 60/1]", 60),
+                (60, "[1/1, 144/1]", 60),
+            ] {
+                assert_eq!(
+                    negotiated_ceiling(&capture_caps(dmabuf, true, fps), &portal(maximum)),
+                    Some(gst::Fraction::new(ceiling, 1)),
+                    "dmabuf {dmabuf}, {fps} fps requested, portal maximum {maximum}"
+                );
+            }
+            for (fps, maximum) in [(30, "60/1"), (30, "[40/1, 60/1]"), (60, "144/1")] {
+                assert_eq!(
+                    negotiated_ceiling(&capture_caps(dmabuf, true, fps), &portal(maximum)),
+                    None,
+                    "dmabuf {dmabuf}, {fps} fps requested, portal maximum {maximum}"
+                );
+            }
+        }
     }
 
     #[test]

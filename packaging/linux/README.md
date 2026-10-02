@@ -25,6 +25,15 @@ H.264 and x265 for HEVC. Retries happen only before the first encoded frame and
 preserve the requested codec. Job events identify the attempted and selected
 paths. X11 capture uses system memory even when encoding runs on the GPU.
 
+On Wayland, the requested frame rate is a ceiling. wrec offers the portal every
+whole-number maximum from the requested rate down to 1 fps, highest first, and
+PipeWire picks the highest one the portal supports. A 60 Hz output recorded at
+30 fps captures at up to 30 fps, and a 5 Hz output captures at up to 5 fps. A
+fractional refresh rate below the request is rounded down. For example, a
+59.94 Hz output recorded at 60 fps captures at up to 59 fps. A portal that
+advertises a single fixed fractional maximum below the requested rate,
+instead of a range, cannot be negotiated.
+
 wrec tries shared GPU buffers only when `vapostproc` lists DMA-BUF caps with
 `format=DMA_DRM` and comes from GStreamer VA 1.24.6 or later. `DMA_DRM` caps
 carry the pixel format and modifier with an explicit `drm-format`. GStreamer VA
