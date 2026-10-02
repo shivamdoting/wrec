@@ -32,13 +32,14 @@ jobs:
             libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav ffmpeg dbus-daemon xvfb x11-apps
+            gstreamer1.0-libav ffmpeg dbus-daemon xvfb x11-apps pipewire
       - name: Build and test
         run: |
           cargo fmt --check
           cargo check --workspace --locked
           cargo test --workspace --locked
           dbus-run-session -- cargo test -p linux portal_roundtrip --locked -- --ignored
+          cargo test -p linux node_watch --locked -- --ignored
           ./scripts/package-cli-linux.sh
       - name: Test packaged CLI
         run: |

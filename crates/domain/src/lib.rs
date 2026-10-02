@@ -257,7 +257,7 @@ pub struct CaptureDimensions {
     pub output_height: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecorderEvent {
     Starting {
         session_id: u64,
@@ -291,7 +291,7 @@ pub enum RecorderEvent {
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum RecorderError {
     #[error("recording cancelled before capture started")]
     Cancelled,

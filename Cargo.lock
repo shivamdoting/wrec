@@ -991,6 +991,8 @@ dependencies = [
  "futures-util",
  "gstreamer",
  "gstreamer-allocators",
+ "libc",
+ "serde",
  "serde_json",
  "tokio",
  "x11-dl",

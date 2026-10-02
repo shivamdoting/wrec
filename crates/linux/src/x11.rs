@@ -103,13 +103,13 @@ impl SourceWatch {
                 .map_or(true, |at| at.elapsed() >= Duration::from_millis(500))
         {
             self.checked.set(Some(Instant::now()));
-            let exists = self
+            let viewable = self
                 .connection
                 .get_window_attributes(self.xid)
                 .ok()
                 .and_then(|cookie| cookie.reply().ok())
-                .is_some();
-            if !exists {
+                .is_some_and(|attributes| attributes.map_state == MapState::VIEWABLE);
+            if !viewable {
                 self.lost.store(true, Ordering::SeqCst);
             }
         }

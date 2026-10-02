@@ -90,6 +90,16 @@ fn capture_caps(dmabuf: bool, pipewire: bool, fps: u32) -> gst::Caps {
     }
 }
 
+fn movie_mux() -> Result<gst::Element> {
+    let mux = element("qtmux")?;
+    mux.set_property("fragment-duration", 10000u32);
+    mux.set_property_from_str("fragment-mode", "first-moov-then-finalise");
+    // Preserve sub-frame timestamps around pause/resume instead of rounding
+    // them to the default frame-rate-derived track timescale.
+    mux.set_property("trak-timescale", 1_000_000u32);
+    Ok(mux)
+}
+
 fn video_queue() -> Result<gst::Element> {
     let queue = element("queue")?;
     queue.set_property("max-size-buffers", 2u32);
@@ -158,9 +168,20 @@ pub(crate) enum CaptureInput {
     X11 { display: String, xid: u64 },
 }
 
-struct Attempt {
+struct Attempt<'a> {
     mode: Mode,
     counters: Arc<Counters>,
+    last: bool,
+    stopping: &'a dyn Fn(),
+}
+
+fn finished(result: &Result<()>, counters: &Counters) -> bool {
+    matches!(result, Ok(()) | Err(RecorderError::Cancelled))
+        || counters.frames.load(Ordering::Relaxed) > 0
+}
+
+fn ends_recording(result: &Result<()>, counters: &Counters, last: bool) -> bool {
+    last || finished(result, counters)
 }
 
 pub(crate) fn record(
@@ -170,6 +191,7 @@ pub(crate) fn record(
     events: &mpsc::Sender<RecorderEvent>,
     commands: mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
+    stopping: &dyn Fn(),
 ) -> Result<()> {
     if matches!(capture, CaptureInput::X11 { .. }) {
         crate::x11::initialize()?;
@@ -180,13 +202,16 @@ pub(crate) fn record(
         return Err(backend(format!("No {} encoder is installed. Install GStreamer VA/NVENC plugins or x264/x265/openh264 for software compatibility; see packaging/linux/README.md.", settings.codec.as_arg())));
     }
     let mut last_error = None;
-    for mode in modes {
+    let count = modes.len();
+    for (index, mode) in modes.into_iter().enumerate() {
         if *stop.borrow() {
             return Err(RecorderError::Cancelled);
         }
         let attempt = Attempt {
             mode,
             counters: Arc::new(Counters::default()),
+            last: index + 1 == count,
+            stopping,
         };
         let _ = events.send(RecorderEvent::Log {
             session_id: Some(session.id),
@@ -196,10 +221,7 @@ pub(crate) fn record(
             capture, session, settings, events, &commands, stop, &attempt,
         );
         release_freed_memory();
-        if result.is_ok()
-            || matches!(result, Err(RecorderError::Cancelled))
-            || attempt.counters.frames.load(Ordering::Relaxed) > 0
-        {
+        if finished(&result, &attempt.counters) {
             return result;
         }
         let error = result.unwrap_err();
@@ -232,7 +254,7 @@ fn record_attempt(
     events: &mpsc::Sender<RecorderEvent>,
     commands: &mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
-    attempt: &Attempt,
+    attempt: &Attempt<'_>,
 ) -> Result<()> {
     if *stop.borrow() {
         return Err(RecorderError::Cancelled);
@@ -287,11 +309,7 @@ fn record_attempt(
     output.set_property("caps", mode.caps(None));
     let encoder = mode.encoder(&settings)?;
     let parser = element(parser_name(settings.codec))?;
-    let mux = element("qtmux")?;
-    mux.set_property("fragment-duration", 10000u32);
-    // Preserve sub-frame timestamps around pause/resume instead of rounding
-    // them to the default frame-rate-derived track timescale.
-    mux.set_property("trak-timescale", 1_000_000u32);
+    let mux = movie_mux()?;
     let sink = element("filesink")?;
     sink.set_property(
         "location",
@@ -350,8 +368,15 @@ fn record_attempt(
         commands,
         stop,
         &counters,
-        &|| source_watch.as_ref().is_some_and(|watch| watch.lost()),
+        &|| match (&stream, &source_watch) {
+            (Some(stream), _) => stream.lost(),
+            (None, Some(watch)) => watch.lost().then_some(SOURCE_LOST),
+            (None, None) => None,
+        },
     );
+    if ends_recording(&result, &counters, attempt.last) {
+        (attempt.stopping)();
+    }
     let _ = pipeline.0.set_state(gst::State::Null);
     if matches!(result, Err(RecorderError::Cancelled))
         || counters.frames.load(Ordering::Relaxed) == 0
@@ -509,7 +534,7 @@ fn state_error(pipeline: &gst::Pipeline, fallback: impl std::fmt::Display) -> Re
 }
 
 const SOURCE_LOST: &str =
-    "The captured X11 window closed or became unavailable; the recording stopped.";
+    "The captured X11 window closed, was minimized, or became unavailable; the recording stopped.";
 
 fn run(
     pipeline: &gst::Pipeline,
@@ -518,7 +543,7 @@ fn run(
     commands: &mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
     counters: &Counters,
-    source_lost: &dyn Fn() -> bool,
+    source_lost: &dyn Fn() -> Option<&'static str>,
 ) -> Result<()> {
     pipeline
         .set_state(gst::State::Playing)
@@ -531,8 +556,8 @@ fn run(
     let mut stopping = None;
     let mut last_metrics = Instant::now();
     loop {
-        if stopping.is_none() && source_lost() {
-            return Err(backend(SOURCE_LOST));
+        if let Some(message) = stopping.is_none().then(source_lost).flatten() {
+            return Err(backend(message));
         }
         if *stop.borrow() && stopping.is_none() {
             if !started && counters.frames.load(Ordering::Relaxed) == 0 {
@@ -571,8 +596,10 @@ fn run(
         }
         if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match message.view() {
-                gst::MessageView::Error(_) if source_lost() => return Err(backend(SOURCE_LOST)),
                 gst::MessageView::Error(error) => {
+                    if let Some(lost) = source_lost() {
+                        return Err(backend(lost));
+                    }
                     return Err(backend(format!(
                         "{}: {} ({})",
                         error
@@ -581,7 +608,7 @@ fn run(
                             .unwrap_or_default(),
                         error.error(),
                         error.debug().unwrap_or_default()
-                    )))
+                    )));
                 }
                 gst::MessageView::Eos(_) => {
                     if counters.frames.load(Ordering::Relaxed) == 0 {
@@ -690,10 +717,15 @@ mod tests {
         stop: watch::Sender<bool>,
         worker: Option<std::thread::JoinHandle<Result<()>>>,
         counters: Arc<Counters>,
+        lost: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl TestRecording {
         fn start(audio_tracks: usize) -> Self {
+            Self::start_with_audio_delays(&vec![gst::ClockTime::ZERO; audio_tracks])
+        }
+
+        fn start_with_audio_delays(audio_delays: &[gst::ClockTime]) -> Self {
             gst::init().unwrap();
             static ID: AtomicU64 = AtomicU64::new(0);
             let id = ID.fetch_add(1, Ordering::Relaxed);
@@ -704,24 +736,27 @@ mod tests {
             };
             // Synthetic software encoding is confined to tests. Exercise the same
             // bus/control/mux code without pretending this is a hardware benchmark.
-            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc ! h264parse name=parser ! qtmux name=mux fragment-duration=10000 trak-timescale=1000000 ! filesink name=output sync=false")
+            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc ! h264parse name=parser")
                 .unwrap().downcast::<gst::Pipeline>().unwrap();
-            pipeline
-                .by_name("output")
-                .unwrap()
-                .set_property("location", session.output_path.to_str().unwrap());
+            let mux = movie_mux().unwrap();
+            let sink = element("filesink").unwrap();
+            sink.set_property("sync", false);
+            sink.set_property("location", session.output_path.to_str().unwrap());
+            pipeline.add_many([&mux, &sink]).unwrap();
+            gst::Element::link_many([&pipeline.by_name("parser").unwrap(), &mux, &sink]).unwrap();
             let counters = Arc::new(Counters::default());
             attach_timing_probe(&pipeline.by_name("video").unwrap(), counters.clone());
-            for _ in 0..audio_tracks {
+            for &delay in audio_delays {
                 let source = element("audiotestsrc").unwrap();
                 source.set_property("is-live", true);
-                add_audio_source(
-                    &pipeline,
-                    &pipeline.by_name("mux").unwrap(),
-                    &source,
-                    &counters,
-                )
-                .unwrap();
+                source.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::BUFFER,
+                    move |_, info| match info.buffer().and_then(|buffer| buffer.pts()) {
+                        Some(pts) if pts < delay => gst::PadProbeReturn::Drop,
+                        _ => gst::PadProbeReturn::Ok,
+                    },
+                );
+                add_audio_source(&pipeline, &mux, &source, &counters).unwrap();
             }
             attach_encoded_probe(&pipeline.by_name("parser").unwrap(), counters.clone());
             let (events_tx, events) = mpsc::channel();
@@ -730,6 +765,8 @@ mod tests {
             let worker_pipeline = pipeline.clone();
             let worker_session = session.clone();
             let worker_counters = counters.clone();
+            let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_lost = lost.clone();
             let worker = std::thread::spawn(move || {
                 let guard = PipelineGuard(worker_pipeline);
                 run(
@@ -739,7 +776,11 @@ mod tests {
                     &commands_rx,
                     &stopped,
                     &worker_counters,
-                    &|| false,
+                    &|| {
+                        worker_lost
+                            .load(Ordering::SeqCst)
+                            .then_some(crate::portal::PIPEWIRE_LOST)
+                    },
                 )
             });
             let recording = Self {
@@ -750,6 +791,7 @@ mod tests {
                 stop,
                 worker: Some(worker),
                 counters,
+                lost,
             };
             loop {
                 if matches!(
@@ -783,61 +825,69 @@ mod tests {
         }
 
         fn probe(&self) -> serde_json::Value {
-            let output = std::process::Command::new("ffprobe")
-                .args([
-                    "-v",
-                    "error",
-                    "-show_streams",
-                    "-show_format",
-                    "-show_packets",
-                    "-of",
-                    "json",
-                ])
-                .arg(&self.session.output_path)
-                .output()
-                .expect("install ffmpeg to run Linux recording tests");
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let probe: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            let mut previous = std::collections::HashMap::new();
-            for packet in probe["packets"].as_array().unwrap() {
-                let stream = packet["stream_index"].as_u64().unwrap();
-                let dts = packet["dts"].as_i64().unwrap();
-                if let Some(last) = previous.insert(stream, dts) {
-                    assert!(
-                        dts > last,
-                        "stream {stream} has non-increasing DTS: {last} -> {dts}"
-                    );
-                }
-            }
-            let decoded = std::process::Command::new("ffmpeg")
-                .args(["-v", "error", "-i"])
-                .arg(&self.session.output_path)
-                // Preserve the movie's timestamp precision when decoding VFR
-                // into null output; rounding to 1/30 can create duplicate DTS.
-                .args([
-                    "-map",
-                    "0",
-                    "-vsync",
-                    "0",
-                    "-enc_time_base",
-                    "-1",
-                    "-f",
-                    "null",
-                    "-",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                decoded.status.success() && decoded.stderr.is_empty(),
-                "{}",
-                String::from_utf8_lossy(&decoded.stderr)
-            );
-            probe
+            probe_movie(&self.session.output_path)
         }
+    }
+
+    fn probe_movie(movie: &Path) -> serde_json::Value {
+        let probe = decode_movie(movie);
+        let mut previous = std::collections::HashMap::new();
+        for packet in probe["packets"].as_array().unwrap() {
+            let stream = packet["stream_index"].as_u64().unwrap();
+            let dts = packet["dts"].as_i64().unwrap();
+            if let Some(last) = previous.insert(stream, dts) {
+                assert!(
+                    dts > last,
+                    "stream {stream} has non-increasing DTS: {last} -> {dts}"
+                );
+            }
+        }
+        probe
+    }
+
+    fn decode_movie(movie: &Path) -> serde_json::Value {
+        let output = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-show_packets",
+                "-of",
+                "json",
+            ])
+            .arg(movie)
+            .output()
+            .expect("install ffmpeg to run Linux recording tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let decoded = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(movie)
+            // Preserve the movie's timestamp precision when decoding VFR
+            // into null output; rounding to 1/30 can create duplicate DTS.
+            .args([
+                "-map",
+                "0",
+                "-vsync",
+                "0",
+                "-enc_time_base",
+                "-1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success() && decoded.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
     }
 
     impl Drop for TestRecording {
@@ -847,6 +897,54 @@ mod tests {
                 let _ = worker.join();
             }
             let _ = std::fs::remove_file(&self.session.output_path);
+        }
+    }
+
+    fn start_seconds(probe: &serde_json::Value, codec: &str) -> Vec<f64> {
+        probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stream| stream["codec_name"] == codec)
+            .map(|stream| stream["start_time"].as_str().unwrap().parse().unwrap())
+            .collect()
+    }
+
+    fn assert_late_audio_keeps_its_offset(movie: &Path, probe: &serde_json::Value, delay: f64) {
+        let video = start_seconds(probe, "h264");
+        let audio = start_seconds(probe, "aac");
+        assert_eq!((video.len(), audio.len()), (1, 2), "{}", movie.display());
+        let (prompt, late) = (audio[0], audio[1]);
+        assert!(
+            (late - prompt - delay).abs() < 0.05,
+            "{}: audio starts {prompt}s and {late}s, expected {delay}s apart",
+            movie.display()
+        );
+        assert!(
+            (late - video[0] - delay).abs() < 0.1,
+            "{}: late audio starts {late}s, video {}s, expected {delay}s apart",
+            movie.display(),
+            video[0]
+        );
+    }
+
+    #[test]
+    fn late_audio_keeps_its_capture_timestamp_in_partial_and_finalized_movies() {
+        let delay = gst::ClockTime::from_seconds(1);
+        let mut recording = TestRecording::start_with_audio_delays(&[gst::ClockTime::ZERO, delay]);
+        std::thread::sleep(Duration::from_secs(13));
+        let partial = recording.session.output_path.with_extension("partial.mov");
+        std::fs::copy(&recording.session.output_path, &partial).unwrap();
+        recording.finish().unwrap();
+        let seconds = delay.nseconds() as f64 / 1_000_000_000.0;
+        let checks = std::panic::catch_unwind(|| {
+            assert_late_audio_keeps_its_offset(&partial, &decode_movie(&partial), seconds);
+            let movie = &recording.session.output_path;
+            assert_late_audio_keeps_its_offset(movie, &probe_movie(movie), seconds);
+        });
+        let _ = std::fs::remove_file(&partial);
+        if let Err(panic) = checks {
+            std::panic::resume_unwind(panic);
         }
     }
 
@@ -907,6 +1005,45 @@ mod tests {
             (duration - active_duration).abs() < 0.2,
             "movie duration {duration}, active timeline {active_duration}"
         );
+    }
+
+    #[test]
+    fn every_attempt_that_ends_the_recording_signals_teardown() {
+        let idle = Counters::default();
+        let encoded = Counters::default();
+        encoded.frames.store(1, Ordering::Relaxed);
+        let failed = Err(backend("lost"));
+        assert!(ends_recording(&Ok(()), &encoded, false));
+        assert!(ends_recording(&Ok(()), &encoded, true));
+        assert!(ends_recording(&Err(RecorderError::Cancelled), &idle, false));
+        assert!(ends_recording(&failed, &encoded, false));
+        assert!(ends_recording(&failed, &idle, true));
+        assert!(!ends_recording(&failed, &idle, false));
+    }
+
+    #[test]
+    fn source_loss_fails_active_and_paused_recordings_promptly() {
+        for paused in [false, true] {
+            let mut recording = TestRecording::start(1);
+            std::thread::sleep(Duration::from_millis(300));
+            if paused {
+                recording.control(true);
+            }
+            let at = Instant::now();
+            recording.lost.store(true, Ordering::SeqCst);
+            let error = recording
+                .worker
+                .take()
+                .unwrap()
+                .join()
+                .unwrap()
+                .unwrap_err();
+            assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+            assert_eq!(
+                error.to_string(),
+                format!("backend error: {}", crate::portal::PIPEWIRE_LOST)
+            );
+        }
     }
 
     #[test]

@@ -4,24 +4,25 @@ mod desktop;
 mod encoding;
 mod pipeline;
 mod portal;
+mod worker;
 mod x11;
 
 use domain::{
     CaptureTarget, RecorderEngine, RecorderError, RecorderEvent, RecorderSettings,
     RecordingSession, Result,
 };
-use futures_util::StreamExt;
 use std::{
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc,
     },
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
 
 pub use desktop::{check_desktop, list_targets};
+pub use worker::{run as run_capture_worker, ARGUMENT as CAPTURE_WORKER_ARGUMENT};
 
 pub(crate) fn backend(error: impl std::fmt::Display) -> RecorderError {
     RecorderError::Backend(error.to_string())
@@ -32,16 +33,10 @@ pub(crate) enum Command {
     Resume(mpsc::SyncSender<Result<()>>),
 }
 
-struct Active {
-    commands: mpsc::SyncSender<Command>,
-    stop: watch::Sender<bool>,
-    worker: thread::JoinHandle<()>,
-}
-
 /// Rust owns lifecycle and buffer handles. GStreamer owns the native pixel path.
 pub struct LinuxRecorder {
     events: mpsc::Sender<RecorderEvent>,
-    active: Option<Active>,
+    active: Option<worker::Worker>,
     stop_requested: bool,
 }
 
@@ -54,14 +49,11 @@ impl LinuxRecorder {
         }
     }
 
-    fn control(&self, command: impl FnOnce(mpsc::SyncSender<Result<()>>) -> Command) -> Result<()> {
-        let active = self
-            .active
-            .as_ref()
-            .ok_or_else(|| backend("no active recording"))?;
-        let (tx, rx) = mpsc::sync_channel(1);
-        active.commands.try_send(command(tx)).map_err(backend)?;
-        rx.recv_timeout(Duration::from_secs(5)).map_err(backend)?
+    fn control(&mut self, request: worker::Request) -> Result<()> {
+        self.active
+            .as_mut()
+            .ok_or_else(|| backend("no active recording"))?
+            .control(request)
     }
 }
 
@@ -78,14 +70,14 @@ impl RecorderEngine for LinuxRecorder {
         if self.active.is_none() && self.stop_requested {
             return Err(RecorderError::Cancelled);
         }
-        if let Some(active) = &self.active {
-            if !active.worker.is_finished() {
-                return Err(backend("recording is already active"));
-            }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| !active.finished())
+        {
+            return Err(backend("recording is already active"));
         }
-        if let Some(active) = self.active.take() {
-            let _ = active.worker.join();
-        }
+        self.active = None;
         self.stop_requested = false;
         check_desktop()?;
         if desktop::detect()? == desktop::Desktop::Wayland {
@@ -107,154 +99,138 @@ impl RecorderEngine for LinuxRecorder {
             id,
             output_path: settings.output_dir.join(format!("wrec-{id}.mov")),
         };
-        let events = self.events.clone();
-        let completion_events = events.clone();
-        let worker_session = session.clone();
-        let (commands, receiver) = mpsc::sync_channel(1);
-        let (stop, mut stopped) = watch::channel(false);
-        let worker_stop = stop.clone();
-        let worker = thread::Builder::new()
-            .name("wrec-linux-capture".into())
-            .spawn(move || {
-                let _ = events.send(RecorderEvent::Starting {
-                    session_id: id,
-                    target: target.clone(),
-                    settings: settings.clone(),
-                    output_path: worker_session.output_path.clone(),
-                });
-                let result = (|| {
-                    if desktop::detect()? == desktop::Desktop::X11 {
-                        let (display, xid) = x11::source(&target)?;
-                        return pipeline::record(
-                            &pipeline::CaptureInput::X11 { display, xid },
-                            &worker_session,
-                            &settings,
-                            &events,
-                            receiver,
-                            &stopped,
-                        );
-                    }
-                    let runtime = portal::runtime()?;
-                    runtime.block_on(async {
-                        let capture = Arc::new(
-                            portal::open(&target, settings.include_cursor, &mut stopped).await?,
-                        );
-                        let result = async {
-                            let mut closed =
-                                capture.session.receive_closed().await.map_err(backend)?;
-                            let worker_capture = capture.clone();
-                            let runtime = tokio::runtime::Handle::current();
-                            let mut recording = tokio::task::spawn_blocking(move || {
-                                pipeline::record(
-                                    &pipeline::CaptureInput::PipeWire(Box::new(move || {
-                                        // Each retry needs a new protocol connection. Duplicating
-                                        // an already-used socket does not reset its remote state.
-                                        runtime.block_on(worker_capture.connect())
-                                    })),
-                                    &worker_session,
-                                    &settings,
-                                    &events,
-                                    receiver,
-                                    &stopped,
-                                )
-                            });
-                            tokio::select! {
-                                result = &mut recording => result.map_err(backend)?,
-                                _ = closed.next() => {
-                                    let _ = worker_stop.send(true);
-                                    recording.await.map_err(backend)?
-                                }
-                            }
-                        }
-                        .await;
-                        // Release the remote only after all native elements have stopped using its fd.
-                        capture.close().await;
-                        result
-                    })
-                })();
-                let (success, status) = match result {
-                    Ok(()) => (true, "recording finalized".to_string()),
-                    Err(RecorderError::Cancelled) => {
-                        let _ = completion_events.send(RecorderEvent::Cancelled { session_id: id });
-                        return;
-                    }
-                    Err(error) => (false, error.to_string()),
-                };
-                let _ = completion_events.send(RecorderEvent::Exited {
-                    session_id: id,
-                    success,
-                    status,
-                });
-            })
-            .map_err(backend)?;
-        self.active = Some(Active {
-            commands,
-            stop,
-            worker,
-        });
+        self.active = Some(worker::Worker::spawn(
+            Path::new(worker::PROGRAM),
+            &[worker::ARGUMENT],
+            session.clone(),
+            target,
+            settings,
+            self.events.clone(),
+            worker::EXIT_DEADLINE,
+        )?);
         Ok(session)
     }
 
     fn pause(&mut self) -> Result<()> {
-        self.control(Command::Pause)
+        self.control(worker::Request::Pause)
     }
     fn resume(&mut self) -> Result<()> {
-        self.control(Command::Resume)
+        self.control(worker::Request::Resume)
     }
     fn stop(&mut self) -> Result<()> {
         self.stop_requested = true;
-        if let Some(active) = &self.active {
-            let _ = active.stop.send(true);
+        if let Some(active) = &mut self.active {
+            active.stop();
         }
         Ok(())
     }
 }
 
-impl Drop for LinuxRecorder {
-    fn drop(&mut self) {
-        if let Some(active) = self.active.take() {
-            let _ = active.stop.send(true);
-            // The coordinator waits for finalization before normal shutdown.
-            // A stuck native call must not turn destruction into an unbounded join.
-            if active.worker.is_finished() {
-                let _ = active.worker.join();
-            }
+pub(crate) fn capture(
+    target: CaptureTarget,
+    settings: RecorderSettings,
+    session: RecordingSession,
+    events: mpsc::Sender<RecorderEvent>,
+    receiver: mpsc::Receiver<Command>,
+    worker_stop: watch::Sender<bool>,
+    stopping: Arc<dyn Fn() + Send + Sync>,
+) {
+    let mut stopped = worker_stop.subscribe();
+    let id = session.id;
+    let completion_events = events.clone();
+    let worker_session = session;
+    let _ = events.send(RecorderEvent::Starting {
+        session_id: id,
+        target: target.clone(),
+        settings: settings.clone(),
+        output_path: worker_session.output_path.clone(),
+    });
+    let result = (|| {
+        if desktop::detect()? == desktop::Desktop::X11 {
+            let (display, xid) = x11::source(&target)?;
+            return pipeline::record(
+                &pipeline::CaptureInput::X11 { display, xid },
+                &worker_session,
+                &settings,
+                &events,
+                receiver,
+                &stopped,
+                &*stopping,
+            );
         }
-    }
+        let runtime = portal::runtime()?;
+        runtime.block_on(async {
+            let capture =
+                Arc::new(portal::open(&target, settings.include_cursor, &mut stopped).await?);
+            let result = async {
+                let mut endings = capture.endings().await?;
+                let node_watch = portal::NodeWatch::start(capture.connect().await?).await;
+                if let portal::NodeWatch::Unavailable(reason) = &node_watch {
+                    let _ = completion_events.send(RecorderEvent::Log {
+                        session_id: Some(id),
+                        message: format!("capture-engine: removal of the screen-cast stream will not be detected: {reason}"),
+                    });
+                }
+                let ending_events = completion_events.clone();
+                let ending_stopping = stopping.clone();
+                let worker_capture = capture.clone();
+                let runtime = tokio::runtime::Handle::current();
+                let mut recording = tokio::task::spawn_blocking(move || {
+                    pipeline::record(
+                        &pipeline::CaptureInput::PipeWire(Box::new(move || {
+                            // Each retry needs a new protocol connection. Duplicating
+                            // an already-used socket does not reset its remote state.
+                            runtime.block_on(worker_capture.connect())
+                        })),
+                        &worker_session,
+                        &settings,
+                        &events,
+                        receiver,
+                        &stopped,
+                        &*stopping,
+                    )
+                });
+                let result = tokio::select! {
+                    result = &mut recording => result.map_err(backend)?,
+                    ending = endings.next() => {
+                        if matches!(ending, portal::Ending::Closed) {
+                            let _ = ending_events.send(RecorderEvent::Log {
+                                session_id: Some(id),
+                                message: "capture-engine: the desktop closed the screen-cast session; finalizing the recording".into(),
+                            });
+                            ending_stopping();
+                            let _ = worker_stop.send(true);
+                        }
+                        recording.await.map_err(backend)?
+                    }
+                };
+                drop(node_watch);
+                result
+            }
+            .await;
+            // Release the remote only after all native elements have stopped using its fd.
+            capture.close().await;
+            result
+        })
+    })();
+    let (success, status) = match result {
+        Ok(()) => (true, "recording finalized".to_string()),
+        Err(RecorderError::Cancelled) => {
+            let _ = completion_events.send(RecorderEvent::Cancelled { session_id: id });
+            return;
+        }
+        Err(error) => (false, error.to_string()),
+    };
+    let _ = completion_events.send(RecorderEvent::Exited {
+        session_id: id,
+        success,
+        status,
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn destruction_requests_stop_without_waiting_for_a_stuck_worker() {
-        let (events, _) = mpsc::channel();
-        let (commands, _) = mpsc::sync_channel(1);
-        let (stop, stopped) = watch::channel(false);
-        let (release, waiting) = mpsc::sync_channel::<()>(1);
-        let worker = thread::spawn(move || {
-            let _ = waiting.recv_timeout(Duration::from_secs(1));
-        });
-        let recorder = LinuxRecorder {
-            events,
-            active: Some(Active {
-                commands,
-                stop,
-                worker,
-            }),
-            stop_requested: false,
-        };
-        let at = std::time::Instant::now();
-        drop(recorder);
-        let elapsed = at.elapsed();
-        let _ = release.send(());
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "destructor waited {elapsed:?}"
-        );
-        assert!(*stopped.borrow());
-    }
 
     #[test]
     fn stop_before_start_preserves_cancellation() {
