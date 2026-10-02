@@ -34,6 +34,11 @@ fractional refresh rate below the request is rounded down. For example, a
 advertises a single fixed fractional maximum below the requested rate,
 instead of a range, cannot be negotiated.
 
+VA encoders set their initial keyframe interval to about two seconds at the
+negotiated capture rate, capped by the requested rate. A 5 fps capture gets
+an interval of 10 frames even when 60 fps was requested. Using the requested
+rate alone can stall older Radeon HEVC encoding at low capture rates.
+
 wrec tries shared GPU buffers only when `vapostproc` lists DMA-BUF caps with
 `format=DMA_DRM` and comes from GStreamer VA 1.24.6 or later. `DMA_DRM` caps
 carry the pixel format and modifier with an explicit `drm-format`. GStreamer VA
@@ -86,6 +91,14 @@ recordings on this stack do not establish reliable startup. wrec detects the
 backend loss and fails the job, but does not repair the portal. This remains
 an unresolved compatibility issue, separate from the fixes above.
 
+The older wlr-screencopy path also has a static-start limitation. The portal
+shares a screencopy-manager binding across sessions and asks for each new
+session's first frame with damage tracking. The first session consumes the
+binding's initial damage; later sessions on an unchanged output can wait
+without receiving an initial image. This was reproduced with portal-wlr 0.7.0,
+Sway 1.7 and wlroots 0.15.1. It remains unresolved; repainting or restarting
+the portal is not treated as a repair.
+
 The daemon does not run native capture code. For each recording it starts a
 capture worker, which is the same daemon executable started again with a private
 argument and the daemon's environment. The worker opens the X11 display or the
@@ -128,6 +141,10 @@ While recording, resource use is the daemon plus its worker. Measuring the
 daemon PID alone misses the capture pipeline. Find the worker with
 `pgrep -P <daemon pid> -x wrec-capture`, where the daemon PID comes from
 `wrec daemon status --json`, and add its CPU and RSS to the daemon's.
+
+Native cleanup between encoder attempts has its own 20-second kill/reap bound.
+Completing that cleanup clears only its attempt deadline; it does not clear a
+user-stop or final-exit deadline, or limit the next healthy recording.
 
 ## Install dependencies and build
 

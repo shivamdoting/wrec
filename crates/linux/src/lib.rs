@@ -133,7 +133,7 @@ pub(crate) fn capture(
     events: mpsc::Sender<RecorderEvent>,
     receiver: mpsc::Receiver<Command>,
     worker_stop: watch::Sender<bool>,
-    stopping: Arc<dyn Fn() + Send + Sync>,
+    stopping: Arc<dyn Fn(pipeline::Teardown) + Send + Sync>,
 ) {
     let mut stopped = worker_stop.subscribe();
     let id = session.id;
@@ -198,7 +198,7 @@ pub(crate) fn capture(
                                 session_id: Some(id),
                                 message: "capture-engine: the desktop closed the screen-cast session; finalizing the recording".into(),
                             });
-                            ending_stopping();
+                            ending_stopping(pipeline::Teardown::Recording);
                             let _ = worker_stop.send(true);
                         }
                         recording.await.map_err(backend)?

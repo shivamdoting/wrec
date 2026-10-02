@@ -175,11 +175,17 @@ pub(crate) enum CaptureInput {
     X11 { display: String, xid: u64 },
 }
 
+pub(crate) enum Teardown {
+    Recording,
+    AttemptStarted,
+    AttemptFinished,
+}
+
 struct Attempt<'a> {
     mode: Mode,
     counters: Arc<Counters>,
     last: bool,
-    stopping: &'a dyn Fn(),
+    stopping: &'a dyn Fn(Teardown),
 }
 
 fn finished(result: &Result<()>, counters: &Counters) -> bool {
@@ -198,7 +204,7 @@ pub(crate) fn record(
     events: &mpsc::Sender<RecorderEvent>,
     commands: mpsc::Receiver<Command>,
     stop: &watch::Receiver<bool>,
-    stopping: &dyn Fn(),
+    stopping: &dyn Fn(Teardown),
 ) -> Result<()> {
     if matches!(capture, CaptureInput::X11 { .. }) {
         crate::x11::initialize()?;
@@ -350,6 +356,9 @@ fn record_attempt(
         counters.clone(),
     );
     keep_source_configuration(&queue);
+    if mode.kind == encoding::Kind::Va {
+        match_keyframes_to_capture(&source, &encoder, settings.fps.as_u32());
+    }
     if rewrites_timestamps(mode, &encoder) {
         keep_capture_timestamps(&encoder, &parser);
     }
@@ -386,10 +395,16 @@ fn record_attempt(
             (None, None) => None,
         },
     );
-    if ends_recording(&result, &counters, attempt.last) {
-        (attempt.stopping)();
-    }
+    let ending = ends_recording(&result, &counters, attempt.last);
+    (attempt.stopping)(if ending {
+        Teardown::Recording
+    } else {
+        Teardown::AttemptStarted
+    });
     let _ = pipeline.0.set_state(gst::State::Null);
+    if !ending {
+        (attempt.stopping)(Teardown::AttemptFinished);
+    }
     if matches!(result, Err(RecorderError::Cancelled))
         || counters.frames.load(Ordering::Relaxed) == 0
     {
@@ -580,6 +595,35 @@ fn keep_source_configuration(queue: &gst::Element) {
                 gst::PadProbeReturn::Ok
             }
         });
+}
+
+fn keyframe_interval(caps: &gst::CapsRef, fps: u32) -> Option<u32> {
+    let structure = caps.structure(0)?;
+    let rate = structure
+        .get::<gst::Fraction>("max-framerate")
+        .or_else(|_| structure.get::<gst::Fraction>("framerate"))
+        .ok()?;
+    let (numerator, denominator) = (rate.numer(), rate.denom());
+    (numerator > 0 && denominator > 0).then(|| {
+        let frames = (2 * numerator as u64).div_ceil(denominator as u64);
+        frames.clamp(1, 2 * fps as u64) as u32
+    })
+}
+
+fn match_keyframes_to_capture(source: &gst::Element, encoder: &gst::Element, fps: u32) {
+    let encoder = encoder.clone();
+    source.static_pad("src").unwrap().add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_, info| match info.event().map(|event| event.view()) {
+            Some(gst::EventView::Caps(caps)) => {
+                if let Some(frames) = keyframe_interval(caps.caps(), fps) {
+                    encoder.set_property("key-int-max", frames);
+                }
+                gst::PadProbeReturn::Remove
+            }
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
 }
 
 fn attach_capture_probe(
@@ -944,6 +988,122 @@ mod tests {
         assert!(capture_caps(false, true, 60).can_intersect(&caps(
             "video/x-raw, format=BGRx, width=1280, height=720, framerate=0/1, max-framerate=60/1"
         )));
+    }
+
+    #[test]
+    fn keyframes_follow_the_negotiated_capture_rate_within_the_request() {
+        gst::init().unwrap();
+        let interval =
+            |caps: &str, fps| keyframe_interval(&caps.parse::<gst::Caps>().unwrap(), fps);
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=5/1", 60),
+            Some(10)
+        );
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=5/1", 30),
+            Some(10)
+        );
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=24/1", 30),
+            Some(48)
+        );
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=30/1", 30),
+            Some(60)
+        );
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=60/1", 60),
+            Some(120)
+        );
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=60000/1001", 60),
+            Some(120)
+        );
+        assert_eq!(
+            interval("video/x-raw, framerate=0/1, max-framerate=144/1", 60),
+            Some(120)
+        );
+        assert_eq!(interval("video/x-raw, framerate=30/1", 30), Some(60));
+        assert_eq!(interval("video/x-raw, framerate=60/1", 60), Some(120));
+        assert_eq!(interval("video/x-raw, framerate=0/1", 60), None);
+        assert_eq!(interval("video/x-raw", 60), None);
+    }
+
+    fn keyframes_from_va_encoder(factory: &'static str, match_capture: bool) -> (u32, usize) {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::parse::launch("videotestsrc name=source num-buffers=25 ! video/x-raw,width=320,height=180,framerate=5/1 ! vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! identity name=encoder-input ! fakesink name=sink").unwrap().downcast::<gst::Pipeline>().unwrap());
+        let mode = Mode {
+            kind: encoding::Kind::Va,
+            factory,
+            dmabuf: false,
+        };
+        let settings = RecorderSettings {
+            fps: domain::FrameRate::Fps60,
+            codec: if factory.contains("265") {
+                Codec::Hevc
+            } else {
+                Codec::H264
+            },
+            ..RecorderSettings::default()
+        };
+        let encoder = mode.encoder(&settings).unwrap();
+        let parser = element(parser_name(settings.codec)).unwrap();
+        let input = pipeline.0.by_name("encoder-input").unwrap();
+        let sink = pipeline.0.by_name("sink").unwrap();
+        input.unlink(&sink);
+        pipeline.0.add_many([&encoder, &parser]).unwrap();
+        gst::Element::link_many([&input, &encoder, &parser, &sink]).unwrap();
+        if match_capture {
+            match_keyframes_to_capture(&pipeline.0.by_name("source").unwrap(), &encoder, 60);
+        }
+        let keyframes = Arc::new(AtomicU64::new(0));
+        let counted = keyframes.clone();
+        sink.static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if info
+                    .buffer()
+                    .is_some_and(|buffer| !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT))
+                {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+                gst::PadProbeReturn::Ok
+            });
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        let message = pipeline
+            .0
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(20),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .unwrap();
+        assert!(
+            matches!(message.view(), gst::MessageView::Eos(_)),
+            "{message:?}"
+        );
+        (
+            encoder.property::<u32>("key-int-max"),
+            keyframes.load(Ordering::SeqCst) as usize,
+        )
+    }
+
+    #[test]
+    fn va_keyframes_are_two_seconds_apart_at_the_capture_rate() {
+        gst::init().unwrap();
+        for factory in ["vah264enc", "vah265enc"] {
+            if gst::ElementFactory::find(factory).is_none()
+                || gst::ElementFactory::find("vapostproc").is_none()
+            {
+                continue;
+            }
+            assert_eq!(
+                keyframes_from_va_encoder(factory, true),
+                (10, 3),
+                "{factory}"
+            );
+        }
     }
 
     #[test]

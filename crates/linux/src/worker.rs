@@ -45,6 +45,8 @@ enum Message {
     Event(RecorderEvent),
     Reply(Result<()>),
     Stopping,
+    CleaningAttempt,
+    CleanedAttempt,
 }
 
 type Received = std::result::Result<Message, String>;
@@ -227,6 +229,7 @@ impl Supervisor {
         let mut problem = None;
         let mut output_open = true;
         let mut exit_by: Option<Instant> = None;
+        let mut cleanup_by: Option<Instant> = None;
         let mut drained_by: Option<Instant> = None;
         let mut status: Option<ExitStatus> = None;
         loop {
@@ -254,6 +257,12 @@ impl Supervisor {
                 }
                 Ok(Ok(Message::Stopping)) => {
                     exit_by.get_or_insert(Instant::now() + self.deadline);
+                }
+                Ok(Ok(Message::CleaningAttempt)) => {
+                    cleanup_by = Some(Instant::now() + self.deadline);
+                }
+                Ok(Ok(Message::CleanedAttempt)) => {
+                    cleanup_by = None;
                 }
                 Ok(Err(error)) => {
                     problem = Some(format!("capture worker sent an invalid message ({error})"));
@@ -287,6 +296,16 @@ impl Supervisor {
                 if terminal.is_none() {
                     problem = Some(format!(
                         "capture worker did not exit within {}s",
+                        self.deadline.as_secs()
+                    ));
+                }
+                break;
+            } else if cleanup_by.is_some_and(|by| Instant::now() >= by) {
+                let _ = child.kill();
+                status = child.wait().ok();
+                if terminal.is_none() {
+                    problem = Some(format!(
+                        "capture worker did not finish stopping an encoder attempt within {}s",
                         self.deadline.as_secs()
                     ));
                 }
@@ -445,7 +464,16 @@ pub fn run() -> ! {
         control_stop.send_replace(true);
     });
     let stopping_output = output.clone();
-    let stopping = Arc::new(move || send(&stopping_output, &Message::Stopping));
+    let stopping = Arc::new(move |teardown: crate::pipeline::Teardown| {
+        send(
+            &stopping_output,
+            &match teardown {
+                crate::pipeline::Teardown::Recording => Message::Stopping,
+                crate::pipeline::Teardown::AttemptStarted => Message::CleaningAttempt,
+                crate::pipeline::Teardown::AttemptFinished => Message::CleanedAttempt,
+            },
+        )
+    });
     let forwarder = spawn("wrec-capture-events", move || {
         for event in outgoing {
             let finished = matches!(
@@ -755,6 +783,47 @@ mod tests {
             r#"read start; echo '{"Event":{"Started":{"session_id":0,"dimensions":null}}}'; echo '"Stopping"'; exec sleep 30"#,
         );
         let at = Instant::now();
+        let status = fake.failure();
+        assert!(at.elapsed() >= TEST_DEADLINE, "{:?}", at.elapsed());
+        assert!(at.elapsed() < Duration::from_secs(5), "{:?}", at.elapsed());
+        assert!(status.contains("did not exit within 1s"), "{status}");
+    }
+
+    #[test]
+    fn a_hung_teardown_between_encoder_attempts_is_killed_without_a_stop_request() {
+        let fake = Fake::start(r#"read start; echo '"CleaningAttempt"'; exec sleep 30"#);
+        let at = Instant::now();
+        let status = fake.failure();
+        assert!(at.elapsed() >= TEST_DEADLINE, "{:?}", at.elapsed());
+        assert!(at.elapsed() < Duration::from_secs(5), "{:?}", at.elapsed());
+        assert!(
+            status.contains("did not finish stopping an encoder attempt within 1s"),
+            "{status}"
+        );
+        assert!(status.contains("SIGKILL"), "{status}");
+    }
+
+    #[test]
+    fn a_finished_attempt_teardown_does_not_limit_the_next_attempt() {
+        let fake = Fake::start(
+            r#"read start; echo '"CleaningAttempt"'; echo '"CleanedAttempt"'; echo '{"Event":{"Started":{"session_id":0,"dimensions":null}}}'; sleep 3; echo '{"Event":{"Exited":{"session_id":0,"success":true,"status":"recording finalized"}}}'"#,
+        );
+        let at = Instant::now();
+        assert!(matches!(
+            fake.terminal(),
+            RecorderEvent::Exited { success: true, .. }
+        ));
+        assert!(at.elapsed() >= Duration::from_secs(3), "{:?}", at.elapsed());
+    }
+
+    #[test]
+    fn stopping_during_attempt_teardown_keeps_the_stop_deadline() {
+        let mut fake = Fake::start(
+            r#"read start; echo '"CleaningAttempt"'; read stop; sleep 0.5; echo '"CleanedAttempt"'; exec sleep 30"#,
+        );
+        thread::sleep(Duration::from_millis(300));
+        let at = Instant::now();
+        fake.worker().stop();
         let status = fake.failure();
         assert!(at.elapsed() >= TEST_DEADLINE, "{:?}", at.elapsed());
         assert!(at.elapsed() < Duration::from_secs(5), "{:?}", at.elapsed());
