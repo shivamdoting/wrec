@@ -1851,7 +1851,7 @@ mod tests {
         let copied = Instant::now();
         loop {
             std::fs::copy(&session.output_path, &partial).unwrap();
-            if last_packet_seconds(&partial).is_some_and(|last| last > changed)
+            if packet_span(&partial).is_some_and(|span| span >= changed - 1e-3)
                 || copied.elapsed() > Duration::from_secs(10)
             {
                 break;
@@ -1891,17 +1891,25 @@ mod tests {
         }
     }
 
-    fn last_packet_seconds(movie: &Path) -> Option<f64> {
+    // Seconds from the first video packet to the last one. Movie timestamps
+    // start at the pipeline's running time, not at zero.
+    fn packet_span(movie: &Path) -> Option<f64> {
         let output = std::process::Command::new("ffprobe")
             .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
             .args(["packet=pts_time", "-of", "csv=p=0"])
             .arg(movie)
             .output()
             .ok()?;
-        String::from_utf8_lossy(&output.stdout)
+        let times: Vec<f64> = String::from_utf8_lossy(&output.stdout)
             .lines()
-            .filter_map(|line| line.trim().parse::<f64>().ok())
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        let first = times.iter().copied().reduce(f64::min)?;
+        times
+            .iter()
+            .copied()
             .reduce(f64::max)
+            .map(|last| last - first)
     }
 
     fn video_packets(probe: &serde_json::Value) -> Vec<(f64, bool)> {
@@ -2010,10 +2018,10 @@ mod tests {
         }
         let partial = probe_movie(&recording.partial);
         let partial_packets = video_packets(&partial);
+        let span = partial_packets.last().unwrap().0 - partial_packets[0].0;
         assert!(
-            partial_packets.len() as u64 > rates[0] as u64 * phases[0].1,
-            "the partial movie holds {} frames, none after the rate change",
-            partial_packets.len()
+            span >= phases[0].1 as f64 - 1e-3,
+            "the partial movie ends {span}s in, before the first rate change"
         );
         assert_eq!(
             decoded_video_frames(&recording.partial),
