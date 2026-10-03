@@ -15,8 +15,17 @@ asks the allocator to return freed heap pages between encoder attempts.
 On compatible Wayland/VA-API systems, the preferred pipeline is
 `pipewiresrc → DMA-BUF → vapostproc → VA encoder → qtmux`. Rust manages sessions
 and buffer metadata without mapping video pixels. The source negotiates four to
-eight buffers and the video queue holds at most two frames. Conversion and scaling
+eight buffers and the capture queue holds at most two frames. Conversion and scaling
 can allocate GPU surfaces; this does not imply zero total copies.
+
+When audio is requested, encoded video waits until each audio track starts or
+ends. A track that never supplies a sample would otherwise make the whole movie
+unreadable. If waiting video reaches three seconds or 32 MiB, recording continues
+without the tracks that have not started and logs each omitted source. The startup
+queue has four seconds and 40 MiB of capacity. Once it drains, it holds at most one
+encoded frame. Audio that starts within the limit keeps its capture timestamp.
+Each encoded AAC queue holds up to four seconds, about 64 KB at 128 kbps, to absorb
+the movie writer's wait for the next video frame on an idle screen across a pause.
 
 When shared GPU buffers cannot be imported, wrec retries with system-memory
 capture and hardware encoding. NVIDIA uses CUDA conversion when available,
@@ -109,8 +118,9 @@ PipeWire's GStreamer source pauses and resumes during startup, so successful
 recordings on this stack do not establish reliable startup. wrec detects the
 backend loss and fails the job, but does not repair the portal. Stock builds
 remain affected. Separate local patches for portal-wlr 0.8.1 cancel pending
-captures when their buffers are returned or removed and restart capture when
-new buffers have no image on a static output. These patches are external to
+captures when their buffers are returned or removed, leave incomplete image
+buffers empty, and restart capture when new buffers have no image on a static
+output or a cancelled frame may have consumed its damage. These patches are external to
 wrec and require an opt-in build matched to the desktop's libraries.
 
 The older wlr-screencopy path also has a static-start limitation. The portal
@@ -312,6 +322,10 @@ cargo test -p linux node_watch --locked -- --ignored
 cargo build -p cli -p daemon
 python3 scripts/test-capture-linux.py target/debug/wrec
 ```
+
+The full test suite requires `x265enc` from the GStreamer runtime packages
+listed above. The HEVC latency regression fails if that encoder is absent,
+so a passing suite always includes it.
 
 The isolated Xvfb test records actual X11 display/window pixels through the CLI
 and daemon, checks H.264/HEVC decoding and timestamps, and exercises pause/resume

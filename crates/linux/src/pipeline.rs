@@ -13,7 +13,7 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicU8, Ordering},
         mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -353,18 +353,31 @@ fn record_attempt(
     sink.set_property("sync", false);
     let mut chain = vec![&source, &input, &queue];
     chain.extend(converters.iter());
-    chain.extend([&output, &encoder, &parser, &format, &mux, &sink]);
+    chain.extend([&output, &encoder, &parser, &format]);
     pipeline
         .0
         .add_many(chain.iter().copied())
         .map_err(backend)?;
+    pipeline.0.add_many([&mux, &sink]).map_err(backend)?;
     gst::Element::link_many(chain.iter().copied()).map_err(backend)?;
+    mux.link(&sink).map_err(backend)?;
     let counters = attempt.counters.clone();
+    let mut movie = Movie::new(
+        &pipeline.0,
+        &format,
+        &mux,
+        settings.include_system_audio || settings.include_microphone,
+    )?;
     if settings.include_system_audio {
-        add_audio(&pipeline.0, &mux, Some("@DEFAULT_MONITOR@"), &counters)?;
+        add_audio(
+            &mut movie,
+            Some("@DEFAULT_MONITOR@"),
+            "system audio",
+            &counters,
+        )?;
     }
     if settings.include_microphone {
-        add_audio(&pipeline.0, &mux, None, &counters)?;
+        add_audio(&mut movie, None, "microphone", &counters)?;
     }
     attach_capture_probe(
         &source,
@@ -385,7 +398,7 @@ fn record_attempt(
     let _ = events.send(RecorderEvent::Log {
         session_id: Some(session.id),
         message: format!(
-            "capture-engine: selected {}; video queue limited to 2 frames",
+            "capture-engine: selected {}; capture queue limited to 2 frames",
             mode.description()
         ),
     });
@@ -396,7 +409,7 @@ fn record_attempt(
         .open(&session.output_path)
         .map_err(backend)?;
     let result = run(
-        &pipeline.0,
+        &mut movie,
         session,
         events,
         commands,
@@ -547,10 +560,207 @@ fn keep_capture_timestamps(encoder: &gst::Element, parser: &gst::Element) {
         });
 }
 
+// Encoded video held while the movie waits for audio to start. Past either
+// limit, the movie starts without the audio tracks that have not delivered a
+// buffer. Paused time does not count, since no video arrives while paused.
+// Constant-QP output has no fixed bitrate, so bytes are bounded separately.
+const HELD_VIDEO_LIMIT: gst::ClockTime = gst::ClockTime::from_seconds(3);
+const HELD_VIDEO_BYTES: u32 = 32 << 20;
+const HELD_QUEUE: &str = "held-video-queue";
+
+const WAITING: u8 = 0;
+const STARTED: u8 = 1;
+const ENDED: u8 = 2;
+const OMITTED: u8 = 3;
+
+struct AudioTrack {
+    name: &'static str,
+    pad: gst::Pad,
+    probe: Option<gst::PadProbeId>,
+    state: Arc<AtomicU8>,
+}
+
+// The recording pipeline and the tracks of its movie. qtmux writes a track
+// for every pad requested from it, and a track that never received audio has
+// no sample description, which makes the whole movie unreadable. AAC encoders
+// only learn their format from their first input buffer, so audio pads are
+// requested once each track has delivered a buffer or ended without one.
+// Until then video waits in a queue instead of being dropped at capture.
+struct Movie {
+    pipeline: gst::Pipeline,
+    mux: gst::Element,
+    held: Option<(gst::Element, gst::PadProbeId)>,
+    draining: Option<gst::Element>,
+    audio: Vec<AudioTrack>,
+}
+
+impl Movie {
+    fn new(
+        pipeline: &gst::Pipeline,
+        video: &gst::Element,
+        mux: &gst::Element,
+        audio: bool,
+    ) -> Result<Self> {
+        let mut movie = Self {
+            pipeline: pipeline.clone(),
+            mux: mux.clone(),
+            held: None,
+            draining: None,
+            audio: Vec::new(),
+        };
+        let track = mux
+            .request_pad_simple("video_%u")
+            .ok_or_else(|| backend("the movie muxer refused a video track"))?;
+        if !audio {
+            video
+                .static_pad("src")
+                .unwrap()
+                .link(&track)
+                .map_err(backend)?;
+            return Ok(movie);
+        }
+        // Headroom past the limits covers the run loop's 100 ms polling, so
+        // held video is not pushed back to the capture queue before then.
+        let queue = element("queue")?;
+        queue.set_property("name", HELD_QUEUE);
+        queue.set_property(
+            "max-size-time",
+            (HELD_VIDEO_LIMIT + gst::ClockTime::SECOND).nseconds(),
+        );
+        queue.set_property("max-size-buffers", 0u32);
+        queue.set_property("max-size-bytes", HELD_VIDEO_BYTES + (8 << 20));
+        pipeline.add(&queue).map_err(backend)?;
+        video.link(&queue).map_err(backend)?;
+        queue
+            .static_pad("src")
+            .unwrap()
+            .link(&track)
+            .map_err(backend)?;
+        let probe = queue
+            .static_pad("src")
+            .unwrap()
+            .add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                |_, _| gst::PadProbeReturn::Ok,
+            )
+            .unwrap();
+        movie.held = Some((queue, probe));
+        Ok(movie)
+    }
+
+    fn add_audio(&mut self, name: &'static str, queue: &gst::Element) {
+        let pad = queue.static_pad("src").unwrap();
+        // Linking the track sends a reconfigure upstream. The encoder answers
+        // with an allocation query, which waits behind this queue while qtmux
+        // holds audio for the next video frame, and pulsesrc loses audio
+        // meanwhile. The audio caps are fixed, so nothing needs it.
+        pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_, info| {
+            if info
+                .event()
+                .is_some_and(|event| event.type_() == gst::EventType::Reconfigure)
+            {
+                gst::PadProbeReturn::Handled
+            } else {
+                gst::PadProbeReturn::Ok
+            }
+        });
+        let state = Arc::new(AtomicU8::new(WAITING));
+        let track = state.clone();
+        let probe = pad.add_probe(
+            gst::PadProbeType::BLOCK
+                | gst::PadProbeType::BUFFER
+                | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                let next = match &info.data {
+                    Some(gst::PadProbeData::Buffer(_)) => STARTED,
+                    Some(gst::PadProbeData::Event(event))
+                        if event.type_() == gst::EventType::Eos =>
+                    {
+                        ENDED
+                    }
+                    _ => return gst::PadProbeReturn::Pass,
+                };
+                let _ = track.compare_exchange(WAITING, next, Ordering::SeqCst, Ordering::SeqCst);
+                if next == ENDED {
+                    return gst::PadProbeReturn::Pass;
+                }
+                if track.load(Ordering::SeqCst) == OMITTED {
+                    gst::PadProbeReturn::Drop
+                } else {
+                    gst::PadProbeReturn::Ok
+                }
+            },
+        );
+        self.audio.push(AudioTrack {
+            name,
+            pad,
+            probe,
+            state,
+        });
+    }
+
+    // Called on every pass of the run loop. Requests the audio pads once every
+    // track has started or ended, or the held video reached its limit, then
+    // releases the video. Returns the omitted tracks, each with whether it
+    // ended before delivering audio.
+    fn link_audio(&mut self) -> Result<Vec<(&'static str, bool)>> {
+        if let Some(queue) = &self.draining {
+            // Once the video held at startup has reached qtmux, a stalled
+            // track holds video in qtmux and the capture queue drops frames,
+            // as without this queue. Limiting it earlier would block the
+            // encoder while the held video drains.
+            if queue.property::<u32>("current-level-buffers") <= 1 {
+                queue.set_property("max-size-time", 0u64);
+                queue.set_property("max-size-bytes", 0u32);
+                queue.set_property("max-size-buffers", 1u32);
+                self.draining = None;
+            }
+        }
+        let Some((queue, _)) = &self.held else {
+            return Ok(Vec::new());
+        };
+        let full = queue.property::<u64>("current-level-time") >= HELD_VIDEO_LIMIT.nseconds()
+            || queue.property::<u32>("current-level-bytes") >= HELD_VIDEO_BYTES;
+        if !full
+            && self
+                .audio
+                .iter()
+                .any(|track| track.state.load(Ordering::SeqCst) == WAITING)
+        {
+            return Ok(Vec::new());
+        }
+        let mut omitted = Vec::new();
+        for track in &mut self.audio {
+            let state = track.state.load(Ordering::SeqCst);
+            if state != STARTED
+                && track
+                    .state
+                    .compare_exchange(state, OMITTED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                omitted.push((track.name, state == ENDED));
+                continue;
+            }
+            let pad = self
+                .mux
+                .request_pad_simple("audio_%u")
+                .ok_or_else(|| backend("the movie muxer refused an audio track"))?;
+            track.pad.link(&pad).map_err(backend)?;
+            if let Some(probe) = track.probe.take() {
+                track.pad.remove_probe(probe);
+            }
+        }
+        let (queue, probe) = self.held.take().unwrap();
+        queue.static_pad("src").unwrap().remove_probe(probe);
+        self.draining = Some(queue);
+        Ok(omitted)
+    }
+}
+
 fn add_audio(
-    pipeline: &gst::Pipeline,
-    mux: &gst::Element,
+    movie: &mut Movie,
     device: Option<&str>,
+    name: &'static str,
     counters: &Arc<Counters>,
 ) -> Result<()> {
     let source = element("pulsesrc")?;
@@ -558,13 +768,13 @@ fn add_audio(
     if let Some(device) = device {
         source.set_property("device", device);
     }
-    add_audio_source(pipeline, mux, &source, counters)
+    add_audio_source(movie, &source, name, counters)
 }
 
 fn add_audio_source(
-    pipeline: &gst::Pipeline,
-    mux: &gst::Element,
+    movie: &mut Movie,
     source: &gst::Element,
+    name: &'static str,
     counters: &Arc<Counters>,
 ) -> Result<()> {
     attach_timing_probe(source, counters.clone());
@@ -582,15 +792,20 @@ fn add_audio_source(
     encoder.set_property("bitrate", 128000i32);
     let parser = element("aacparse")?;
     let queue = element("queue")?;
-    queue.set_property("max-size-time", 2_000_000_000u64);
+    // Holds audio while the movie waits for video, or for another audio
+    // track to start, which can take HELD_VIDEO_LIMIT.
+    queue.set_property(
+        "max-size-time",
+        (HELD_VIDEO_LIMIT + gst::ClockTime::SECOND).nseconds(),
+    );
     queue.set_property("max-size-buffers", 0u32);
     queue.set_property("max-size-bytes", 0u32);
     let chain = [
         source, &convert, &resample, &caps, &encoder, &parser, &queue,
     ];
-    pipeline.add_many(chain).map_err(backend)?;
+    movie.pipeline.add_many(chain).map_err(backend)?;
     gst::Element::link_many(chain).map_err(backend)?;
-    queue.link(mux).map_err(backend)?;
+    movie.add_audio(name, &queue);
     Ok(())
 }
 
@@ -853,7 +1068,7 @@ const SOURCE_LOST: &str =
     "The captured X11 window closed, was minimized, or became unavailable; the recording stopped.";
 
 fn run(
-    pipeline: &gst::Pipeline,
+    movie: &mut Movie,
     session: &RecordingSession,
     events: &mpsc::Sender<RecorderEvent>,
     commands: &mpsc::Receiver<Command>,
@@ -861,6 +1076,7 @@ fn run(
     counters: &Counters,
     source_lost: &dyn Fn() -> Option<&'static str>,
 ) -> Result<()> {
+    let pipeline = &movie.pipeline.clone();
     pipeline
         .set_state(gst::State::Playing)
         .map_err(|error| state_error(pipeline, error))?;
@@ -935,6 +1151,23 @@ fn run(
                 }
                 _ => {}
             }
+        }
+        for (name, ended) in movie.link_audio()? {
+            let _ = events.send(RecorderEvent::Log {
+                session_id: Some(session.id),
+                message: format!(
+                    "capture-engine: {name} sent no samples {}; the movie has no {name} track",
+                    if ended {
+                        "before the recording stopped".to_string()
+                    } else {
+                        format!(
+                            "while {} seconds or {} MiB of video waited for it",
+                            HELD_VIDEO_LIMIT.seconds(),
+                            HELD_VIDEO_BYTES >> 20
+                        )
+                    }
+                ),
+            });
         }
         if !started && counters.frames.load(Ordering::Relaxed) > 0 {
             started = true;
@@ -1250,14 +1483,31 @@ mod tests {
             };
             // Synthetic software encoding is confined to tests. Exercise the same
             // bus/control/mux code without pretending this is a hardware benchmark.
-            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! video/x-raw,width=320,height=180,framerate=30/1 ! openh264enc name=encoder ! h264parse name=parser")
+            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! capsfilter name=capture caps=video/x-raw,width=320,height=180,framerate=30/1 openh264enc name=encoder ! h264parse name=parser")
                 .unwrap().downcast::<gst::Pipeline>().unwrap();
+            // Like production, frames the encoder cannot take are dropped
+            // before encoding instead of stalling capture.
+            let queue = video_queue().unwrap();
+            pipeline.add(&queue).unwrap();
+            gst::Element::link_many([
+                &pipeline.by_name("capture").unwrap(),
+                &queue,
+                &pipeline.by_name("encoder").unwrap(),
+            ])
+            .unwrap();
             let mux = movie_mux().unwrap();
             let sink = element("filesink").unwrap();
             sink.set_property("sync", false);
             sink.set_property("location", session.output_path.to_str().unwrap());
             pipeline.add_many([&mux, &sink]).unwrap();
-            gst::Element::link_many([&pipeline.by_name("parser").unwrap(), &mux, &sink]).unwrap();
+            mux.link(&sink).unwrap();
+            let mut movie = Movie::new(
+                &pipeline,
+                &pipeline.by_name("parser").unwrap(),
+                &mux,
+                !audio_delays.is_empty(),
+            )
+            .unwrap();
             let counters = Arc::new(Counters::default());
             attach_timing_probe(&pipeline.by_name("video").unwrap(), counters.clone());
             let encoder = pipeline.by_name("encoder").unwrap();
@@ -1275,7 +1525,7 @@ mod tests {
                         _ => gst::PadProbeReturn::Ok,
                     },
                 );
-                add_audio_source(&pipeline, &mux, &source, &counters).unwrap();
+                add_audio_source(&mut movie, &source, "test audio", &counters).unwrap();
             }
             attach_encoded_probe(&pipeline.by_name("parser").unwrap(), counters.clone());
             let (events_tx, events) = mpsc::channel();
@@ -1287,9 +1537,9 @@ mod tests {
             let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let worker_lost = lost.clone();
             let worker = std::thread::spawn(move || {
-                let guard = PipelineGuard(worker_pipeline);
+                let _guard = PipelineGuard(worker_pipeline);
                 run(
-                    &guard.0,
+                    &mut movie,
                     &worker_session,
                     &events_tx,
                     &commands_rx,
@@ -1345,6 +1595,26 @@ mod tests {
 
         fn probe(&self) -> serde_json::Value {
             probe_movie(&self.session.output_path)
+        }
+
+        fn logs(&self) -> Vec<String> {
+            self.events
+                .try_iter()
+                .filter_map(|event| match event {
+                    RecorderEvent::Log { message, .. } => Some(message),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn active_seconds(&self) -> f64 {
+            self.counters
+                .timeline
+                .lock()
+                .unwrap()
+                .position(self.pipeline.current_running_time().unwrap())
+                .nseconds() as f64
+                / 1_000_000_000.0
         }
     }
 
@@ -1477,11 +1747,40 @@ mod tests {
             .collect()
     }
 
+    // The largest gap between packets of a stream up to the given time.
+    fn largest_gap(probe: &serde_json::Value, kind: &str, until: f64) -> f64 {
+        let index = probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["codec_type"] == kind)
+            .unwrap()["index"]
+            .clone();
+        let mut pts: Vec<f64> = probe["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|packet| packet["stream_index"] == index)
+            .map(|packet| packet["pts_time"].as_str().unwrap().parse().unwrap())
+            .filter(|pts| *pts <= until)
+            .collect();
+        pts.sort_by(f64::total_cmp);
+        pts.windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .fold(0.0, f64::max)
+    }
+
     fn assert_late_audio_keeps_its_offset(movie: &Path, probe: &serde_json::Value, delay: f64) {
         let video = start_seconds(probe, "h264");
         let audio = start_seconds(probe, "aac");
         assert_eq!((video.len(), audio.len()), (1, 2), "{}", movie.display());
         let (prompt, late) = (audio[0], audio[1]);
+        let gap = largest_gap(probe, "video", late + 0.5);
+        assert!(
+            gap < 0.1,
+            "{}: video skips {gap}s while waiting for late audio",
+            movie.display()
+        );
         assert!(
             (late - prompt - delay).abs() < 0.05,
             "{}: audio starts {prompt}s and {late}s, expected {delay}s apart",
@@ -1673,6 +1972,273 @@ mod tests {
                 .parse::<f64>()
                 .unwrap()
                 > 0.4
+        );
+    }
+
+    fn stream_counts(probe: &serde_json::Value) -> (usize, usize) {
+        let streams = probe["streams"].as_array().unwrap();
+        let count = |codec| streams.iter().filter(|s| s["codec_name"] == codec).count();
+        (count("h264"), count("aac"))
+    }
+
+    #[test]
+    fn stopping_before_audio_arrives_keeps_the_captured_video() {
+        let never = gst::ClockTime::MAX;
+        for (delays, paused) in [
+            (vec![never], false),
+            (vec![never], true),
+            (vec![gst::ClockTime::ZERO, never], false),
+            (vec![gst::ClockTime::ZERO, never], true),
+        ] {
+            let case = format!("audio delays {delays:?}, paused {paused}");
+            let mut recording = TestRecording::start_with_audio_delays(&delays);
+            std::thread::sleep(Duration::from_millis(800));
+            if paused {
+                recording.control(true);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            let active = recording.active_seconds();
+            recording.finish().unwrap();
+            let probe = recording.probe();
+            assert_eq!(stream_counts(&probe), (1, delays.len() - 1), "{case}");
+            let gap = largest_gap(&probe, "video", f64::INFINITY);
+            assert!(gap < 0.1, "{case}: video skips {gap}s");
+            let duration = end_seconds(&probe, "h264");
+            assert!(
+                (duration - active).abs() < 0.2,
+                "{case}: video ends at {duration}s after {active}s of active recording"
+            );
+            let logs = recording.logs();
+            assert!(
+                logs.iter().any(|log| log.contains(
+                    "test audio sent no samples before the recording stopped; the movie has no test audio track"
+                )),
+                "{case}: {logs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn late_audio_keeps_flowing_while_the_screen_is_idle() {
+        let mut recording =
+            TestRecording::start_with_audio_delays(&[gst::ClockTime::from_seconds(1)]);
+        // An idle screen sends no frames, so when the late track is linked
+        // qtmux holds its audio until the next frame arrives.
+        let idle = gst::ClockTime::from_mseconds(500)..gst::ClockTime::from_mseconds(2200);
+        recording
+            .pipeline
+            .by_name("video")
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                match info.buffer().and_then(|buffer| buffer.pts()) {
+                    Some(pts) if idle.contains(&pts) => gst::PadProbeReturn::Drop,
+                    _ => gst::PadProbeReturn::Ok,
+                }
+            });
+        let wait_until = |milliseconds| {
+            while recording.pipeline.current_running_time().unwrap()
+                < gst::ClockTime::from_mseconds(milliseconds)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // Audio that arrives while paused is dropped, so audio stuck behind
+        // qtmux before the pause would leave a hole.
+        wait_until(2000);
+        recording.control(true);
+        wait_until(2500);
+        recording.control(false);
+        wait_until(3500);
+        recording.finish().unwrap();
+        let probe = recording.probe();
+        assert_eq!(stream_counts(&probe), (1, 1));
+        let gap = largest_gap(&probe, "audio", f64::INFINITY);
+        assert!(gap < 0.1, "audio skips {gap}s");
+        let (video, audio) = (end_seconds(&probe, "h264"), end_seconds(&probe, "aac"));
+        assert!(
+            (video - audio).abs() < 0.15,
+            "video ends at {video}s, audio at {audio}s"
+        );
+    }
+
+    #[test]
+    fn a_static_screen_paused_before_audio_arrives_still_finalizes() {
+        let mut recording = TestRecording::start_with_audio_delays(&[gst::ClockTime::MAX]);
+        // A static screen sends no more frames, so the held video stops
+        // growing and only the audio track's end releases it.
+        recording
+            .pipeline
+            .by_name("video")
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+                match info.buffer().map(|buffer| buffer.offset()) {
+                    Some(0) => gst::PadProbeReturn::Ok,
+                    _ => gst::PadProbeReturn::Drop,
+                }
+            });
+        std::thread::sleep(Duration::from_millis(300));
+        let held = recording.pipeline.by_name(HELD_QUEUE).unwrap();
+        let level = held.property::<u64>("current-level-time");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(held.property::<u64>("current-level-time"), level);
+        recording.control(true);
+        std::thread::sleep(Duration::from_millis(500));
+        recording.finish().unwrap();
+        let probe = recording.probe();
+        assert_eq!(stream_counts(&probe), (1, 0));
+        let logs = recording.logs();
+        assert!(
+            logs.iter()
+                .any(|log| log.contains("test audio sent no samples before the recording stopped")),
+            "{logs:?}"
+        );
+    }
+
+    #[test]
+    fn a_stalled_audio_track_does_not_build_up_encoded_video() {
+        let mut recording = TestRecording::start(1);
+        let stall = gst::ClockTime::from_mseconds(1000)..gst::ClockTime::from_mseconds(2500);
+        recording
+            .pipeline
+            .iterate_elements()
+            .into_iter()
+            .filter_map(|element| element.ok())
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|f| f.name() == "audiotestsrc")
+            })
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                match info.buffer().and_then(|buffer| buffer.pts()) {
+                    Some(pts) if stall.contains(&pts) => gst::PadProbeReturn::Drop,
+                    _ => gst::PadProbeReturn::Ok,
+                }
+            });
+        let held = recording.pipeline.by_name(HELD_QUEUE).unwrap();
+        let mut most = 0;
+        loop {
+            let now = recording.pipeline.current_running_time().unwrap();
+            if now >= gst::ClockTime::from_mseconds(3000) {
+                break;
+            }
+            // From the stall on; the video held at startup drains before it.
+            if now >= gst::ClockTime::from_mseconds(1100) {
+                most = most.max(held.property::<u32>("current-level-buffers"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        recording.finish().unwrap();
+        recording.probe();
+        assert!(most <= 1, "{most} encoded frames waited for stalled audio");
+    }
+
+    #[test]
+    fn held_video_is_bounded_in_bytes_as_well_as_time() {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::Pipeline::new());
+        let video = element("appsrc").unwrap();
+        video.set_property_from_str("format", "time");
+        video.set_property(
+            "caps",
+            gst::Caps::builder("video/x-h264")
+                .field("stream-format", "avc3")
+                .field("alignment", "au")
+                .field("width", 320i32)
+                .field("height", 180i32)
+                .field("framerate", gst::Fraction::new(0, 1))
+                .build(),
+        );
+        let mux = movie_mux().unwrap();
+        let sink = element("fakesink").unwrap();
+        let silent = element("queue").unwrap();
+        pipeline.0.add_many([&video, &mux, &sink, &silent]).unwrap();
+        mux.link(&sink).unwrap();
+        let mut movie = Movie::new(&pipeline.0, &video, &mux, true).unwrap();
+        movie.add_audio("test audio", &silent);
+        let held = pipeline.0.by_name(HELD_QUEUE).unwrap();
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        // Large constant-QP frames 10 ms apart reach the byte limit long
+        // before the time limit.
+        let frame = 1 << 20;
+        for index in 0..64u64 {
+            let pts = gst::ClockTime::from_mseconds(10 * index);
+            let mut buffer = gst::Buffer::from_mut_slice(vec![0u8; frame]);
+            buffer.get_mut().unwrap().set_pts(pts);
+            let before = held.property::<u32>("current-level-bytes");
+            assert_eq!(
+                video.emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer]),
+                gst::FlowReturn::Ok
+            );
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while index > 0
+                && held.property::<u32>("current-level-bytes") == before
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let level = held.property::<u32>("current-level-bytes");
+            let omitted = movie.link_audio().unwrap();
+            if !omitted.is_empty() {
+                assert_eq!(omitted, vec![("test audio", false)]);
+                assert!(
+                    (HELD_VIDEO_BYTES..=HELD_VIDEO_BYTES + (8 << 20)).contains(&level),
+                    "left out at {level} held bytes"
+                );
+                assert!(pts < HELD_VIDEO_LIMIT, "left out at {pts}");
+                return;
+            }
+        }
+        panic!(
+            "held {} bytes without leaving out the silent track; {:?}",
+            held.property::<u32>("current-level-bytes"),
+            pipeline
+                .0
+                .bus()
+                .unwrap()
+                .pop_filtered(&[gst::MessageType::Error])
+        );
+    }
+
+    #[test]
+    fn audio_that_never_starts_is_left_out_without_dropping_video() {
+        let mut recording = TestRecording::start_with_audio_delays(&[gst::ClockTime::MAX]);
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let omitted = loop {
+            match recording
+                .events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(RecorderEvent::Log { message, .. }) if message.contains("sent no samples") => {
+                    break Some((message, recording.active_seconds()))
+                }
+                Ok(_) => {}
+                Err(_) => break None,
+            }
+        };
+        let (message, at) = omitted.expect("the recording never left out the silent audio track");
+        assert!(
+            message.contains("while 3 seconds or 32 MiB of video waited for it"),
+            "{message}"
+        );
+        assert!((3.0..3.5).contains(&at), "left out after {at}s");
+        std::thread::sleep(Duration::from_millis(500));
+        let active = recording.active_seconds();
+        recording.finish().unwrap();
+        let probe = recording.probe();
+        assert_eq!(stream_counts(&probe), (1, 0));
+        let gap = largest_gap(&probe, "video", f64::INFINITY);
+        assert!(gap < 0.1, "video skips {gap}s");
+        let duration = end_seconds(&probe, "h264");
+        assert!(
+            (duration - active).abs() < 0.2,
+            "video ends at {duration}s after {active}s of active recording"
         );
     }
 
@@ -2340,8 +2906,13 @@ mod tests {
 
     #[test]
     fn source_loss_fails_active_and_paused_recordings_promptly() {
-        for paused in [false, true] {
-            let mut recording = TestRecording::start(1);
+        // The last case loses the source while video waits for audio.
+        for (paused, audio) in [
+            (false, gst::ClockTime::ZERO),
+            (true, gst::ClockTime::ZERO),
+            (false, gst::ClockTime::MAX),
+        ] {
+            let mut recording = TestRecording::start_with_audio_delays(&[audio]);
             std::thread::sleep(Duration::from_millis(300));
             if paused {
                 recording.control(true);
