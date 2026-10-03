@@ -107,8 +107,11 @@ fn movie_mux() -> Result<gst::Element> {
     Ok(mux)
 }
 
+const CAPTURE_QUEUE: &str = "capture-queue";
+
 fn video_queue() -> Result<gst::Element> {
     let queue = element("queue")?;
+    queue.set_property("name", CAPTURE_QUEUE);
     queue.set_property("max-size-buffers", 2u32);
     queue.set_property("max-size-bytes", 0u32);
     queue.set_property("max-size-time", 0u64);
@@ -127,6 +130,8 @@ impl Drop for PipelineGuard {
 struct Counters {
     frames: AtomicU64,
     dropped: AtomicU64,
+    queued: AtomicU64,
+    dequeued: AtomicU64,
     dimensions: Mutex<Option<CaptureDimensions>>,
     last_pts: Mutex<Option<gst::ClockTime>>,
     timeline: Mutex<Timeline>,
@@ -335,7 +340,7 @@ fn record_attempt(
     let encoder = mode.encoder(&settings)?;
     let parser = element(parser_name(settings.codec))?;
     parser.set_property("config-interval", -1i32);
-    let format = movie_format(settings.codec)?;
+    let format = movie_format(settings.codec, settings.fps.as_u32())?;
     let mux = movie_mux()?;
     let sink = element("filesink")?;
     sink.set_property(
@@ -376,12 +381,7 @@ fn record_attempt(
         keep_capture_timestamps(&encoder, &parser);
     }
     attach_encoded_probe(&parser, counters.clone());
-    // One overrun accompanies each incoming frame that replaces the oldest frame.
-    let dropped = counters.clone();
-    queue.connect("overrun", false, move |_| {
-        dropped.dropped.fetch_add(1, Ordering::Relaxed);
-        None
-    });
+    count_dropped(&queue, counters.clone());
     let _ = events.send(RecorderEvent::Log {
         session_id: Some(session.id),
         message: format!(
@@ -421,6 +421,40 @@ fn record_attempt(
         let _ = std::fs::remove_file(&session.output_path);
     }
     result
+}
+
+// The queue emits "overrun" before it rechecks its level, so the encoder can
+// take a frame meanwhile and nothing is discarded. Count the frames entering
+// and leaving the queue instead; buffers are not modified, since PipeWire
+// reuses a frame's memory once its source buffer is released.
+fn count_dropped(queue: &gst::Element, counters: Arc<Counters>) {
+    let entering = counters.clone();
+    queue
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            entering.queued.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+    queue
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            counters.dequeued.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+}
+
+// Frames rejected at capture plus frames the queue discarded: those that
+// entered it, never left, and are not waiting in it. Exact once the queue is
+// empty; while frames flow, a frame in transit can shift it by one.
+fn dropped_frames(pipeline: &gst::Pipeline, counters: &Counters) -> u64 {
+    let waiting = pipeline.by_name(CAPTURE_QUEUE).map_or(0, |queue| {
+        queue.property::<u32>("current-level-buffers") as u64
+    });
+    let dequeued = counters.dequeued.load(Ordering::Relaxed);
+    let queued = counters.queued.load(Ordering::Relaxed);
+    counters.dropped.load(Ordering::Relaxed) + queued.saturating_sub(dequeued + waiting)
 }
 
 fn attach_encoded_probe(parser: &gst::Element, counters: Arc<Counters>) {
@@ -607,14 +641,18 @@ fn keep_source_configuration(queue: &gst::Element) {
         });
 }
 
-fn keyframe_interval(caps: &gst::CapsRef, fps: u32) -> u32 {
-    let rate = caps.structure(0).and_then(|structure| {
+// A fixed frame rate, else the maximum of a variable-rate stream.
+fn capture_rate(caps: &gst::CapsRef) -> Option<gst::Fraction> {
+    caps.structure(0).and_then(|structure| {
         ["framerate", "max-framerate"]
             .into_iter()
             .filter_map(|field| structure.get::<gst::Fraction>(field).ok())
             .find(|rate| rate.numer() > 0 && rate.denom() > 0)
-    });
-    let frames = rate.map_or(2 * fps as u64, |rate| {
+    })
+}
+
+fn keyframe_interval(caps: &gst::CapsRef, fps: u32) -> u32 {
+    let frames = capture_rate(caps).map_or(2 * fps as u64, |rate| {
         (2 * rate.numer() as u64).div_ceil(rate.denom() as u64)
     });
     frames.clamp(1, 2 * fps as u64) as u32
@@ -643,7 +681,7 @@ fn match_keyframes_to_capture(encoder: &gst::Element, fps: u32) {
 // sets. qtmux stores those as an extra sample description, which a fragmented
 // movie cannot reference, so the movie keeps its first description and every
 // keyframe carries its own parameter sets (avc3/hev1).
-fn movie_format(codec: Codec) -> Result<gst::Element> {
+fn movie_format(codec: Codec, fps: u32) -> Result<gst::Element> {
     let format = element("capsfilter")?;
     format.set_property(
         "caps",
@@ -654,14 +692,34 @@ fn movie_format(codec: Codec) -> Result<gst::Element> {
         .field("alignment", "au")
         .build(),
     );
+    // qtmux times each sample by the next one and takes the last sample's
+    // duration from its buffer. Some encoders (x265enc 1.24) leave it unset
+    // for variable-rate capture, and players skip a zero-length last frame,
+    // so a frame without one lasts a frame at the current capture rate, or at
+    // the requested rate when the caps carry none.
+    let requested = gst::ClockTime::SECOND / fps as u64;
     let first = Mutex::new(None::<gst::Event>);
+    let frame = Mutex::new(requested);
     format.static_pad("src").unwrap().add_probe(
-        gst::PadProbeType::EVENT_DOWNSTREAM,
+        gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::BUFFER,
         move |_, info| {
-            if let Some(gst::PadProbeData::Event(event)) = &mut info.data {
-                if event.type_() == gst::EventType::Caps {
-                    *event = first.lock().unwrap().get_or_insert(event.clone()).clone();
+            match &mut info.data {
+                Some(gst::PadProbeData::Event(event)) => {
+                    if let gst::EventView::Caps(caps) = event.view() {
+                        *frame.lock().unwrap() = capture_rate(caps.caps())
+                            .and_then(|rate| {
+                                gst::ClockTime::SECOND
+                                    .mul_div_floor(rate.denom() as u64, rate.numer() as u64)
+                            })
+                            .unwrap_or(requested);
+                        *event = first.lock().unwrap().get_or_insert(event.clone()).clone();
+                    }
                 }
+                Some(gst::PadProbeData::Buffer(buffer)) if buffer.duration().is_none() => {
+                    let duration = *frame.lock().unwrap();
+                    buffer.make_mut().set_duration(duration);
+                }
+                _ => {}
             }
             gst::PadProbeReturn::Ok
         },
@@ -924,7 +982,7 @@ fn emit_metrics(
                 0.0
             },
             frames: Some(counters.frames.load(Ordering::Relaxed)),
-            dropped_frames: Some(counters.dropped.load(Ordering::Relaxed)),
+            dropped_frames: Some(dropped_frames(pipeline, counters)),
         },
     });
 }
@@ -2006,6 +2064,17 @@ mod tests {
             phase_start = phase_end;
         }
         assert!(remaining.next().is_none(), "packets after the last phase");
+        let last_frame = 1.0 / phases.last().unwrap().0 as f64;
+        let span = packets.last().unwrap().0 - first + last_frame;
+        let duration: f64 = probe["streams"][0]["duration"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (duration - span).abs() < 1e-3,
+            "the movie lasts {duration}s, but its last frame ends at {span}s"
+        );
         for probe in [&probe, &probe_movie(&recording.partial)] {
             assert_eq!(
                 probe["streams"][0]["codec_tag_string"],
@@ -2048,6 +2117,211 @@ mod tests {
     fn hevc_recordings_survive_capture_rate_changes() {
         assert_rate_changes_stay_playable(Codec::Hevc, "hevc", &RISING);
         assert_rate_changes_stay_playable(Codec::Hevc, "hevc", &FALLING);
+    }
+
+    // Rust heap bytes allocated and not yet freed by each thread. GStreamer
+    // buffers come from GLib and are not counted.
+    struct CountingAllocator;
+
+    thread_local! {
+        static LIVE_BYTES: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    }
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = LIVE_BYTES.try_with(|live| live.set(live.get() + layout.size() as isize));
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+            let _ = LIVE_BYTES.try_with(|live| live.set(live.get() - layout.size() as isize));
+            unsafe { std::alloc::System.dealloc(pointer, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    struct QueueDrops {
+        dropped: u64,
+        dropped_while_stuck: u64,
+        delivered: u64,
+        heap_growth: isize,
+    }
+
+    // Pushes frames straight into the capture queue while every frame leaving
+    // it waits for a permit, then reports the frames dropped and delivered and
+    // the heap the pushing thread kept while the consumer was stuck.
+    fn queue_drops(permit_during_overrun: bool, frames: u64) -> QueueDrops {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::Pipeline::new());
+        let queue = video_queue().unwrap();
+        let sink = element("fakesink").unwrap();
+        sink.set_property("sync", false);
+        pipeline.0.add_many([&queue, &sink]).unwrap();
+        queue.link(&sink).unwrap();
+        let counters = Arc::new(Counters::default());
+        count_dropped(&queue, counters.clone());
+        let (permits, permitted) = mpsc::channel::<()>();
+        let permitted = Mutex::new(permitted);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let counted = delivered.clone();
+        queue
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                let _ = permitted.lock().unwrap().recv();
+                if let Some(buffer) = info.buffer() {
+                    counted.lock().unwrap().push((
+                        buffer.as_ptr() as usize,
+                        buffer.flags().contains(gst::BufferFlags::DISCONT),
+                    ));
+                }
+                gst::PadProbeReturn::Ok
+            });
+        if permit_during_overrun {
+            let permits = Mutex::new(permits.clone());
+            queue.connect("overrun", false, move |values| {
+                let queue = values[0].get::<gst::Element>().unwrap();
+                permits.lock().unwrap().send(()).unwrap();
+                while queue.property::<u32>("current-level-buffers") >= 2 {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                None
+            });
+        }
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        let input = queue.static_pad("sink").unwrap();
+        input.send_event(gst::event::StreamStart::new("queue-drops"));
+        input.send_event(gst::event::Caps::new(&variable_rate(60)));
+        input.send_event(gst::event::Segment::new(&gst::FormattedSegment::<
+            gst::ClockTime,
+        >::new()));
+        // Keep a reference to every frame, as pipewiresrc keeps its last one,
+        // so a counter that wrote to a frame would have to copy it. The queue
+        // itself copies only the frame after a discard, to mark it DISCONT.
+        let mut sent = Vec::with_capacity(frames as usize);
+        let heap = LIVE_BYTES.with(|live| live.get());
+        for frame in 0..frames {
+            let mut buffer = gst::Buffer::new();
+            buffer
+                .get_mut()
+                .unwrap()
+                .set_pts(gst::ClockTime::from_mseconds(frame * 10));
+            sent.push(buffer.clone());
+            assert_eq!(input.chain(buffer), Ok(gst::FlowSuccess::Ok));
+            if permit_during_overrun || frame == 0 {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let heap_growth = LIVE_BYTES.with(|live| live.get()) - heap;
+        let dropped_while_stuck = dropped_frames(&pipeline.0, &counters);
+        for _ in 0..frames {
+            let _ = permits.send(());
+        }
+        input.send_event(gst::event::Eos::new());
+        pipeline
+            .0
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(5), &[gst::MessageType::Eos])
+            .unwrap();
+        let sent: std::collections::HashSet<usize> =
+            sent.iter().map(|buffer| buffer.as_ptr() as usize).collect();
+        let delivered = delivered.lock().unwrap();
+        assert!(
+            delivered
+                .iter()
+                .all(|(buffer, discont)| *discont || sent.contains(buffer)),
+            "the queue delivered a copy of a captured frame"
+        );
+        QueueDrops {
+            dropped: dropped_frames(&pipeline.0, &counters),
+            dropped_while_stuck,
+            delivered: delivered.len() as u64,
+            heap_growth,
+        }
+    }
+
+    #[test]
+    fn dropped_frames_count_only_frames_the_queue_discards() {
+        let raced = queue_drops(true, 6);
+        assert_eq!((raced.dropped, raced.delivered), (0, 6));
+        let leaked = queue_drops(false, 6);
+        assert_eq!((leaked.dropped, leaked.delivered), (3, 3));
+    }
+
+    #[test]
+    fn a_stuck_encoder_does_not_grow_drop_counting() {
+        let stuck = queue_drops(false, 2000);
+        assert_eq!(stuck.dropped_while_stuck, 1997);
+        assert_eq!((stuck.dropped, stuck.delivered), (1997, 3));
+        assert!(
+            stuck.heap_growth < 4096,
+            "counting kept {} bytes for 1997 dropped frames",
+            stuck.heap_growth
+        );
+    }
+
+    // Durations the movie receives for encoded frames that arrive with
+    // `duration` under each of the given encoder caps.
+    fn movie_durations(
+        caps: &[&str],
+        duration: Option<gst::ClockTime>,
+    ) -> Vec<Option<gst::ClockTime>> {
+        gst::init().unwrap();
+        let pipeline = PipelineGuard(gst::Pipeline::new());
+        let format = movie_format(Codec::H264, 60).unwrap();
+        let sink = element("fakesink").unwrap();
+        pipeline.0.add_many([&format, &sink]).unwrap();
+        format.link(&sink).unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recorded = received.clone();
+        sink.static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(info.buffer().and_then(|buffer| buffer.duration()));
+                gst::PadProbeReturn::Ok
+            });
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        let input = format.static_pad("sink").unwrap();
+        input.send_event(gst::event::StreamStart::new("movie-durations"));
+        for (index, caps) in caps.iter().enumerate() {
+            input.send_event(gst::event::Caps::new(&caps.parse::<gst::Caps>().unwrap()));
+            if index == 0 {
+                input.send_event(gst::event::Segment::new(&gst::FormattedSegment::<
+                    gst::ClockTime,
+                >::new()));
+            }
+            let mut buffer = gst::Buffer::new();
+            buffer.get_mut().unwrap().set_duration(duration);
+            assert_eq!(input.chain(buffer), Ok(gst::FlowSuccess::Ok));
+        }
+        let received = received.lock().unwrap().clone();
+        received
+    }
+
+    #[test]
+    fn frames_without_a_duration_last_one_frame_at_the_capture_rate() {
+        let encoded = "video/x-h264, stream-format=avc3, alignment=au, width=320, height=180";
+        let rated = |rate: &str| format!("{encoded}, framerate=0/1, max-framerate={rate}");
+        let frame = |rate: u64| Some(gst::ClockTime::SECOND / rate);
+        assert_eq!(
+            movie_durations(&[&rated("5/1"), &rated("60/1"), encoded], None),
+            [frame(5), frame(60), frame(60)]
+        );
+        assert_eq!(
+            movie_durations(&[&format!("{encoded}, framerate=30/1"), encoded], None),
+            [frame(30), frame(60)]
+        );
+        let kept = gst::ClockTime::from_mseconds(7);
+        assert_eq!(
+            movie_durations(&[&rated("5/1"), encoded], Some(kept)),
+            [Some(kept), Some(kept)]
+        );
     }
 
     #[test]
