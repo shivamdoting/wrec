@@ -7,6 +7,7 @@ members = [
   "crates/domain",
   "crates/daemon",
   "crates/macos",
+  "crates/linux",
   "crates/xtask",
 ]
 resolver = "2"

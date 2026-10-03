@@ -10,7 +10,7 @@ use control::{
     daemon_log_path, now_ms, socket_path, wrec_home, AgentError, AgentWarning, EventLevel,
     JobStatus, RecordingOptions, StartRecordingParams, PROTOCOL_VERSION,
 };
-use domain::{CaptureTarget, RecorderEngine, RecorderEvent};
+use domain::{CaptureTarget, RecorderEngine, RecorderError, RecorderEvent};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -53,6 +53,40 @@ impl<R: RecordingRuntime> Coordinator<R> {
         lock_state(state)
             .map(|state| state.shutdown_requested)
             .unwrap_or(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stop_for_shutdown(state: &SharedCoordinator<R>) {
+        let control = {
+            let Ok(mut state) = lock_state(state) else {
+                return;
+            };
+            state.shutdown_requested = true;
+            while let Some(id) = state.queue.pop_front() {
+                if let Some(job) = state.jobs.get_mut(&id) {
+                    job.mark_cancelled();
+                }
+            }
+            state
+                .active_job_id
+                .and_then(|id| state.jobs.get_mut(&id))
+                .and_then(|job| {
+                    job.mark_finishing();
+                    job.control.clone()
+                })
+        };
+        if let Some(control) = control {
+            if let Ok(mut engine) = control.lock() {
+                let _ = engine.stop();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn capture_active(state: &SharedCoordinator<R>) -> bool {
+        lock_state(state)
+            .map(|state| state.active_job_id.is_some())
+            .unwrap_or(false)
     }
 
     pub(crate) fn status(&self) -> Value {
@@ -142,8 +176,8 @@ impl<R: RecordingRuntime> Coordinator<R> {
         let (job, should_launch) = {
             let config = load_config();
             let overrides = recording_overrides(&params.options);
-            let (settings, warning) = build_settings_report(&config.settings, &overrides);
-            let warnings = warning
+            let (mut settings, warning) = build_settings_report(&config.settings, &overrides);
+            let mut warnings = warning
                 .map(|message| AgentWarning {
                     code: "preset_limited".into(),
                     message,
@@ -151,6 +185,9 @@ impl<R: RecordingRuntime> Coordinator<R> {
                 })
                 .into_iter()
                 .collect::<Vec<_>>();
+            lock_state(&state)?
+                .runtime
+                .prepare_settings(&mut settings, &mut warnings);
             let targets = list_targets_with_cache(&state, true)?;
             let target = resolve_record_target(
                 &targets,
@@ -531,22 +568,32 @@ fn run_job<R: RecordingRuntime>(
     };
     if let Err(err) = start_result {
         drain_recorder_events(&state, job_id, &rx);
+        if matches!(err, RecorderError::Cancelled) {
+            if let Ok(mut state) = lock_state(&state) {
+                if let Some(job) = state.jobs.get_mut(&job_id) {
+                    job.mark_cancelled();
+                }
+                if state.active_job_id == Some(job_id) {
+                    state.active_job_id = None;
+                }
+            }
+            notify_job_changed();
+            return;
+        }
         finish_job_failed(&state, job_id, format!("recording failed to start: {err}"));
         return;
     }
 
-    if let Ok(mut state) = lock_state(&state) {
-        if let Some(job) = state.jobs.get_mut(&job_id) {
-            job.mark_recording();
-        }
-    }
-    notify_job_changed();
-
-    let started = Instant::now();
+    // A portal can wait for user selection after start() returns. Only the
+    // engine's Started event means frames are flowing and duration can begin.
+    let mut started = None;
     let mut duration_stop_requested = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(event) => {
+                if matches!(event, RecorderEvent::Started { .. }) && started.is_none() {
+                    started = Some(Instant::now());
+                }
                 let done = handle_recorder_event(&state, job_id, event);
                 if done {
                     break;
@@ -559,7 +606,7 @@ fn run_job<R: RecordingRuntime>(
             }
         }
 
-        if let Some(duration_ms) = duration_ms {
+        if let (Some(duration_ms), Some(started)) = (duration_ms, started) {
             if !duration_stop_requested && started.elapsed() >= Duration::from_millis(duration_ms) {
                 duration_stop_requested = true;
                 append_job_message(
@@ -614,6 +661,14 @@ fn handle_recorder_event<R: RecordingRuntime>(
     }
 
     let done = match backend_event {
+        BackendEvent::Cancelled => {
+            job.output_path = None;
+            job.mark_cancelled();
+            if active_matches {
+                state.active_job_id = None;
+            }
+            true
+        }
         BackendEvent::Starting { output_path, .. } => {
             job.output_path = Some(output_path.clone());
             job.push_event(
@@ -623,6 +678,9 @@ fn handle_recorder_event<R: RecordingRuntime>(
             false
         }
         BackendEvent::Started => {
+            if job.status == JobStatus::Starting {
+                job.mark_recording();
+            }
             job.push_event(EventLevel::Info, "recording started".to_string());
             false
         }
@@ -647,7 +705,11 @@ fn handle_recorder_event<R: RecordingRuntime>(
             output_path,
             ..
         } => {
-            job.output_path = output_path.or_else(|| job.output_path.clone());
+            job.output_path = output_path.or_else(|| {
+                job.output_path
+                    .clone()
+                    .filter(|path| success || path.is_file())
+            });
             if success {
                 job.mark_completed(format!("capture engine exited: {status}"));
             } else {
@@ -659,7 +721,7 @@ fn handle_recorder_event<R: RecordingRuntime>(
             true
         }
     };
-    if done {
+    if done || matches!(event, RecorderEvent::Started { .. }) {
         drop(state);
         notify_job_changed();
     }
@@ -818,6 +880,7 @@ fn target_list_lock() -> &'static Mutex<()> {
 /// payload: observers just re-query `wrec jobs`/`job show`, so a stale or
 /// coalesced delivery is harmless.
 fn notify_job_changed() {
+    #[cfg(target_os = "macos")]
     macos::post_distributed_notification(&Channel::current().notification_name("job-changed"));
 }
 
@@ -883,6 +946,76 @@ mod tests {
     use crate::test_support::{env_lock, isolate_env, FakeRuntime};
     use control::{JobSnapshot, RecordingOptions, TargetSelector};
     use domain::{CaptureSourceKind, PermissionStatus};
+
+    #[test]
+    fn duration_waits_for_capture_readiness() {
+        let _guard = env_lock();
+        isolate_env();
+        let runtime = FakeRuntime::new();
+        runtime
+            .start_gate
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let state = Arc::new(Mutex::new(Coordinator::new(runtime.clone())));
+        let value = Coordinator::record_start(
+            state.clone(),
+            StartRecordingParams {
+                selector: Some(TargetSelector::Id {
+                    kind: CaptureSourceKind::Display,
+                    id: 1,
+                }),
+                options: RecordingOptions::default(),
+                duration_ms: Some(100),
+                queue: true,
+            },
+        )
+        .unwrap();
+        let id = value["job"]["id"].as_u64().unwrap();
+        wait_for_status(&state, id, JobStatus::Starting);
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(job_status(&state, id), JobStatus::Starting);
+        runtime
+            .start_gate
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        wait_for_status(&state, id, JobStatus::Recording);
+        wait_for_status(&state, id, JobStatus::Completed);
+    }
+
+    #[test]
+    fn pending_source_selection_can_be_stopped() {
+        let _guard = env_lock();
+        isolate_env();
+        let runtime = FakeRuntime::new();
+        runtime
+            .start_gate
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let state = Arc::new(Mutex::new(Coordinator::new(runtime)));
+        let id = start_job(state.clone()).id;
+        wait_for_status(&state, id, JobStatus::Starting);
+        // Wait for the asynchronous Starting event, so the fake owns its session.
+        for _ in 0..50 {
+            if lock_state(&state).unwrap().jobs[&id].output_path.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Coordinator::job_stop(state.clone(), id).unwrap();
+        wait_for_status(&state, id, JobStatus::Cancelled);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shutdown_finishes_capture_and_cancels_queued_jobs() {
+        let _guard = env_lock();
+        isolate_env();
+        let state = Arc::new(Mutex::new(Coordinator::new(FakeRuntime::new())));
+        let active = start_job(state.clone()).id;
+        wait_for_status(&state, active, JobStatus::Recording);
+        let queued = start_job(state.clone()).id;
+        Coordinator::stop_for_shutdown(&state);
+        wait_for_status(&state, active, JobStatus::Completed);
+        assert_eq!(job_status(&state, queued), JobStatus::Cancelled);
+        assert!(Coordinator::shutdown_requested(&state));
+    }
 
     #[test]
     fn queued_job_launches_after_active_job_stops() {
