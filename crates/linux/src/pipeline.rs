@@ -109,6 +109,10 @@ fn movie_mux() -> Result<gst::Element> {
 
 const CAPTURE_QUEUE: &str = "capture-queue";
 
+// pipewiresrc resends the last frame after this long without a new one, so an
+// idle screen still sends a frame each keepalive.
+const KEEPALIVE: gst::ClockTime = gst::ClockTime::SECOND;
+
 fn video_queue() -> Result<gst::Element> {
     let queue = element("queue")?;
     queue.set_property("name", CAPTURE_QUEUE);
@@ -308,7 +312,7 @@ fn record_attempt(
             source.set_property("always-copy", false);
             source.set_property("min-buffers", 4i32);
             source.set_property("max-buffers", 8i32);
-            source.set_property("keepalive-time", 1000i32);
+            source.set_property("keepalive-time", KEEPALIVE.mseconds() as i32);
             source.set_property("resend-last", true);
             source
         }
@@ -793,10 +797,13 @@ fn add_audio_source(
     let parser = element("aacparse")?;
     let queue = element("queue")?;
     // Holds audio while the movie waits for video, or for another audio
-    // track to start, which can take HELD_VIDEO_LIMIT.
+    // track to start, which can take HELD_VIDEO_LIMIT. qtmux writes a video
+    // frame only when the next one arrives and holds later audio until then,
+    // so at an idle screen's keepalive rate audio waits up to two keepalives,
+    // and a pause that swallows a frame makes it almost three.
     queue.set_property(
         "max-size-time",
-        (HELD_VIDEO_LIMIT + gst::ClockTime::SECOND).nseconds(),
+        (HELD_VIDEO_LIMIT.max(KEEPALIVE * 3) + gst::ClockTime::SECOND).nseconds(),
     );
     queue.set_property("max-size-buffers", 0u32);
     queue.set_property("max-size-bytes", 0u32);
@@ -1473,6 +1480,28 @@ mod tests {
         }
 
         fn start_with(audio_delays: &[gst::ClockTime], counting_encoder: bool) -> Self {
+            Self::start_from(
+                "videotestsrc name=video is-live=true pattern=ball ! capsfilter name=capture caps=video/x-raw,width=320,height=180,framerate=30/1",
+                audio_delays,
+                counting_encoder,
+            )
+        }
+
+        // An idle screen: one frame per keepalive, stamped on arrival, and
+        // no source latency, like pipewiresrc.
+        fn start_idle(audio_tracks: usize) -> Self {
+            Self::start_from(
+                "appsrc name=video is-live=true format=time do-timestamp=true caps=video/x-raw,format=I420,width=320,height=180,framerate=0/1 ! capsfilter name=capture caps=video/x-raw,format=I420,width=320,height=180,framerate=0/1",
+                &vec![gst::ClockTime::ZERO; audio_tracks],
+                false,
+            )
+        }
+
+        fn start_from(
+            video: &str,
+            audio_delays: &[gst::ClockTime],
+            counting_encoder: bool,
+        ) -> Self {
             gst::init().unwrap();
             static ID: AtomicU64 = AtomicU64::new(0);
             let id = ID.fetch_add(1, Ordering::Relaxed);
@@ -1483,8 +1512,12 @@ mod tests {
             };
             // Synthetic software encoding is confined to tests. Exercise the same
             // bus/control/mux code without pretending this is a hardware benchmark.
-            let pipeline = gst::parse::launch("videotestsrc name=video is-live=true pattern=ball ! capsfilter name=capture caps=video/x-raw,width=320,height=180,framerate=30/1 openh264enc name=encoder ! h264parse name=parser")
-                .unwrap().downcast::<gst::Pipeline>().unwrap();
+            let pipeline = gst::parse::launch(&format!(
+                "{video} openh264enc name=encoder ! h264parse name=parser"
+            ))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
             // Like production, frames the encoder cannot take are dropped
             // before encoding instead of stalling capture.
             let queue = video_queue().unwrap();
@@ -1509,7 +1542,22 @@ mod tests {
             )
             .unwrap();
             let counters = Arc::new(Counters::default());
-            attach_timing_probe(&pipeline.by_name("video").unwrap(), counters.clone());
+            let video = pipeline.by_name("video").unwrap();
+            attach_timing_probe(&video, counters.clone());
+            if video
+                .factory()
+                .is_some_and(|factory| factory.name() == "appsrc")
+            {
+                std::thread::spawn(move || loop {
+                    let frame = gst::Buffer::from_mut_slice(vec![0u8; 320 * 180 * 3 / 2]);
+                    if video.emit_by_name::<gst::FlowReturn>("push-buffer", &[&frame])
+                        != gst::FlowReturn::Ok
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_nanos(KEEPALIVE.nseconds()));
+                });
+            }
             let encoder = pipeline.by_name("encoder").unwrap();
             if counting_encoder {
                 count_frames_like_old_va_encoders(&pipeline.by_name("video").unwrap(), &encoder);
@@ -2274,6 +2322,63 @@ mod tests {
             (duration - active_duration).abs() < 0.2,
             "movie duration {duration}, active timeline {active_duration}"
         );
+    }
+
+    // An idle screen sends a frame each keepalive. A short pause that swallows
+    // one leaves almost two keepalives between the frames around it, and qtmux
+    // holds audio until the frame after those. The audio queue must absorb
+    // that wait: a full queue blocks pulsesrc, which then drops audio.
+    #[test]
+    fn audio_waiting_for_idle_video_across_a_pause_never_fills_its_queue() {
+        let mut recording = TestRecording::start_idle(2);
+        let full = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for queue in recording.pipeline.iterate_elements().into_iter().flatten() {
+            let audio = queue
+                .factory()
+                .is_some_and(|factory| factory.name() == "queue")
+                && ![CAPTURE_QUEUE, HELD_QUEUE].contains(&queue.name().as_str());
+            if audio {
+                let full = full.clone();
+                queue.connect("overrun", false, move |_| {
+                    full.store(true, Ordering::SeqCst);
+                    None
+                });
+            }
+        }
+        let arrived = Arc::new(AtomicU64::new(0));
+        let latest = arrived.clone();
+        let pipeline = recording.pipeline.clone();
+        recording
+            .pipeline
+            .by_name("video")
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                let now = pipeline.current_running_time().unwrap_or_default();
+                latest.store(now.nseconds(), Ordering::SeqCst);
+                gst::PadProbeReturn::Ok
+            });
+        let keepalive = Duration::from_nanos(KEEPALIVE.nseconds());
+        for _ in 0..2 {
+            // Pause three quarters of a keepalive after a frame and resume a
+            // quarter after the next one, the worst case short of no pause.
+            let frame = arrived.load(Ordering::SeqCst);
+            while arrived.load(Ordering::SeqCst) == frame {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(keepalive * 3 / 4);
+            recording.control(true);
+            std::thread::sleep(keepalive / 2);
+            recording.control(false);
+            std::thread::sleep(keepalive * 3);
+        }
+        recording.finish().unwrap();
+        assert!(
+            !full.load(Ordering::SeqCst),
+            "audio queue filled while qtmux waited for idle video"
+        );
+        recording.probe();
     }
 
     fn test_session() -> RecordingSession {
