@@ -2364,7 +2364,9 @@ mod tests {
             // Pause three quarters of a keepalive after a frame and resume a
             // quarter after the next one, the worst case short of no pause.
             let frame = arrived.load(Ordering::SeqCst);
+            let waiting = Instant::now();
             while arrived.load(Ordering::SeqCst) == frame {
+                assert!(waiting.elapsed() < keepalive * 3, "idle video stopped");
                 std::thread::sleep(Duration::from_millis(5));
             }
             std::thread::sleep(keepalive * 3 / 4);
