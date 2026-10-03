@@ -207,7 +207,10 @@ impl Mode {
                     encoder.set_property_from_str("speed-preset", "ultrafast");
                     encoder.set_property_from_str("tune", "zerolatency");
                     encoder.set_property("qp", qp as i32);
-                    encoder.set_property("option-string", "pools=2:frame-threads=2");
+                    // A second frame thread keeps each frame until the next one
+                    // arrives, a second later on an idle screen. A third worker
+                    // maintains throughput without keeping a second frame.
+                    encoder.set_property("option-string", "pools=3:frame-threads=1");
                     encoder.set_property("key-int-max", settings.fps.as_u32() as i32 * 2);
                 }
                 "openh264enc" => {
@@ -259,5 +262,58 @@ mod tests {
         let modes = modes_with(Codec::H264, false, |name| name == "openh264enc");
         assert_eq!(modes.len(), 1);
         assert_eq!(modes[0].kind, Kind::Software);
+    }
+
+    // An idle screen sends about one frame a second. The movie muxer holds
+    // audio until video reaches it, so an encoder that keeps a frame until the
+    // next one arrives backs audio up for seconds.
+    #[test]
+    fn software_encoders_emit_each_frame_before_the_next_arrives() {
+        gst::init().unwrap();
+        let mut tested = Vec::new();
+        for codec in [Codec::H264, Codec::Hevc] {
+            for mode in modes(codec, false) {
+                if mode.kind != Kind::Software {
+                    continue;
+                }
+                let pipeline = gst::Pipeline::new();
+                let source = element("appsrc").unwrap();
+                source.set_property("is-live", true);
+                source.set_property_from_str("format", "time");
+                source.set_property(
+                    "caps",
+                    gst::Caps::builder("video/x-raw")
+                        .field("format", "I420")
+                        .field("width", 320i32)
+                        .field("height", 180i32)
+                        .field("framerate", gst::Fraction::new(0, 1))
+                        .field("max-framerate", gst::Fraction::new(60, 1))
+                        .build(),
+                );
+                let encoder = mode.encoder(&RecorderSettings::default()).unwrap();
+                let sink = element("fakesink").unwrap();
+                sink.set_property("sync", false);
+                pipeline.add_many([&source, &encoder, &sink]).unwrap();
+                gst::Element::link_many([&source, &encoder, &sink]).unwrap();
+                let (encoded, received) = std::sync::mpsc::channel();
+                encoder.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::BUFFER,
+                    move |_, _| {
+                        let _ = encoded.send(());
+                        gst::PadProbeReturn::Ok
+                    },
+                );
+                pipeline.set_state(gst::State::Playing).unwrap();
+                let mut frame = gst::Buffer::from_mut_slice(vec![0u8; 320 * 180 * 3 / 2]);
+                frame.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+                let pushed = source.emit_by_name::<gst::FlowReturn>("push-buffer", &[&frame]);
+                assert_eq!(pushed, gst::FlowReturn::Ok);
+                let emitted = received.recv_timeout(std::time::Duration::from_secs(1));
+                pipeline.set_state(gst::State::Null).unwrap();
+                assert!(emitted.is_ok(), "{} kept a lone frame", mode.factory);
+                tested.push(mode.factory);
+            }
+        }
+        assert!(tested.contains(&"x265enc"), "tested only {tested:?}");
     }
 }
