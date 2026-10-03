@@ -1468,6 +1468,8 @@ mod tests {
         worker: Option<std::thread::JoinHandle<Result<()>>>,
         counters: Arc<Counters>,
         lost: Arc<std::sync::atomic::AtomicBool>,
+        // When run() returned, before the pipeline was set to NULL.
+        returned: Arc<Mutex<Option<Instant>>>,
     }
 
     impl TestRecording {
@@ -1584,9 +1586,11 @@ mod tests {
             let worker_counters = counters.clone();
             let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let worker_lost = lost.clone();
+            let returned = Arc::new(Mutex::new(None));
+            let worker_returned = returned.clone();
             let worker = std::thread::spawn(move || {
                 let _guard = PipelineGuard(worker_pipeline);
-                run(
+                let result = run(
                     &mut movie,
                     &worker_session,
                     &events_tx,
@@ -1598,7 +1602,9 @@ mod tests {
                             .load(Ordering::SeqCst)
                             .then_some(crate::portal::PIPEWIRE_LOST)
                     },
-                )
+                );
+                *worker_returned.lock().unwrap() = Some(Instant::now());
+                result
             });
             let recording = Self {
                 pipeline,
@@ -1609,6 +1615,7 @@ mod tests {
                 worker: Some(worker),
                 counters,
                 lost,
+                returned,
             };
             loop {
                 if matches!(
@@ -3033,7 +3040,14 @@ mod tests {
                 .join()
                 .unwrap()
                 .unwrap_err();
-            assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+            let finished = at.elapsed();
+            let returned = recording.returned.lock().unwrap().unwrap() - at;
+            assert!(
+                finished < Duration::from_secs(1),
+                "paused {paused}, waiting for audio {}: run returned after {returned:?}, \
+                 the worker finished after {finished:?}",
+                audio == gst::ClockTime::MAX
+            );
             assert_eq!(
                 error.to_string(),
                 format!("backend error: {}", crate::portal::PIPEWIRE_LOST)
