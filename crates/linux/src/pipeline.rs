@@ -172,9 +172,15 @@ impl Timeline {
 
 pub(crate) enum CaptureInput {
     PipeWire(Box<dyn Fn() -> Result<PipeWireStream> + Send>),
-    X11 { display: String, xid: u64 },
+    X11 {
+        display: String,
+        xid: u64,
+    },
+    #[cfg(test)]
+    Element(Box<dyn Fn() -> gst::Element + Send>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Teardown {
     Recording,
     AttemptStarted,
@@ -235,6 +241,9 @@ pub(crate) fn record(
             capture, session, settings, events, &commands, stop, &attempt,
         );
         release_freed_memory();
+        if !ends_recording(&result, &attempt.counters, attempt.last) {
+            stopping(Teardown::AttemptFinished);
+        }
         if finished(&result, &attempt.counters) {
             return result;
         }
@@ -276,7 +285,7 @@ fn record_attempt(
     let settings = settings.clone().with_preset_limits();
     let stream = match capture {
         CaptureInput::PipeWire(connect) => Some(connect()?),
-        CaptureInput::X11 { .. } => None,
+        _ => None,
     };
     let source_watch = match capture {
         CaptureInput::X11 { xid, .. } if *xid != 0 => Some(crate::x11::SourceWatch::new(*xid)?),
@@ -306,6 +315,8 @@ fn record_attempt(
             source.set_property("use-damage", true);
             source
         }
+        #[cfg(test)]
+        CaptureInput::Element(source) => source(),
     };
     source.set_property("do-timestamp", true);
     let input = element("capsfilter")?;
@@ -313,7 +324,7 @@ fn record_attempt(
         "caps",
         capture_caps(
             mode.dmabuf,
-            matches!(capture, CaptureInput::PipeWire(_)),
+            !matches!(capture, CaptureInput::X11 { .. }),
             settings.fps.as_u32(),
         ),
     );
@@ -323,6 +334,8 @@ fn record_attempt(
     output.set_property("caps", mode.caps(None));
     let encoder = mode.encoder(&settings)?;
     let parser = element(parser_name(settings.codec))?;
+    parser.set_property("config-interval", -1i32);
+    let format = movie_format(settings.codec)?;
     let mux = movie_mux()?;
     let sink = element("filesink")?;
     sink.set_property(
@@ -335,7 +348,7 @@ fn record_attempt(
     sink.set_property("sync", false);
     let mut chain = vec![&source, &input, &queue];
     chain.extend(converters.iter());
-    chain.extend([&output, &encoder, &parser, &mux, &sink]);
+    chain.extend([&output, &encoder, &parser, &format, &mux, &sink]);
     pipeline
         .0
         .add_many(chain.iter().copied())
@@ -357,7 +370,7 @@ fn record_attempt(
     );
     keep_source_configuration(&queue);
     if mode.kind == encoding::Kind::Va {
-        match_keyframes_to_capture(&source, &encoder, settings.fps.as_u32());
+        match_keyframes_to_capture(&encoder, settings.fps.as_u32());
     }
     if rewrites_timestamps(mode, &encoder) {
         keep_capture_timestamps(&encoder, &parser);
@@ -402,9 +415,6 @@ fn record_attempt(
         Teardown::AttemptStarted
     });
     let _ = pipeline.0.set_state(gst::State::Null);
-    if !ending {
-        (attempt.stopping)(Teardown::AttemptFinished);
-    }
     if matches!(result, Err(RecorderError::Cancelled))
         || counters.frames.load(Ordering::Relaxed) == 0
     {
@@ -597,33 +607,66 @@ fn keep_source_configuration(queue: &gst::Element) {
         });
 }
 
-fn keyframe_interval(caps: &gst::CapsRef, fps: u32) -> Option<u32> {
-    let structure = caps.structure(0)?;
-    let rate = structure
-        .get::<gst::Fraction>("max-framerate")
-        .or_else(|_| structure.get::<gst::Fraction>("framerate"))
-        .ok()?;
-    let (numerator, denominator) = (rate.numer(), rate.denom());
-    (numerator > 0 && denominator > 0).then(|| {
-        let frames = (2 * numerator as u64).div_ceil(denominator as u64);
-        frames.clamp(1, 2 * fps as u64) as u32
-    })
+fn keyframe_interval(caps: &gst::CapsRef, fps: u32) -> u32 {
+    let rate = caps.structure(0).and_then(|structure| {
+        ["framerate", "max-framerate"]
+            .into_iter()
+            .filter_map(|field| structure.get::<gst::Fraction>(field).ok())
+            .find(|rate| rate.numer() > 0 && rate.denom() > 0)
+    });
+    let frames = rate.map_or(2 * fps as u64, |rate| {
+        (2 * rate.numer() as u64).div_ceil(rate.denom() as u64)
+    });
+    frames.clamp(1, 2 * fps as u64) as u32
 }
 
-fn match_keyframes_to_capture(source: &gst::Element, encoder: &gst::Element, fps: u32) {
-    let encoder = encoder.clone();
-    source.static_pad("src").unwrap().add_probe(
+// VA encoders read key-int-max only when new caps reconfigure them, so set it
+// as each CAPS event enters the encoder, after every frame of the old rate.
+fn match_keyframes_to_capture(encoder: &gst::Element, fps: u32) {
+    encoder.static_pad("sink").unwrap().add_probe(
         gst::PadProbeType::EVENT_DOWNSTREAM,
-        move |_, info| match info.event().map(|event| event.view()) {
-            Some(gst::EventView::Caps(caps)) => {
-                if let Some(frames) = keyframe_interval(caps.caps(), fps) {
+        move |pad, info| {
+            if let (Some(gst::EventView::Caps(caps)), Some(encoder)) =
+                (info.event().map(|event| event.view()), pad.parent_element())
+            {
+                let frames = keyframe_interval(caps.caps(), fps);
+                if encoder.property::<u32>("key-int-max") != frames {
                     encoder.set_property("key-int-max", frames);
                 }
-                gst::PadProbeReturn::Remove
             }
-            _ => gst::PadProbeReturn::Ok,
+            gst::PadProbeReturn::Ok
         },
     );
+}
+
+// A capture rate change reconfigures the encoder, which writes new parameter
+// sets. qtmux stores those as an extra sample description, which a fragmented
+// movie cannot reference, so the movie keeps its first description and every
+// keyframe carries its own parameter sets (avc3/hev1).
+fn movie_format(codec: Codec) -> Result<gst::Element> {
+    let format = element("capsfilter")?;
+    format.set_property(
+        "caps",
+        match codec {
+            Codec::H264 => gst::Caps::builder("video/x-h264").field("stream-format", "avc3"),
+            Codec::Hevc => gst::Caps::builder("video/x-h265").field("stream-format", "hev1"),
+        }
+        .field("alignment", "au")
+        .build(),
+    );
+    let first = Mutex::new(None::<gst::Event>);
+    format.static_pad("src").unwrap().add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_, info| {
+            if let Some(gst::PadProbeData::Event(event)) = &mut info.data {
+                if event.type_() == gst::EventType::Caps {
+                    *event = first.lock().unwrap().get_or_insert(event.clone()).clone();
+                }
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
+    Ok(format)
 }
 
 fn attach_capture_probe(
@@ -997,36 +1040,40 @@ mod tests {
             |caps: &str, fps| keyframe_interval(&caps.parse::<gst::Caps>().unwrap(), fps);
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=5/1", 60),
-            Some(10)
+            10
         );
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=5/1", 30),
-            Some(10)
+            10
         );
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=24/1", 30),
-            Some(48)
+            48
         );
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=30/1", 30),
-            Some(60)
+            60
         );
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=60/1", 60),
-            Some(120)
+            120
         );
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=60000/1001", 60),
-            Some(120)
+            120
         );
         assert_eq!(
             interval("video/x-raw, framerate=0/1, max-framerate=144/1", 60),
-            Some(120)
+            120
         );
-        assert_eq!(interval("video/x-raw, framerate=30/1", 30), Some(60));
-        assert_eq!(interval("video/x-raw, framerate=60/1", 60), Some(120));
-        assert_eq!(interval("video/x-raw, framerate=0/1", 60), None);
-        assert_eq!(interval("video/x-raw", 60), None);
+        assert_eq!(interval("video/x-raw, framerate=30/1", 30), 60);
+        assert_eq!(interval("video/x-raw, framerate=60/1", 60), 120);
+        assert_eq!(
+            interval("video/x-raw, framerate=24/1, max-framerate=60/1", 60),
+            48
+        );
+        assert_eq!(interval("video/x-raw, framerate=0/1", 60), 120);
+        assert_eq!(interval("video/x-raw", 30), 60);
     }
 
     fn keyframes_from_va_encoder(factory: &'static str, match_capture: bool) -> (u32, usize) {
@@ -1054,7 +1101,7 @@ mod tests {
         pipeline.0.add_many([&encoder, &parser]).unwrap();
         gst::Element::link_many([&input, &encoder, &parser, &sink]).unwrap();
         if match_capture {
-            match_keyframes_to_capture(&pipeline.0.by_name("source").unwrap(), &encoder, 60);
+            match_keyframes_to_capture(&encoder, 60);
         }
         let keyframes = Arc::new(AtomicU64::new(0));
         let counted = keyframes.clone();
@@ -1603,6 +1650,396 @@ mod tests {
             (duration - active_duration).abs() < 0.2,
             "movie duration {duration}, active timeline {active_duration}"
         );
+    }
+
+    fn test_session() -> RecordingSession {
+        static ID: AtomicU64 = AtomicU64::new(0);
+        let id = ID.fetch_add(1, Ordering::Relaxed);
+        RecordingSession {
+            id,
+            output_path: std::env::temp_dir().join(format!(
+                "wrec-linux-record-test-{}-{id}.mov",
+                std::process::id()
+            )),
+        }
+    }
+
+    fn silent_settings(codec: Codec) -> RecorderSettings {
+        RecorderSettings {
+            fps: domain::FrameRate::Fps60,
+            codec,
+            quality: domain::Quality::High,
+            include_system_audio: false,
+            include_microphone: false,
+            ..RecorderSettings::default()
+        }
+    }
+
+    #[test]
+    fn an_encoder_attempt_reports_its_cleanup_only_after_its_pipeline_is_released() {
+        gst::init().unwrap();
+        let settings = silent_settings(Codec::H264);
+        let attempts = encoding::modes(settings.codec, false).len();
+        assert!(attempts > 1, "this test needs two H.264 encoders");
+        let sources = Arc::new(Mutex::new(Vec::<gst::glib::WeakRef<gst::Element>>::new()));
+        let created = sources.clone();
+        let capture = CaptureInput::Element(Box::new(move || {
+            let source = element("filesrc").unwrap();
+            source.set_property("location", "/nonexistent/wrec-capture-source");
+            created.lock().unwrap().push(source.downgrade());
+            source
+        }));
+        let session = test_session();
+        let (events, _received) = mpsc::channel();
+        let (_commands, receiver) = mpsc::sync_channel(1);
+        let (_stop, stopped) = watch::channel(false);
+        let signals = Mutex::new(Vec::new());
+        let result = record(
+            &capture,
+            &session,
+            &settings,
+            &events,
+            receiver,
+            &stopped,
+            &|teardown| {
+                let released = sources
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|source| source.upgrade().is_none());
+                signals.lock().unwrap().push((teardown, released));
+            },
+        );
+        assert!(result.is_err());
+        assert!(!session.output_path.exists());
+        let mut expected = Vec::new();
+        for _ in 1..attempts {
+            expected.push((Teardown::AttemptStarted, false));
+            expected.push((Teardown::AttemptFinished, true));
+        }
+        expected.push((Teardown::Recording, false));
+        assert_eq!(signals.into_inner().unwrap(), expected);
+    }
+
+    fn variable_rate(rate: i32) -> gst::Caps {
+        gst::Caps::builder("video/x-raw")
+            .field("format", "BGRx")
+            .field("width", 320i32)
+            .field("height", 180i32)
+            .field("framerate", gst::Fraction::new(0, 1))
+            .field("max-framerate", gst::Fraction::new(rate, 1))
+            .build()
+    }
+
+    struct RateChangeRecording {
+        result: Result<()>,
+        factory: String,
+        session: RecordingSession,
+        partial: std::path::PathBuf,
+        scheduled: Vec<f64>,
+        source_rates: Vec<i32>,
+        metrics: RecorderMetrics,
+    }
+
+    impl Drop for RateChangeRecording {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.session.output_path);
+            let _ = std::fs::remove_file(&self.partial);
+        }
+    }
+
+    // Each recording paces real frames through a leaky queue; running two at
+    // once on a shared encoder would turn scheduling delays into frame drops.
+    static RATE_CHANGE_RECORDING: Mutex<()> = Mutex::new(());
+
+    fn record_rate_changes(codec: Codec, phases: &[(i32, u64)]) -> RateChangeRecording {
+        gst::init().unwrap();
+        let _sequential = RATE_CHANGE_RECORDING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let source = Arc::new(Mutex::new(None::<gst::Element>));
+        let source_rates = Arc::new(Mutex::new(Vec::new()));
+        let created = source.clone();
+        let observed = source_rates.clone();
+        let first_rate = phases[0].0;
+        let capture = CaptureInput::Element(Box::new(move || {
+            let source = element("appsrc").unwrap();
+            source.set_property("is-live", true);
+            source.set_property_from_str("format", "time");
+            source.set_property("caps", variable_rate(first_rate));
+            let observed = observed.clone();
+            source.static_pad("src").unwrap().add_probe(
+                gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |_, info| {
+                    if let Some(gst::EventView::Caps(caps)) = info.event().map(|event| event.view())
+                    {
+                        if let Some(rate) = caps.caps().structure(0).and_then(|structure| {
+                            structure.get::<gst::Fraction>("max-framerate").ok()
+                        }) {
+                            observed.lock().unwrap().push(rate.numer());
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            *created.lock().unwrap() = Some(source.clone());
+            source
+        }));
+        let session = test_session();
+        let partial = session.output_path.with_extension("partial.mov");
+        let (events, received) = mpsc::channel();
+        let (_commands, receiver) = mpsc::sync_channel(1);
+        let (stop, stopped) = watch::channel(false);
+        let worker_session = session.clone();
+        let worker = std::thread::spawn(move || {
+            record(
+                &capture,
+                &worker_session,
+                &silent_settings(codec),
+                &events,
+                receiver,
+                &stopped,
+                &|_| {},
+            )
+        });
+        let appsrc = loop {
+            if let Some(source) = source.lock().unwrap().clone() {
+                break source;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let playing = Instant::now();
+        while appsrc.current_state() != gst::State::Playing
+            && playing.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Stamp each frame with its schedule rather than the time the source
+        // thread happens to forward it, so every packet maps to one pushed frame.
+        let origin = appsrc.current_running_time().unwrap_or_default();
+        let start = Instant::now();
+        let mut due = Duration::ZERO;
+        let mut scheduled = Vec::new();
+        'push: for &(rate, seconds) in phases {
+            appsrc.set_property("caps", variable_rate(rate));
+            for _ in 0..rate as u64 * seconds {
+                std::thread::sleep(due.saturating_sub(start.elapsed()));
+                let shade = scheduled.len() as u8;
+                let mut buffer = gst::Buffer::from_mut_slice(vec![shade; 320 * 180 * 4]);
+                let time = origin + gst::ClockTime::from_nseconds(due.as_nanos() as u64);
+                let frame = buffer.get_mut().unwrap();
+                frame.set_pts(time);
+                frame.set_dts(time);
+                if appsrc.emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer])
+                    != gst::FlowReturn::Ok
+                {
+                    break 'push;
+                }
+                scheduled.push(due.as_secs_f64());
+                due += Duration::from_secs(1) / rate as u32;
+            }
+        }
+        let accepted = Instant::now();
+        while appsrc.property::<u64>("current-level-buffers") > 0
+            && accepted.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // qtmux writes a fragment when the next keyframe reaches it, so wait
+        // for one that holds frames after the first rate change.
+        let changed = phases[0].1 as f64;
+        let copied = Instant::now();
+        loop {
+            std::fs::copy(&session.output_path, &partial).unwrap();
+            if last_packet_seconds(&partial).is_some_and(|last| last > changed)
+                || copied.elapsed() > Duration::from_secs(10)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        stop.send_replace(true);
+        let result = worker.join().unwrap();
+        let events: Vec<RecorderEvent> = received.try_iter().collect();
+        let factory = events
+            .iter()
+            .find_map(|event| match event {
+                RecorderEvent::Log { message, .. } if message.contains("selected") => message
+                    .split("; ")
+                    .nth(2)
+                    .map(|factory| factory.to_string()),
+                _ => None,
+            })
+            .unwrap();
+        let metrics = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                RecorderEvent::Metrics { metrics, .. } => Some(metrics.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let source_rates = source_rates.lock().unwrap().clone();
+        RateChangeRecording {
+            result,
+            factory,
+            session,
+            partial,
+            scheduled,
+            source_rates,
+            metrics,
+        }
+    }
+
+    fn last_packet_seconds(movie: &Path) -> Option<f64> {
+        let output = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+            .args(["packet=pts_time", "-of", "csv=p=0"])
+            .arg(movie)
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<f64>().ok())
+            .reduce(f64::max)
+    }
+
+    fn video_packets(probe: &serde_json::Value) -> Vec<(f64, bool)> {
+        let stream = &probe["streams"][0];
+        assert_eq!(stream["codec_type"], "video");
+        let base: Vec<f64> = stream["time_base"]
+            .as_str()
+            .unwrap()
+            .split('/')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        probe["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|packet| packet["stream_index"] == 0)
+            .map(|packet| {
+                (
+                    packet["pts"].as_i64().unwrap() as f64 * base[0] / base[1],
+                    packet["flags"].as_str().unwrap().starts_with('K'),
+                )
+            })
+            .collect()
+    }
+
+    fn decoded_video_frames(movie: &Path) -> u64 {
+        let output = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-count_frames"])
+            .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+            .arg(movie)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    fn assert_rate_changes_stay_playable(codec: Codec, name: &str, phases: &[(i32, u64)]) {
+        let recording = record_rate_changes(codec, phases);
+        let movie = &recording.session.output_path;
+        assert!(recording.result.is_ok(), "{:?}", recording.result);
+        let rates: Vec<i32> = phases.iter().map(|(rate, _)| *rate).collect();
+        let mut transitions = recording.source_rates.clone();
+        transitions.dedup();
+        assert_eq!(transitions, rates, "the source did not change its caps");
+        let probe = probe_movie(movie);
+        assert_eq!(probe["streams"][0]["codec_name"], name);
+        let packets = video_packets(&probe);
+        let encoded = recording.metrics.frames.unwrap();
+        let dropped = recording.metrics.dropped_frames.unwrap();
+        assert_eq!(packets.len() as u64, encoded);
+        assert_eq!(encoded + dropped, recording.scheduled.len() as u64);
+        assert_eq!(decoded_video_frames(movie), packets.len() as u64);
+        let first = packets[0].0;
+        let va = recording.factory.starts_with("va");
+        let mut phase_start = 0.0;
+        let mut remaining = packets
+            .iter()
+            .map(|(pts, key)| (pts - first, *key))
+            .peekable();
+        for &(rate, seconds) in phases {
+            let phase_end = phase_start + seconds as f64;
+            let mut phase = Vec::new();
+            while let Some((position, key)) =
+                remaining.next_if(|(position, _)| *position < phase_end - 0.5 / rate as f64)
+            {
+                assert!(
+                    recording
+                        .scheduled
+                        .iter()
+                        .any(|due| (position - due).abs() < 2e-6),
+                    "a packet at {position}s matches no pushed frame"
+                );
+                phase.push(key);
+            }
+            let interval = if va {
+                keyframe_interval(&variable_rate(rate), 60) as usize
+            } else {
+                120
+            };
+            let keyframes: Vec<usize> = phase
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| key.then_some(index))
+                .collect();
+            assert_eq!(
+                keyframes,
+                (0..phase.len()).step_by(interval).collect::<Vec<_>>(),
+                "{} at {rate} fps from {phase_start}s",
+                recording.factory
+            );
+            phase_start = phase_end;
+        }
+        assert!(remaining.next().is_none(), "packets after the last phase");
+        for probe in [&probe, &probe_movie(&recording.partial)] {
+            assert_eq!(
+                probe["streams"][0]["codec_tag_string"],
+                if name == "h264" { "avc3" } else { "hev1" }
+            );
+            assert!(
+                !probe.to_string().contains("New Extradata"),
+                "the movie switches sample descriptions"
+            );
+        }
+        let partial = probe_movie(&recording.partial);
+        let partial_packets = video_packets(&partial);
+        assert!(
+            partial_packets.len() as u64 > rates[0] as u64 * phases[0].1,
+            "the partial movie holds {} frames, none after the rate change",
+            partial_packets.len()
+        );
+        assert_eq!(
+            decoded_video_frames(&recording.partial),
+            partial_packets.len() as u64
+        );
+        eprintln!(
+            "{} {rates:?}: {} frames, {dropped} dropped; partial movie has {} frames",
+            recording.factory,
+            packets.len(),
+            partial_packets.len()
+        );
+    }
+
+    const RISING: [(i32, u64); 3] = [(5, 3), (60, 6), (5, 3)];
+    const FALLING: [(i32, u64); 3] = [(60, 3), (5, 4), (60, 3)];
+
+    #[test]
+    fn h264_recordings_survive_capture_rate_changes() {
+        assert_rate_changes_stay_playable(Codec::H264, "h264", &RISING);
+        assert_rate_changes_stay_playable(Codec::H264, "h264", &FALLING);
+    }
+
+    #[test]
+    fn hevc_recordings_survive_capture_rate_changes() {
+        assert_rate_changes_stay_playable(Codec::Hevc, "hevc", &RISING);
+        assert_rate_changes_stay_playable(Codec::Hevc, "hevc", &FALLING);
     }
 
     #[test]

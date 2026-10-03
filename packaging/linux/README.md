@@ -34,10 +34,21 @@ fractional refresh rate below the request is rounded down. For example, a
 advertises a single fixed fractional maximum below the requested rate,
 instead of a range, cannot be negotiated.
 
-VA encoders set their initial keyframe interval to about two seconds at the
+VA encoders set their keyframe interval to about two seconds at the
 negotiated capture rate, capped by the requested rate. A 5 fps capture gets
 an interval of 10 frames even when 60 fps was requested. Using the requested
-rate alone can stall older Radeon HEVC encoding at low capture rates.
+rate alone can stall older Radeon HEVC encoding at low capture rates. Each
+new set of encoder input caps updates the interval after the previous frames
+have reached the encoder. Fixed frame rates take precedence over a variable
+stream's maximum rate. Missing rate information uses the requested ceiling.
+
+The movie writer uses frame timestamps for playback timing. Refresh-rate
+changes can also change the encoder's parameter sets. The movie keeps its
+initial track description and carries those parameter sets with each keyframe,
+using `avc3` for H.264 and `hev1` for HEVC. This avoids changing the sample
+description in a fragmented movie, which can make older qtmux versions write
+unplayable fragments. Playback requires a reader that supports these sample
+entries; FFmpeg playback is covered by the recording tests.
 
 wrec tries shared GPU buffers only when `vapostproc` lists DMA-BUF caps with
 `format=DMA_DRM` and comes from GStreamer VA 1.24.6 or later. `DMA_DRM` caps
@@ -121,7 +132,7 @@ output closes, or after the worker reports that it is tearing down a failed,
 lost or cancelled recording, then kills it with SIGKILL. The worker sends that
 report before it stops the native pipeline, so a GPU or plugin cleanup that
 hangs cannot hold the job open. Recording, idle and paused time never start the
-deadline, and neither does tearing down an encoder attempt that will be retried. The job's final status is
+deadline. Cleaning up a failed encoder attempt uses a separate deadline. The job's final status is
 published only after the worker has been reaped, so the next queued job never
 starts while the previous worker still runs. A worker killed this way before it
 reported a result fails its job. While a worker is frozen, pause and resume fail
@@ -144,7 +155,9 @@ daemon PID alone misses the capture pipeline. Find the worker with
 
 Native cleanup between encoder attempts has its own 20-second kill/reap bound.
 Completing that cleanup clears only its attempt deadline; it does not clear a
-user-stop or final-exit deadline, or limit the next healthy recording.
+user-stop or final-exit deadline, or limit the next healthy recording. The bound
+covers native destructors and allocator cleanup. Repeating a cleanup-start
+message does not extend an already armed deadline.
 
 ## Install dependencies and build
 

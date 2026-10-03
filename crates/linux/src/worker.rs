@@ -259,7 +259,7 @@ impl Supervisor {
                     exit_by.get_or_insert(Instant::now() + self.deadline);
                 }
                 Ok(Ok(Message::CleaningAttempt)) => {
-                    cleanup_by = Some(Instant::now() + self.deadline);
+                    cleanup_by.get_or_insert(Instant::now() + self.deadline);
                 }
                 Ok(Ok(Message::CleanedAttempt)) => {
                     cleanup_by = None;
@@ -804,6 +804,25 @@ mod tests {
     }
 
     #[test]
+    fn repeated_attempt_teardown_reports_keep_the_first_deadline() {
+        let fake = Fake::start(
+            r#"read start; for report in 1 2 3 4 5 6; do echo '"CleaningAttempt"'; sleep 0.4; done; exec sleep 30"#,
+        );
+        let at = Instant::now();
+        let status = fake.failure();
+        assert!(at.elapsed() >= TEST_DEADLINE, "{:?}", at.elapsed());
+        assert!(
+            at.elapsed() < Duration::from_millis(1800),
+            "{:?}",
+            at.elapsed()
+        );
+        assert!(
+            status.contains("did not finish stopping an encoder attempt within 1s"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn a_finished_attempt_teardown_does_not_limit_the_next_attempt() {
         let fake = Fake::start(
             r#"read start; echo '"CleaningAttempt"'; echo '"CleanedAttempt"'; echo '{"Event":{"Started":{"session_id":0,"dimensions":null}}}'; sleep 3; echo '{"Event":{"Exited":{"session_id":0,"success":true,"status":"recording finalized"}}}'"#,
@@ -813,7 +832,7 @@ mod tests {
             fake.terminal(),
             RecorderEvent::Exited { success: true, .. }
         ));
-        assert!(at.elapsed() >= Duration::from_secs(3), "{:?}", at.elapsed());
+        assert!(at.elapsed() >= 2 * TEST_DEADLINE, "{:?}", at.elapsed());
     }
 
     #[test]
