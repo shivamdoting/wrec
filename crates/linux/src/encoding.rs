@@ -200,6 +200,8 @@ impl Mode {
                     encoder.set_property_from_str("tune", "zerolatency");
                     encoder.set_property_from_str("pass", "qual");
                     encoder.set_property("quantizer", qp);
+                    // In quality mode this caps the rate, 2 Mbit/s by default.
+                    encoder.set_property("bitrate", bitrate);
                     encoder.set_property("threads", 2u32);
                     encoder.set_property("key-int-max", settings.fps.as_u32() * 2);
                 }
@@ -315,5 +317,62 @@ mod tests {
             }
         }
         assert!(tested.contains(&"x265enc"), "tested only {tested:?}");
+    }
+
+    // Megabits per second for three seconds of 720p30 noise, which wants
+    // more bits than any quality allows.
+    fn noise_bitrate(mode: Mode, quality: Quality) -> f64 {
+        let pipeline = gst::parse::launch(
+            "videotestsrc name=source pattern=snow num-buffers=90 ! video/x-raw,format=I420,width=1280,height=720,framerate=30/1 ! identity name=input",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let settings = RecorderSettings {
+            quality,
+            ..RecorderSettings::default()
+        };
+        let encoder = mode.encoder(&settings).unwrap();
+        let sink = element("fakesink").unwrap();
+        pipeline.add_many([&encoder, &sink]).unwrap();
+        gst::Element::link_many([&pipeline.by_name("input").unwrap(), &encoder, &sink]).unwrap();
+        let bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = bytes.clone();
+        encoder
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                let size = info.buffer().map_or(0, |buffer| buffer.size());
+                counted.fetch_add(size as u64, std::sync::atomic::Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let ended = pipeline.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(60),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(matches!(
+            ended.map(|message| message.type_()),
+            Some(gst::MessageType::Eos)
+        ));
+        bytes.load(std::sync::atomic::Ordering::Relaxed) as f64 * 8.0 / 3.0 / 1e6
+    }
+
+    // x264 in quality mode caps its rate at its bitrate property, 2 Mbit/s by
+    // default, so every quality must set it.
+    #[test]
+    fn software_h264_spends_the_bitrate_its_quality_allows() {
+        gst::init().unwrap();
+        let Some(mode) = modes(Codec::H264, false)
+            .into_iter()
+            .find(|mode| mode.factory == "x264enc")
+        else {
+            return;
+        };
+        let high = noise_bitrate(mode, Quality::High);
+        assert!((12.0..20.0).contains(&high), "high quality: {high} Mbit/s");
+        let efficient = noise_bitrate(mode, Quality::Efficient);
+        assert!(efficient < 3.2, "efficient quality: {efficient} Mbit/s");
     }
 }
