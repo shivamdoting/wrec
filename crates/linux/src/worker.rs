@@ -45,6 +45,8 @@ enum Message {
     Event(RecorderEvent),
     Reply(Result<()>),
     Stopping,
+    // The movie is complete; the worker is cleaning up native resources.
+    Finalized,
     CleaningAttempt,
     CleanedAttempt,
 }
@@ -225,6 +227,7 @@ impl Supervisor {
             return;
         }
         let mut terminal = None;
+        let mut finalized = false;
         let mut started = false;
         let mut problem = None;
         let mut output_open = true;
@@ -256,6 +259,10 @@ impl Supervisor {
                     let _ = self.replies.send(reply);
                 }
                 Ok(Ok(Message::Stopping)) => {
+                    exit_by.get_or_insert(Instant::now() + self.deadline);
+                }
+                Ok(Ok(Message::Finalized)) => {
+                    finalized = true;
                     exit_by.get_or_insert(Instant::now() + self.deadline);
                 }
                 Ok(Ok(Message::CleaningAttempt)) => {
@@ -313,6 +320,20 @@ impl Supervisor {
             }
         }
         drop(self.replies);
+        // The movie was complete before native cleanup hung or crashed.
+        if terminal.is_none() && finalized {
+            let problem = problem
+                .take()
+                .unwrap_or_else(|| "capture worker exited during cleanup".to_string());
+            terminal = Some(RecorderEvent::Exited {
+                session_id: self.session.id,
+                success: true,
+                status: format!(
+                    "recording finalized, but the {}",
+                    problem.trim_start_matches("the ")
+                ),
+            });
+        }
         let event = match (terminal, problem) {
             (Some(event), None) => event,
             (_, problem) => {
@@ -469,6 +490,7 @@ pub fn run() -> ! {
             &stopping_output,
             &match teardown {
                 crate::pipeline::Teardown::Recording => Message::Stopping,
+                crate::pipeline::Teardown::Finalized => Message::Finalized,
                 crate::pipeline::Teardown::AttemptStarted => Message::CleaningAttempt,
                 crate::pipeline::Teardown::AttemptFinished => Message::CleanedAttempt,
             },
@@ -858,6 +880,20 @@ mod tests {
             fake.terminal(),
             RecorderEvent::Exited { success: false, status, .. } if status == "source lost"
         ));
+    }
+
+    #[test]
+    fn a_finalized_movie_survives_a_hung_cleanup() {
+        let fake = Fake::start(r#"read start; echo '"Finalized"'; exec sleep 30"#);
+        let terminal = fake.terminal();
+        assert!(
+            matches!(
+                &terminal,
+                RecorderEvent::Exited { success: true, status, .. }
+                    if status.starts_with("recording finalized, but the capture worker did not exit within 1s")
+            ),
+            "{terminal:?}"
+        );
     }
 
     #[test]

@@ -161,7 +161,8 @@ hangs cannot hold the job open. Recording, idle and paused time never start the
 deadline. Cleaning up a failed encoder attempt uses a separate deadline. The job's final status is
 published only after the worker has been reaped, so the next queued job never
 starts while the previous worker still runs. A worker killed this way before it
-reported a result fails its job. While a worker is frozen, pause and resume fail
+reported a result fails its job, unless it had already reported a finalized
+movie; then the job completes and its status says that cleanup did not finish. While a worker is frozen, pause and resume fail
 after the usual 5 seconds and the recording keeps its current state.
 
 The worker runs in its own process group, so Ctrl-C in a terminal reaches the
@@ -314,7 +315,12 @@ without the watch. If a desktop removes the node before its `Closed` signal
 arrives, a stop from its sharing indicator fails the job with the stream-ended
 message instead of finalizing it.
 
-Stop drains the encoders and finalizes the movie, including when paused. The
+Stop drains the encoders and finalizes the movie, including when paused. If
+video still has not reached the movie writer 10 seconds after stop while nothing
+waits for the disk or for audio, the video encoder is stuck. wrec then ends the
+video track at the writer and finalizes the movie with the video it already has,
+and the job reports the shorter video as lost media. A disk that stalls for more
+than 10 seconds during finalization still fails the job. The
 writer requests ten-second movie fragments; encoder keyframes can close them
 earlier. An interrupted recording may only be playable through its last completed
 fragment. Audio sources can deliver their

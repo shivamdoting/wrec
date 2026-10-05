@@ -213,6 +213,8 @@ pub(crate) enum CaptureInput {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Teardown {
     Recording,
+    // The movie is complete on disk; native cleanup follows.
+    Finalized,
     AttemptStarted,
     AttemptFinished,
 }
@@ -446,7 +448,9 @@ fn record_attempt(
         },
     );
     let ending = ends_recording(&result, &counters, attempt.last);
-    (attempt.stopping)(if ending {
+    (attempt.stopping)(if result.is_ok() {
+        Teardown::Finalized
+    } else if ending {
         Teardown::Recording
     } else {
         Teardown::AttemptStarted
@@ -622,6 +626,7 @@ struct AudioTrack {
 struct Movie {
     pipeline: gst::Pipeline,
     mux: gst::Element,
+    video: gst::Pad,
     held: Option<(gst::Element, gst::PadProbeId)>,
     audio: Vec<AudioTrack>,
 }
@@ -633,15 +638,16 @@ impl Movie {
         mux: &gst::Element,
         audio: bool,
     ) -> Result<Self> {
-        let mut movie = Self {
-            pipeline: pipeline.clone(),
-            mux: mux.clone(),
-            held: None,
-            audio: Vec::new(),
-        };
         let track = mux
             .request_pad_simple("video_%u")
             .ok_or_else(|| backend("the movie muxer refused a video track"))?;
+        let mut movie = Self {
+            pipeline: pipeline.clone(),
+            mux: mux.clone(),
+            video: track.clone(),
+            held: None,
+            audio: Vec::new(),
+        };
         if !audio {
             video
                 .static_pad("src")
@@ -1166,6 +1172,7 @@ fn run(
     let mut omitted = Vec::new();
     let mut logged_lost = vec![0; movie.audio.len()];
     let mut most_buffered = 0;
+    let mut video_cut = false;
     let log = |message: String| {
         let _ = events.send(RecorderEvent::Log {
             session_id: Some(session.id),
@@ -1187,9 +1194,10 @@ fn run(
                 .lock()
                 .unwrap()
                 .resume(pipeline.current_running_time().unwrap_or_default());
-            if !pipeline.send_event(gst::event::Eos::new()) {
-                return Err(backend("recording pipeline rejected finalization"));
-            }
+            // A source pushing into a full queue holds its stream lock, and
+            // sending it EOS waits for that lock, so wait here instead.
+            let ending = pipeline.clone();
+            std::thread::spawn(move || ending.send_event(gst::event::Eos::new()));
             stopping = Some(Instant::now());
         }
         if let Ok(command) = commands.try_recv() {
@@ -1251,9 +1259,12 @@ fn run(
                         return Err(backend("capture ended without an encoded frame"));
                     }
                     emit_metrics(pipeline, session, events, counters);
-                    if let Some(message) =
-                        media_lost(movie, &omitted, dropped_frames(pipeline, counters))
-                    {
+                    if let Some(message) = media_lost(
+                        movie,
+                        &omitted,
+                        dropped_frames(pipeline, counters),
+                        video_cut,
+                    ) {
                         let _ = events.send(RecorderEvent::MediaLost {
                             session_id: session.id,
                             message,
@@ -1289,10 +1300,28 @@ fn run(
         if !started && launched.elapsed() > Duration::from_secs(15) {
             return Err(backend("No encoded frame arrived within 15s. Check DMA-BUF support, VA-API driver access, and audio devices."));
         }
-        if stopping.is_some_and(|at| at.elapsed() > Duration::from_secs(10)) {
-            return Err(backend(
-                "Movie finalization timed out after 10s; only completed fragments may be playable.",
-            ));
+        if stopping.is_some_and(|at| at.elapsed() > FINALIZING) {
+            // Nothing is waiting for the disk or for audio, yet video has
+            // not reached the muxer: the encoder or capture is stuck. End
+            // the video track there, so the muxer can finish the movie with
+            // what it has.
+            if !video_cut
+                && !movie.video.pad_flags().contains(gst::PadFlags::EOS)
+                && downstream_idle(pipeline)
+            {
+                video_cut = true;
+                log(format!(
+                    "capture-engine: video encoding did not finish within {} s of stop; ending the video track so the movie can be finalized",
+                    FINALIZING.as_secs()
+                ));
+                let video = movie.video.clone();
+                std::thread::spawn(move || video.send_event(gst::event::Eos::new()));
+            }
+            if !video_cut || stopping.is_some_and(|at| at.elapsed() > FINALIZING * 3 / 2) {
+                return Err(backend(
+                    "Movie finalization timed out after 10s; only completed fragments may be playable.",
+                ));
+            }
         }
         if started && last_metrics.elapsed() >= Duration::from_secs(1) {
             emit_metrics(pipeline, session, events, counters);
@@ -1326,6 +1355,18 @@ fn run(
     }
 }
 
+// How long finalization may take before a stuck video track is ended at the
+// muxer, which then has half as long again.
+const FINALIZING: Duration = Duration::from_secs(10);
+
+// Nothing waits for the disk, and no video waits for audio.
+fn downstream_idle(pipeline: &gst::Pipeline) -> bool {
+    buffered_bytes(pipeline) < STALL_DRAINED
+        && pipeline.by_name(HELD_QUEUE).map_or(true, |queue| {
+            queue.property::<u32>("current-level-buffers") == 0
+        })
+}
+
 const STALL_BUFFERED: u64 = 8 << 20;
 const STALL_DRAINED: u64 = 1 << 20;
 
@@ -1344,8 +1385,16 @@ fn seconds(time: gst::ClockTime) -> f64 {
 
 // What the finished movie is missing, if anything. A movie that plays is not
 // necessarily whole.
-fn media_lost(movie: &Movie, omitted: &[&str], dropped_frames: u64) -> Option<String> {
+fn media_lost(
+    movie: &Movie,
+    omitted: &[&str],
+    dropped_frames: u64,
+    video_cut: bool,
+) -> Option<String> {
     let mut lost = Vec::new();
+    if video_cut {
+        lost.push("video encoding stopped responding, so the video ends early".to_string());
+    }
     if dropped_frames > 0 {
         lost.push(format!("{dropped_frames} video frames were dropped"));
     }
@@ -2392,6 +2441,91 @@ mod tests {
                     assert!(!message.contains(" lost "), "{message}")
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Stops a recording `after` something in it got stuck at two seconds.
+    // Returns the finished recording, its result and how long after stop
+    // run() returned. Like pulsesrc, the audio sources' streaming threads
+    // block on full queues.
+    fn stop_while_stuck(
+        after: Duration,
+        stuck: impl FnOnce(&gst::Pipeline),
+    ) -> (TestRecording, Result<()>, Duration) {
+        let mut recording = TestRecording::start_with_audio(vec![
+            ("system audio", delayed_audio(gst::ClockTime::ZERO)),
+            ("microphone", delayed_audio(gst::ClockTime::ZERO)),
+        ]);
+        stuck(&recording.pipeline);
+        std::thread::sleep(Duration::from_secs(2) + after);
+        let stopped = Instant::now();
+        let result = recording.finish();
+        let returned = recording.returned.lock().unwrap().unwrap() - stopped;
+        (recording, result, returned)
+    }
+
+    // Stopped once the audio queues are full, so the audio sources are
+    // blocked, holding the stream locks that EOS needs.
+    #[test]
+    fn a_stuck_video_encoder_at_stop_still_finalizes_the_movie() {
+        // Stuck past finalization; teardown waits for it to return.
+        let (recording, result, returned) = stop_while_stuck(Duration::from_secs(6), |pipeline| {
+            let encoder = pipeline.by_name("encoder").unwrap();
+            stall_once(
+                &encoder.static_pad("sink").unwrap(),
+                Duration::from_secs(2),
+                Duration::from_secs(20),
+            );
+        });
+        result.unwrap();
+        assert!(
+            (FINALIZING..FINALIZING + Duration::from_secs(2)).contains(&returned),
+            "finalized {returned:?} after stop"
+        );
+        let probe = recording.probe();
+        let video = end_seconds(&probe, "h264");
+        assert!((1.8..2.4).contains(&video), "video ends at {video}s");
+        // Audio queued before its sources blocked made it into the movie.
+        let audio = end_seconds(&probe, "aac");
+        assert!(audio > 5.9, "audio ends at {audio}s");
+        let (mut ending, mut lost) = (false, None);
+        for event in recording.events.try_iter() {
+            match event {
+                RecorderEvent::Log { message, .. } => {
+                    ending |= message.contains("ending the video track")
+                }
+                RecorderEvent::MediaLost { message, .. } => lost = Some(message),
+                _ => {}
+            }
+        }
+        assert!(ending);
+        assert!(lost.is_some_and(|message| message.contains("the video ends early")),);
+    }
+
+    // Video waiting for the disk is not stuck, so it is never cut.
+    #[test]
+    fn a_disk_stall_at_stop_never_cuts_the_waiting_video() {
+        let (recording, result, _) = stop_while_stuck(Duration::from_secs(1), |pipeline| {
+            pipeline
+                .by_name(WRITE_QUEUE)
+                .unwrap()
+                .set_property("max-size-bytes", 16u32 << 10);
+            let sink = &pipeline_element(pipeline, "filesink")[0];
+            stall_once(
+                &sink.static_pad("sink").unwrap(),
+                Duration::from_secs(2),
+                Duration::from_secs(14),
+            );
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("finalization timed out"),
+            "{error}"
+        );
+        for event in recording.events.try_iter() {
+            if let RecorderEvent::Log { message, .. } = event {
+                assert!(!message.contains("ending the video track"), "{message}");
             }
         }
     }
