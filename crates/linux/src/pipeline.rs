@@ -1165,6 +1165,7 @@ fn run(
     let mut last_metrics = Instant::now();
     let mut omitted = Vec::new();
     let mut logged_lost = vec![0; movie.audio.len()];
+    let mut most_buffered = 0;
     let log = |message: String| {
         let _ = events.send(RecorderEvent::Log {
             session_id: Some(session.id),
@@ -1312,9 +1313,29 @@ fn run(
                     *logged = lost;
                 }
             }
+            // The allocator keeps memory freed after a stall drains its
+            // buffers until it is asked to return it.
+            let buffered = buffered_bytes(pipeline);
+            if buffered < STALL_DRAINED && most_buffered >= STALL_BUFFERED {
+                release_freed_memory();
+                most_buffered = 0;
+            }
+            most_buffered = most_buffered.max(buffered);
             last_metrics = Instant::now();
         }
     }
+}
+
+const STALL_BUFFERED: u64 = 8 << 20;
+const STALL_DRAINED: u64 = 1 << 20;
+
+// Encoded media waiting for the disk or for a stalled track.
+fn buffered_bytes(pipeline: &gst::Pipeline) -> u64 {
+    [WRITE_QUEUE, HELD_QUEUE]
+        .into_iter()
+        .filter_map(|name| pipeline.by_name(name))
+        .map(|queue| u64::from(queue.property::<u32>("current-level-bytes")))
+        .sum()
 }
 
 fn seconds(time: gst::ClockTime) -> f64 {
