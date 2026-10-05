@@ -64,6 +64,13 @@ pub fn record(args: RecordArgs) -> ExitCode {
         }
 
         let completed = wait_for_job(job.id, json_output)?;
+        if !json_output {
+            // Warnings raised while recording, such as lost media.
+            for warning in completed.warnings.iter().skip(job.warnings.len()) {
+                eprintln!("warning: {}", warning.message);
+                eprintln!("next: {}", warning.next);
+            }
+        }
         Ok(match completed.status {
             JobStatus::Completed => ExitCode::SUCCESS,
             JobStatus::Failed | JobStatus::Cancelled => ExitCode::FAILURE,

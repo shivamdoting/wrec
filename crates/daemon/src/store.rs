@@ -43,6 +43,7 @@ impl RecordingStatus {
 #[derive(Debug, Clone, Copy)]
 pub enum EventLevel {
     Info,
+    Warning,
     Error,
 }
 
@@ -50,6 +51,7 @@ impl EventLevel {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Info => "info",
+            Self::Warning => "warning",
             Self::Error => "error",
         }
     }

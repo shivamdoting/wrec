@@ -50,6 +50,9 @@ pub enum BackendEvent {
     Metrics {
         metrics: RecorderMetrics,
     },
+    MediaLost {
+        message: String,
+    },
     Failed {
         message: String,
     },
@@ -154,6 +157,22 @@ impl WrecBackend {
 
                 BackendEvent::Metrics {
                     metrics: metrics.clone(),
+                }
+            }
+            RecorderEvent::MediaLost {
+                session_id,
+                message,
+            } => {
+                self.append_event(
+                    Some(*session_id),
+                    EventSource::CaptureEngine,
+                    EventLevel::Warning,
+                    None,
+                    message.clone(),
+                );
+
+                BackendEvent::MediaLost {
+                    message: message.clone(),
                 }
             }
             RecorderEvent::Failed {

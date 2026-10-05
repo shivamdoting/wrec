@@ -692,6 +692,18 @@ fn handle_recorder_event<R: RecordingRuntime>(
             job.push_metrics(metrics);
             false
         }
+        BackendEvent::MediaLost { message } => {
+            job.push_event(EventLevel::Warning, message.clone());
+            job.warnings.push(AgentWarning {
+                code: "media_lost".into(),
+                message,
+                next: format!(
+                    "The movie plays but has gaps. `wrec job logs {}` shows when. Record to a faster disk, close programs that load the CPU, GPU or disk, or lower --quality or --fps.",
+                    job.id
+                ),
+            });
+            false
+        }
         BackendEvent::Failed { message, .. } => {
             job.mark_failed(message);
             if active_matches {
@@ -1042,6 +1054,44 @@ mod tests {
 
         Coordinator::job_stop(state.clone(), second).unwrap();
         wait_for_status(&state, second, JobStatus::Completed);
+    }
+
+    #[test]
+    fn a_completed_job_warns_about_media_its_movie_lost() {
+        let _guard = env_lock();
+        isolate_env();
+        let state = Arc::new(Mutex::new(Coordinator::new(FakeRuntime::new())));
+        let id = start_job(state.clone()).id;
+        wait_for_status(&state, id, JobStatus::Recording);
+        let message = "The movie finished but lost media: microphone is missing 0.70 s of audio.";
+        handle_recorder_event(
+            &state,
+            id,
+            RecorderEvent::MediaLost {
+                session_id: 100,
+                message: message.into(),
+            },
+        );
+        Coordinator::job_stop(state.clone(), id).unwrap();
+        wait_for_status(&state, id, JobStatus::Completed);
+
+        let job = lock_state(&state)
+            .unwrap()
+            .jobs
+            .get(&id)
+            .unwrap()
+            .snapshot(None);
+        let warning = job
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "media_lost")
+            .unwrap();
+        assert_eq!(warning.message, message);
+        assert!(warning.next.contains(&format!("wrec job logs {id}")));
+        assert!(job
+            .events
+            .iter()
+            .any(|event| matches!(event.level, EventLevel::Warning) && event.message == message));
     }
 
     #[test]

@@ -107,6 +107,27 @@ fn movie_mux() -> Result<gst::Element> {
     Ok(mux)
 }
 
+const WRITE_QUEUE: &str = "write-queue";
+
+// qtmux writes each sample as it muxes it, so while a write blocks every
+// track waits behind it: video drops at capture within two frames, and audio
+// once its queue fills. This buffer stays empty unless the disk stalls; at
+// the highest bitrate-mode quality (16 Mbit/s) it covers about 16 seconds.
+const WRITE_BUFFER_BYTES: u32 = 32 << 20;
+
+fn movie_file(pipeline: &gst::Pipeline, mux: &gst::Element, location: &str) -> Result<()> {
+    let queue = element("queue")?;
+    queue.set_property("name", WRITE_QUEUE);
+    queue.set_property("max-size-bytes", WRITE_BUFFER_BYTES);
+    queue.set_property("max-size-buffers", 0u32);
+    queue.set_property("max-size-time", 0u64);
+    let sink = element("filesink")?;
+    sink.set_property("location", location);
+    sink.set_property("sync", false);
+    pipeline.add_many([&queue, &sink]).map_err(backend)?;
+    gst::Element::link_many([mux, &queue, &sink]).map_err(backend)
+}
+
 const CAPTURE_QUEUE: &str = "capture-queue";
 
 // pipewiresrc resends the last frame after this long without a new one, so an
@@ -346,15 +367,6 @@ fn record_attempt(
     parser.set_property("config-interval", -1i32);
     let format = movie_format(settings.codec, settings.fps.as_u32())?;
     let mux = movie_mux()?;
-    let sink = element("filesink")?;
-    sink.set_property(
-        "location",
-        session
-            .output_path
-            .to_str()
-            .ok_or_else(|| backend("recording output path must be UTF-8"))?,
-    );
-    sink.set_property("sync", false);
     let mut chain = vec![&source, &input, &queue];
     chain.extend(converters.iter());
     chain.extend([&output, &encoder, &parser, &format]);
@@ -362,9 +374,16 @@ fn record_attempt(
         .0
         .add_many(chain.iter().copied())
         .map_err(backend)?;
-    pipeline.0.add_many([&mux, &sink]).map_err(backend)?;
+    pipeline.0.add(&mux).map_err(backend)?;
     gst::Element::link_many(chain.iter().copied()).map_err(backend)?;
-    mux.link(&sink).map_err(backend)?;
+    movie_file(
+        &pipeline.0,
+        &mux,
+        session
+            .output_path
+            .to_str()
+            .ok_or_else(|| backend("recording output path must be UTF-8"))?,
+    )?;
     let counters = attempt.counters.clone();
     let mut movie = Movie::new(
         &pipeline.0,
@@ -402,8 +421,9 @@ fn record_attempt(
     let _ = events.send(RecorderEvent::Log {
         session_id: Some(session.id),
         message: format!(
-            "capture-engine: selected {}; capture queue limited to 2 frames",
-            mode.description()
+            "capture-engine: selected {}; capture queue limited to 2 frames; {} MiB write buffer",
+            mode.description(),
+            WRITE_BUFFER_BYTES >> 20
         ),
     });
     // Reserve a unique file so a collision never truncates an existing recording.
@@ -579,9 +599,15 @@ const OMITTED: u8 = 3;
 
 struct AudioTrack {
     name: &'static str,
+    // From the source to the queue that feeds the movie.
+    branch: Vec<gst::Element>,
     pad: gst::Pad,
     probe: Option<gst::PadProbeId>,
     state: Arc<AtomicU8>,
+    // Nanoseconds of audio missing between captured buffers.
+    lost: Arc<AtomicU64>,
+    // Where in the movie the track failed, and why.
+    failed: Option<(gst::ClockTime, String)>,
 }
 
 // The recording pipeline and the tracks of its movie. qtmux writes a track
@@ -590,11 +616,13 @@ struct AudioTrack {
 // only learn their format from their first input buffer, so audio pads are
 // requested once each track has delivered a buffer or ended without one.
 // Until then video waits in a queue instead of being dropped at capture.
+// qtmux takes nothing while any track is empty, so afterwards the same queue
+// lets video wait for a stalled audio track as long as audio can wait for
+// video, instead of dropping frames at capture.
 struct Movie {
     pipeline: gst::Pipeline,
     mux: gst::Element,
     held: Option<(gst::Element, gst::PadProbeId)>,
-    draining: Option<gst::Element>,
     audio: Vec<AudioTrack>,
 }
 
@@ -609,7 +637,6 @@ impl Movie {
             pipeline: pipeline.clone(),
             mux: mux.clone(),
             held: None,
-            draining: None,
             audio: Vec::new(),
         };
         let track = mux
@@ -652,7 +679,12 @@ impl Movie {
         Ok(movie)
     }
 
-    fn add_audio(&mut self, name: &'static str, queue: &gst::Element) {
+    fn add_audio(
+        &mut self,
+        name: &'static str,
+        queue: &gst::Element,
+        branch: Vec<gst::Element>,
+    ) -> Arc<AtomicU64> {
         let pad = queue.static_pad("src").unwrap();
         // Linking the track sends a reconfigure upstream. The encoder answers
         // with an allocation query, which waits behind this queue while qtmux
@@ -695,12 +727,17 @@ impl Movie {
                 }
             },
         );
+        let lost = Arc::new(AtomicU64::new(0));
         self.audio.push(AudioTrack {
             name,
+            branch,
             pad,
             probe,
             state,
+            lost: lost.clone(),
+            failed: None,
         });
+        lost
     }
 
     // Called on every pass of the run loop. Requests the audio pads once every
@@ -708,18 +745,6 @@ impl Movie {
     // releases the video. Returns the omitted tracks, each with whether it
     // ended before delivering audio.
     fn link_audio(&mut self) -> Result<Vec<(&'static str, bool)>> {
-        if let Some(queue) = &self.draining {
-            // Once the video held at startup has reached qtmux, a stalled
-            // track holds video in qtmux and the capture queue drops frames,
-            // as without this queue. Limiting it earlier would block the
-            // encoder while the held video drains.
-            if queue.property::<u32>("current-level-buffers") <= 1 {
-                queue.set_property("max-size-time", 0u64);
-                queue.set_property("max-size-bytes", 0u32);
-                queue.set_property("max-size-buffers", 1u32);
-                self.draining = None;
-            }
-        }
         let Some((queue, _)) = &self.held else {
             return Ok(Vec::new());
         };
@@ -756,8 +781,17 @@ impl Movie {
         }
         let (queue, probe) = self.held.take().unwrap();
         queue.static_pad("src").unwrap().remove_probe(probe);
-        self.draining = Some(queue);
         Ok(omitted)
+    }
+
+    // The audio track whose branch posted a message, if any.
+    fn audio_track(&mut self, message: &gst::Message) -> Option<&mut AudioTrack> {
+        let src = message.src()?;
+        self.audio.iter_mut().find(|track| {
+            track.branch.iter().any(|element| {
+                src == element.upcast_ref::<gst::Object>() || src.has_as_ancestor(element)
+            })
+        })
     }
 }
 
@@ -812,8 +846,43 @@ fn add_audio_source(
     ];
     movie.pipeline.add_many(chain).map_err(backend)?;
     gst::Element::link_many(chain).map_err(backend)?;
-    movie.add_audio(name, &queue);
+    let lost = movie.add_audio(name, &queue, chain.map(|element| element.clone()).to_vec());
+    count_lost_audio(source, lost, counters.clone());
     Ok(())
+}
+
+// pulsesrc keeps buffers contiguous unless it skipped audio nobody read in
+// time, so a longer jump is lost audio.
+const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
+
+// Counts audio missing between consecutive buffers. When downstream does not
+// read pulsesrc in time, its ring buffer overwrites the oldest audio, and the
+// next buffer is stamped where capture actually resumed.
+fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<Counters>) {
+    // Where the next buffer should start, and the pause offset it assumes.
+    let next = Mutex::new(None::<(gst::ClockTime, gst::ClockTime)>);
+    source
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            let Some((pts, duration)) = info
+                .buffer()
+                .and_then(|buffer| buffer.pts().zip(buffer.duration()))
+            else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let offset = counters.timeline.lock().unwrap().offset;
+            let mut next = next.lock().unwrap();
+            if let Some((expected, before)) = *next {
+                let missing = pts.saturating_sub(expected);
+                // A resume moves the timeline; audio dropped while paused is not lost.
+                if before == offset && missing > AUDIO_HOLE {
+                    lost.fetch_add(missing.nseconds(), Ordering::Relaxed);
+                }
+            }
+            *next = Some((pts + duration, offset));
+            gst::PadProbeReturn::Ok
+        });
 }
 
 fn retime(info: &mut gst::PadProbeInfo<'_>, counters: &Counters) -> bool {
@@ -1094,6 +1163,14 @@ fn run(
     let mut started = false;
     let mut stopping = None;
     let mut last_metrics = Instant::now();
+    let mut omitted = Vec::new();
+    let mut logged_lost = vec![0; movie.audio.len()];
+    let log = |message: String| {
+        let _ = events.send(RecorderEvent::Log {
+            session_id: Some(session.id),
+            message,
+        });
+    };
     loop {
         if let Some(message) = stopping.is_none().then(source_lost).flatten() {
             return Err(backend(message));
@@ -1136,6 +1213,25 @@ fn run(
         if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match message.view() {
                 gst::MessageView::Error(error) => {
+                    // A failed audio source ends its own track, and the movie
+                    // keeps recording the others.
+                    if let Some(track) = movie.audio_track(&message) {
+                        if track.failed.is_none() {
+                            let position = counters
+                                .timeline
+                                .lock()
+                                .unwrap()
+                                .position(pipeline.current_running_time().unwrap_or_default());
+                            log(format!(
+                                "capture-engine: {} stopped at {:.1} s: {}; its track ends there and the recording continues",
+                                track.name,
+                                seconds(position),
+                                error.error()
+                            ));
+                            track.failed = Some((position, error.error().to_string()));
+                        }
+                        continue;
+                    }
                     if let Some(lost) = source_lost() {
                         return Err(backend(lost));
                     }
@@ -1154,27 +1250,33 @@ fn run(
                         return Err(backend("capture ended without an encoded frame"));
                     }
                     emit_metrics(pipeline, session, events, counters);
+                    if let Some(message) =
+                        media_lost(movie, &omitted, dropped_frames(pipeline, counters))
+                    {
+                        let _ = events.send(RecorderEvent::MediaLost {
+                            session_id: session.id,
+                            message,
+                        });
+                    }
                     return Ok(());
                 }
                 _ => {}
             }
         }
         for (name, ended) in movie.link_audio()? {
-            let _ = events.send(RecorderEvent::Log {
-                session_id: Some(session.id),
-                message: format!(
-                    "capture-engine: {name} sent no samples {}; the movie has no {name} track",
-                    if ended {
-                        "before the recording stopped".to_string()
-                    } else {
-                        format!(
-                            "while {} seconds or {} MiB of video waited for it",
-                            HELD_VIDEO_LIMIT.seconds(),
-                            HELD_VIDEO_BYTES >> 20
-                        )
-                    }
-                ),
-            });
+            log(format!(
+                "capture-engine: {name} sent no samples {}; the movie has no {name} track",
+                if ended {
+                    "before the recording stopped".to_string()
+                } else {
+                    format!(
+                        "while {} seconds or {} MiB of video waited for it",
+                        HELD_VIDEO_LIMIT.seconds(),
+                        HELD_VIDEO_BYTES >> 20
+                    )
+                }
+            ));
+            omitted.push(name);
         }
         if !started && counters.frames.load(Ordering::Relaxed) > 0 {
             started = true;
@@ -1193,9 +1295,62 @@ fn run(
         }
         if started && last_metrics.elapsed() >= Duration::from_secs(1) {
             emit_metrics(pipeline, session, events, counters);
+            let position = counters
+                .timeline
+                .lock()
+                .unwrap()
+                .position(pipeline.current_running_time().unwrap_or_default());
+            for (track, logged) in movie.audio.iter().zip(&mut logged_lost) {
+                let lost = track.lost.load(Ordering::Relaxed);
+                if lost > *logged {
+                    log(format!(
+                        "capture-engine: {} lost {:.2} s of audio before {:.1} s; the movie has a gap there",
+                        track.name,
+                        (lost - *logged) as f64 / 1e9,
+                        seconds(position)
+                    ));
+                    *logged = lost;
+                }
+            }
             last_metrics = Instant::now();
         }
     }
+}
+
+fn seconds(time: gst::ClockTime) -> f64 {
+    time.nseconds() as f64 / 1e9
+}
+
+// What the finished movie is missing, if anything. A movie that plays is not
+// necessarily whole.
+fn media_lost(movie: &Movie, omitted: &[&str], dropped_frames: u64) -> Option<String> {
+    let mut lost = Vec::new();
+    if dropped_frames > 0 {
+        lost.push(format!("{dropped_frames} video frames were dropped"));
+    }
+    for track in &movie.audio {
+        let missing = track.lost.load(Ordering::Relaxed);
+        if missing > 0 {
+            lost.push(format!(
+                "{} is missing {:.2} s of audio",
+                track.name,
+                missing as f64 / 1e9
+            ));
+        }
+        if let Some((position, reason)) = &track.failed {
+            lost.push(format!(
+                "{} stopped at {:.1} s ({reason}), so its track ends there",
+                track.name,
+                seconds(*position)
+            ));
+        } else if omitted.contains(&track.name) {
+            lost.push(format!(
+                "{} sent no samples, so the movie has no {} track",
+                track.name, track.name
+            ));
+        }
+    }
+    (!lost.is_empty()).then(|| format!("The movie finished but lost media: {}.", lost.join("; ")))
 }
 
 fn emit_metrics(
@@ -1483,10 +1638,17 @@ mod tests {
 
         fn start_with(audio_delays: &[gst::ClockTime], counting_encoder: bool) -> Self {
             Self::start_from(
-                "videotestsrc name=video is-live=true pattern=ball ! capsfilter name=capture caps=video/x-raw,width=320,height=180,framerate=30/1",
-                audio_delays,
+                MOVING_VIDEO,
+                audio_delays
+                    .iter()
+                    .map(|&delay| ("test audio", delayed_audio(delay)))
+                    .collect(),
                 counting_encoder,
             )
+        }
+
+        fn start_with_audio(audio: Vec<(&'static str, gst::Element)>) -> Self {
+            Self::start_from(MOVING_VIDEO, audio, false)
         }
 
         // An idle screen: one frame per keepalive, stamped on arrival, and
@@ -1494,14 +1656,16 @@ mod tests {
         fn start_idle(audio_tracks: usize) -> Self {
             Self::start_from(
                 "appsrc name=video is-live=true format=time do-timestamp=true caps=video/x-raw,format=I420,width=320,height=180,framerate=0/1 ! capsfilter name=capture caps=video/x-raw,format=I420,width=320,height=180,framerate=0/1",
-                &vec![gst::ClockTime::ZERO; audio_tracks],
+                (0..audio_tracks)
+                    .map(|_| ("test audio", delayed_audio(gst::ClockTime::ZERO)))
+                    .collect(),
                 false,
             )
         }
 
         fn start_from(
             video: &str,
-            audio_delays: &[gst::ClockTime],
+            audio: Vec<(&'static str, gst::Element)>,
             counting_encoder: bool,
         ) -> Self {
             gst::init().unwrap();
@@ -1531,19 +1695,17 @@ mod tests {
             ])
             .unwrap();
             let mux = movie_mux().unwrap();
-            let sink = element("filesink").unwrap();
-            sink.set_property("sync", false);
-            sink.set_property("location", session.output_path.to_str().unwrap());
-            pipeline.add_many([&mux, &sink]).unwrap();
-            mux.link(&sink).unwrap();
+            pipeline.add(&mux).unwrap();
+            movie_file(&pipeline, &mux, session.output_path.to_str().unwrap()).unwrap();
             let mut movie = Movie::new(
                 &pipeline,
                 &pipeline.by_name("parser").unwrap(),
                 &mux,
-                !audio_delays.is_empty(),
+                !audio.is_empty(),
             )
             .unwrap();
             let counters = Arc::new(Counters::default());
+            count_dropped(&queue, counters.clone());
             let video = pipeline.by_name("video").unwrap();
             attach_timing_probe(&video, counters.clone());
             if video
@@ -1565,17 +1727,8 @@ mod tests {
                 count_frames_like_old_va_encoders(&pipeline.by_name("video").unwrap(), &encoder);
             }
             keep_capture_timestamps(&encoder, &pipeline.by_name("parser").unwrap());
-            for &delay in audio_delays {
-                let source = element("audiotestsrc").unwrap();
-                source.set_property("is-live", true);
-                source.static_pad("src").unwrap().add_probe(
-                    gst::PadProbeType::BUFFER,
-                    move |_, info| match info.buffer().and_then(|buffer| buffer.pts()) {
-                        Some(pts) if pts < delay => gst::PadProbeReturn::Drop,
-                        _ => gst::PadProbeReturn::Ok,
-                    },
-                );
-                add_audio_source(&mut movie, &source, "test audio", &counters).unwrap();
+            for (name, source) in &audio {
+                add_audio_source(&mut movie, source, name, &counters).unwrap();
             }
             attach_encoded_probe(&pipeline.by_name("parser").unwrap(), counters.clone());
             let (events_tx, events) = mpsc::channel();
@@ -1644,7 +1797,8 @@ mod tests {
         }
 
         fn finish(&mut self) -> Result<()> {
-            self.stop.send(true).unwrap();
+            // A recording that already failed has dropped its receiver.
+            let _ = self.stop.send(true);
             self.worker.take().unwrap().join().unwrap()
         }
 
@@ -1789,6 +1943,472 @@ mod tests {
                 let _ = worker.join();
             }
             let _ = std::fs::remove_file(&self.session.output_path);
+        }
+    }
+
+    const MOVING_VIDEO: &str = "videotestsrc name=video is-live=true pattern=ball ! capsfilter name=capture caps=video/x-raw,width=320,height=180,framerate=30/1";
+
+    // Audio that starts `delay` into the recording.
+    fn delayed_audio(delay: gst::ClockTime) -> gst::Element {
+        gst::init().unwrap();
+        let source = element("audiotestsrc").unwrap();
+        source.set_property("is-live", true);
+        source
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                match info.buffer().and_then(|buffer| buffer.pts()) {
+                    Some(pts) if pts < delay => gst::PadProbeReturn::Drop,
+                    _ => gst::PadProbeReturn::Ok,
+                }
+            });
+        source
+    }
+
+    // Live capture like pulsesrc: the producer keeps real time, and when
+    // nobody reads its 200 ms ring buffer in time it overwrites the oldest
+    // audio and marks the next buffer DISCONT. A leaky queue does the same.
+    fn ring_buffer_audio(name: &str) -> gst::Element {
+        lagging_audio(name, Duration::ZERO)
+    }
+
+    // Audio that reaches the pipeline `lag` after it was captured.
+    fn lagging_audio(name: &str, lag: Duration) -> gst::Element {
+        gst::init().unwrap();
+        let bin = gst::parse::bin_from_description(
+            &format!(
+                "audiotestsrc name=producer is-live=true samplesperbuffer=480 ! {} queue leaky=downstream max-size-time=200000000 max-size-buffers=0 max-size-bytes=0",
+                if lag.is_zero() {
+                    String::new()
+                } else {
+                    // Before the ring buffer, which must stay the only place
+                    // audio can wait.
+                    format!("queue max-size-time=0 max-size-buffers=0 max-size-bytes=0 min-threshold-time={} !", lag.as_nanos())
+                }
+            ),
+            true,
+        )
+        .unwrap();
+        bin.set_property("name", name);
+        bin.upcast()
+    }
+
+    // Blocks the pad's streaming thread once, `after` from now, for `stall`,
+    // like a write() or an encoder call that does not return.
+    fn stall_once(pad: &gst::Pad, after: Duration, stall: Duration) {
+        let start = Instant::now();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            if start.elapsed() >= after && !done.swap(true, Ordering::SeqCst) {
+                std::thread::sleep(stall);
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
+    // Seconds missing from each audio track. qtmux stretches the packet
+    // before a hole over it, so a hole is packet spacing beyond one AAC frame.
+    fn audio_holes(probe: &serde_json::Value) -> Vec<f64> {
+        let packets = probe["packets"].as_array().unwrap();
+        probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stream| stream["codec_type"] == "audio")
+            .map(|stream| {
+                let mut starts: Vec<f64> = packets
+                    .iter()
+                    .filter(|packet| packet["stream_index"] == stream["index"])
+                    .map(|packet| packet["pts_time"].as_str().unwrap().parse().unwrap())
+                    .collect();
+                starts.sort_by(f64::total_cmp);
+                starts
+                    .windows(2)
+                    .map(|pair| pair[1] - pair[0] - 1024.0 / 48000.0)
+                    .filter(|hole| *hole > 0.03)
+                    .sum::<f64>()
+                    .max(0.0)
+            })
+            .collect()
+    }
+
+    // Seconds of 30 fps video missing between frames.
+    fn missing_video(probe: &serde_json::Value) -> f64 {
+        let index = probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["codec_type"] == "video")
+            .unwrap()["index"]
+            .clone();
+        let mut pts: Vec<f64> = probe["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|packet| packet["stream_index"] == index)
+            .map(|packet| packet["pts_time"].as_str().unwrap().parse().unwrap())
+            .collect();
+        pts.sort_by(f64::total_cmp);
+        pts.windows(2)
+            .map(|pair| pair[1] - pair[0] - 1.0 / 30.0)
+            .filter(|missing| *missing > 0.02)
+            .sum()
+    }
+
+    fn pipeline_element(pipeline: &gst::Pipeline, factory: &str) -> Vec<gst::Element> {
+        pipeline
+            .iterate_recurse()
+            .into_iter()
+            .flatten()
+            .filter(|element| {
+                element
+                    .factory()
+                    .is_some_and(|found| found.name() == factory)
+            })
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Stall {
+        // write() into the movie file blocks.
+        Write,
+        // The video encoder takes no frame.
+        Encoder,
+        // The microphone captures nothing.
+        AudioProducer,
+        // The microphone's server goes away, like pulsesrc after a
+        // PipeWire or PulseAudio restart.
+        AudioFailure,
+    }
+
+    struct StallOutcome {
+        result: Result<()>,
+        // Seconds missing from system audio and the microphone.
+        holes: Vec<f64>,
+        // Where each audio track ends.
+        audio_ends: Vec<f64>,
+        video_end: f64,
+        missing_video: f64,
+        dropped: u64,
+        logs: Vec<String>,
+        media_lost: Option<String>,
+    }
+
+    impl StallOutcome {
+        // The loss the recording reported for a track, in seconds.
+        fn reported(&self, track: &str) -> f64 {
+            let message = self.media_lost.as_deref().unwrap_or_default();
+            message
+                .split_once(&format!("{track} is missing "))
+                .and_then(|(_, rest)| rest.split_once(" s")?.0.parse().ok())
+                .unwrap_or(0.0)
+        }
+    }
+
+    // System audio and a microphone, a stall two seconds in, then four more
+    // seconds. `adjust` changes the pipeline before the stall.
+    fn record_through(
+        stall: Stall,
+        seconds: f64,
+        adjust: impl FnOnce(&gst::Pipeline),
+    ) -> StallOutcome {
+        let mut recording = TestRecording::start_with_audio(vec![
+            ("system audio", ring_buffer_audio("system-audio")),
+            ("microphone", ring_buffer_audio("microphone")),
+        ]);
+        let pipeline = &recording.pipeline;
+        adjust(pipeline);
+        let (after, length) = (Duration::from_secs(2), Duration::from_secs_f64(seconds));
+        let microphone = pipeline
+            .by_name("microphone")
+            .unwrap()
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .by_name("producer")
+            .unwrap();
+        match stall {
+            Stall::Write => {
+                let sink = &pipeline_element(pipeline, "filesink")[0];
+                stall_once(&sink.static_pad("sink").unwrap(), after, length);
+            }
+            Stall::Encoder => {
+                let encoder = pipeline.by_name("encoder").unwrap();
+                stall_once(&encoder.static_pad("sink").unwrap(), after, length);
+            }
+            Stall::AudioProducer => {
+                let start = Instant::now();
+                let silent = after..after + length;
+                microphone.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::BUFFER,
+                    move |_, _| {
+                        if silent.contains(&start.elapsed()) {
+                            gst::PadProbeReturn::Drop
+                        } else {
+                            gst::PadProbeReturn::Ok
+                        }
+                    },
+                );
+            }
+            Stall::AudioFailure => {
+                let start = Instant::now();
+                microphone.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::BUFFER,
+                    move |pad, info| {
+                        if start.elapsed() < after {
+                            return gst::PadProbeReturn::Ok;
+                        }
+                        reject_capture(
+                            pad,
+                            info,
+                            gst::StreamError::Failed,
+                            "Disconnected: Connection terminated",
+                        )
+                    },
+                );
+            }
+        }
+        std::thread::sleep(after + length + Duration::from_secs(4));
+        let result = recording.finish();
+        let probe = recording.probe();
+        let dropped = dropped_frames(&recording.pipeline, &recording.counters);
+        let (mut logs, mut media_lost) = (Vec::new(), None);
+        for event in recording.events.try_iter() {
+            match event {
+                RecorderEvent::Log { message, .. } => logs.push(message),
+                RecorderEvent::MediaLost { message, .. } => media_lost = Some(message),
+                _ => {}
+            }
+        }
+        StallOutcome {
+            result,
+            holes: audio_holes(&probe),
+            audio_ends: probe["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|stream| stream["codec_type"] == "audio")
+                .map(|stream| {
+                    let seconds = |key: &str| stream[key].as_str().unwrap().parse::<f64>().unwrap();
+                    seconds("start_time") + seconds("duration")
+                })
+                .collect(),
+            video_end: end_seconds(&probe, "h264"),
+            missing_video: missing_video(&probe),
+            dropped,
+            logs,
+            media_lost,
+        }
+    }
+
+    #[test]
+    fn a_stalled_file_write_loses_nothing_while_the_write_buffer_lasts() {
+        let outcome = record_through(Stall::Write, 6.0, |_| {});
+        outcome.result.as_ref().unwrap();
+        assert_eq!(outcome.holes, [0.0, 0.0], "audio lost to the write stall");
+        assert!(
+            outcome.missing_video < 0.05 && outcome.dropped == 0,
+            "{}s of video, {} frames lost to the write stall",
+            outcome.missing_video,
+            outcome.dropped
+        );
+        assert_eq!(outcome.media_lost, None);
+    }
+
+    // Past the write buffer every track waits for the disk, as without it.
+    // The loss is bounded by the stall and reported as it was recorded.
+    #[test]
+    fn a_write_stall_longer_than_the_write_buffer_reports_what_it_cost() {
+        let outcome = record_through(Stall::Write, 6.0, |pipeline| {
+            pipeline
+                .by_name(WRITE_QUEUE)
+                .unwrap()
+                .set_property("max-size-bytes", 16u32 << 10);
+        });
+        outcome.result.as_ref().unwrap();
+        assert_reports_its_losses(&outcome);
+        // Audio and video each wait about four seconds for the disk.
+        for hole in &outcome.holes {
+            assert!((1.0..2.5).contains(hole), "{:?}", outcome.holes);
+        }
+        assert!(
+            (1.0..2.5).contains(&outcome.missing_video),
+            "{}",
+            outcome.missing_video
+        );
+    }
+
+    #[test]
+    fn an_encoder_stall_loses_its_video_and_reports_the_audio_it_cost() {
+        let outcome = record_through(Stall::Encoder, 6.0, |_| {});
+        outcome.result.as_ref().unwrap();
+        assert_reports_its_losses(&outcome);
+        // Audio waits as long as its queue lasts, then its source overwrites it.
+        for hole in &outcome.holes {
+            assert!((1.0..2.5).contains(hole), "{:?}", outcome.holes);
+        }
+        assert!(
+            (5.5..6.5).contains(&outcome.missing_video),
+            "{}",
+            outcome.missing_video
+        );
+    }
+
+    #[test]
+    fn a_stalled_audio_source_costs_only_its_own_audio() {
+        let outcome = record_through(Stall::AudioProducer, 2.0, |_| {});
+        outcome.result.as_ref().unwrap();
+        assert_reports_its_losses(&outcome);
+        assert_eq!(
+            outcome.holes[0], 0.0,
+            "system audio waited for the microphone"
+        );
+        assert!(
+            (1.9..2.1).contains(&outcome.holes[1]),
+            "{:?}",
+            outcome.holes
+        );
+        assert!(
+            outcome.missing_video < 0.05 && outcome.dropped == 0,
+            "{}s of video, {} frames lost waiting for the microphone",
+            outcome.missing_video,
+            outcome.dropped
+        );
+    }
+
+    // Video waits for audio only as long as audio waits for video, then
+    // drops at capture instead of building up encoded frames.
+    #[test]
+    fn an_audio_source_stalled_past_the_video_limit_reports_the_video_it_cost() {
+        let most = Arc::new(AtomicU64::new(0));
+        let level = most.clone();
+        let outcome = record_through(Stall::AudioProducer, 6.0, |pipeline| {
+            let held = pipeline.by_name(HELD_QUEUE).unwrap();
+            held.connect("overrun", false, move |values| {
+                let queue = values[0].get::<gst::Element>().unwrap();
+                let frames = queue.property::<u32>("current-level-buffers");
+                level.fetch_max(frames.into(), Ordering::SeqCst);
+                None
+            });
+        });
+        outcome.result.as_ref().unwrap();
+        // The queue's time level spans the frames dropped meanwhile, so count
+        // the frames it holds: the limit's worth at 30 fps.
+        let limit = (HELD_VIDEO_LIMIT + gst::ClockTime::SECOND).seconds() * 30;
+        let most = most.load(Ordering::SeqCst);
+        assert!(
+            (limit..=limit + 1).contains(&most),
+            "{most} frames waited for the microphone"
+        );
+        assert_reports_its_losses(&outcome);
+        assert!(
+            (5.9..6.1).contains(&outcome.holes[1]),
+            "{:?}",
+            outcome.holes
+        );
+        assert!(
+            (1.5..2.5).contains(&outcome.missing_video),
+            "{}",
+            outcome.missing_video
+        );
+    }
+
+    #[test]
+    fn a_failed_audio_source_ends_its_track_and_the_recording_continues() {
+        let outcome = record_through(Stall::AudioFailure, 0.0, |_| {});
+        outcome.result.as_ref().unwrap();
+        assert!(
+            outcome.missing_video < 0.05 && outcome.dropped == 0,
+            "{}s of video, {} frames lost",
+            outcome.missing_video,
+            outcome.dropped
+        );
+        assert!((outcome.audio_ends[0] - outcome.video_end).abs() < 0.1);
+        assert!(
+            (1.8..2.3).contains(&outcome.audio_ends[1]),
+            "the microphone ends at {}s",
+            outcome.audio_ends[1]
+        );
+        let message = outcome.media_lost.unwrap();
+        assert!(
+            message.contains("microphone stopped at 2.")
+                && message.contains("Disconnected: Connection terminated")
+                && message.contains("so its track ends there"),
+            "{message}"
+        );
+        assert!(!message.contains("system audio"), "{message}");
+        assert!(
+            outcome
+                .logs
+                .iter()
+                .any(|log| log.contains("microphone stopped at")),
+            "{:?}",
+            outcome.logs
+        );
+    }
+
+    // Audio captured before a pause but arriving after it is dropped by
+    // design. A source that delivers late makes that drop longer than a
+    // lost-audio hole.
+    #[test]
+    fn audio_dropped_by_pausing_is_not_reported_lost() {
+        let mut recording = TestRecording::start_with_audio(vec![(
+            "microphone",
+            lagging_audio("microphone", Duration::from_millis(100)),
+        )]);
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(700));
+            recording.control(true);
+            std::thread::sleep(Duration::from_millis(450));
+            recording.control(false);
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        recording.finish().unwrap();
+        recording.probe();
+        for event in recording.events.try_iter() {
+            match event {
+                RecorderEvent::MediaLost { message, .. } => panic!("{message}"),
+                RecorderEvent::Log { message, .. } => {
+                    assert!(!message.contains(" lost "), "{message}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // What the recording reported matches what its movie is missing.
+    fn assert_reports_its_losses(outcome: &StallOutcome) {
+        let message = outcome
+            .media_lost
+            .as_deref()
+            .expect("no media loss reported");
+        assert_eq!(
+            outcome.dropped > 0,
+            message.contains(&format!("{} video frames were dropped", outcome.dropped)),
+            "{message}"
+        );
+        // Dropped frames account for the missing video, give or take a
+        // frame at either edge of each gap.
+        assert!(
+            (outcome.dropped as f64 / 30.0 - outcome.missing_video).abs() < 0.15,
+            "{} dropped frames, {}s of video missing",
+            outcome.dropped,
+            outcome.missing_video
+        );
+        for (track, hole) in ["system audio", "microphone"].iter().zip(&outcome.holes) {
+            let reported = outcome.reported(track);
+            assert!(
+                (reported - hole).abs() < 0.05,
+                "{track}: reported {reported}s lost, movie misses {hole}s: {message}"
+            );
+            assert_eq!(
+                *hole > 0.0,
+                outcome
+                    .logs
+                    .iter()
+                    .any(|log| log.starts_with(&format!("capture-engine: {track} lost "))),
+                "{track}: {:?}",
+                outcome.logs
+            );
         }
     }
 
@@ -2154,47 +2774,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_audio_track_does_not_build_up_encoded_video() {
-        let mut recording = TestRecording::start(1);
-        let stall = gst::ClockTime::from_mseconds(1000)..gst::ClockTime::from_mseconds(2500);
-        recording
-            .pipeline
-            .iterate_elements()
-            .into_iter()
-            .filter_map(|element| element.ok())
-            .find(|element| {
-                element
-                    .factory()
-                    .is_some_and(|f| f.name() == "audiotestsrc")
-            })
-            .unwrap()
-            .static_pad("src")
-            .unwrap()
-            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-                match info.buffer().and_then(|buffer| buffer.pts()) {
-                    Some(pts) if stall.contains(&pts) => gst::PadProbeReturn::Drop,
-                    _ => gst::PadProbeReturn::Ok,
-                }
-            });
-        let held = recording.pipeline.by_name(HELD_QUEUE).unwrap();
-        let mut most = 0;
-        loop {
-            let now = recording.pipeline.current_running_time().unwrap();
-            if now >= gst::ClockTime::from_mseconds(3000) {
-                break;
-            }
-            // From the stall on; the video held at startup drains before it.
-            if now >= gst::ClockTime::from_mseconds(1100) {
-                most = most.max(held.property::<u32>("current-level-buffers"));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        recording.finish().unwrap();
-        recording.probe();
-        assert!(most <= 1, "{most} encoded frames waited for stalled audio");
-    }
-
-    #[test]
     fn held_video_is_bounded_in_bytes_as_well_as_time() {
         gst::init().unwrap();
         let pipeline = PipelineGuard(gst::Pipeline::new());
@@ -2216,7 +2795,7 @@ mod tests {
         pipeline.0.add_many([&video, &mux, &sink, &silent]).unwrap();
         mux.link(&sink).unwrap();
         let mut movie = Movie::new(&pipeline.0, &video, &mux, true).unwrap();
-        movie.add_audio("test audio", &silent);
+        movie.add_audio("test audio", &silent, vec![silent.clone()]);
         let held = pipeline.0.by_name(HELD_QUEUE).unwrap();
         pipeline.0.set_state(gst::State::Playing).unwrap();
         // Large constant-QP frames 10 ms apart reach the byte limit long
@@ -2329,6 +2908,16 @@ mod tests {
             (duration - active_duration).abs() < 0.2,
             "movie duration {duration}, active timeline {active_duration}"
         );
+        // Audio dropped while paused is not lost media.
+        for event in recording.events.try_iter() {
+            match event {
+                RecorderEvent::MediaLost { message, .. } => panic!("{message}"),
+                RecorderEvent::Log { message, .. } => {
+                    assert!(!message.contains(" lost "), "{message}")
+                }
+                _ => {}
+            }
+        }
     }
 
     // An idle screen sends a frame each keepalive. A short pause that swallows
@@ -2343,7 +2932,7 @@ mod tests {
             let audio = queue
                 .factory()
                 .is_some_and(|factory| factory.name() == "queue")
-                && ![CAPTURE_QUEUE, HELD_QUEUE].contains(&queue.name().as_str());
+                && ![CAPTURE_QUEUE, HELD_QUEUE, WRITE_QUEUE].contains(&queue.name().as_str());
             if audio {
                 let full = full.clone();
                 queue.connect("overrun", false, move |_| {

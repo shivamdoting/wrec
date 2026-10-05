@@ -277,6 +277,11 @@ pub enum RecorderEvent {
         session_id: u64,
         metrics: RecorderMetrics,
     },
+    /// The recording finished, but its movie is missing video frames or audio.
+    MediaLost {
+        session_id: u64,
+        message: String,
+    },
     Failed {
         session_id: Option<u64>,
         message: String,

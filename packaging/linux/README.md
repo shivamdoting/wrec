@@ -171,7 +171,7 @@ kernel kills the worker with SIGKILL as soon as the daemon process exits for any
 reason, so a worker never outlives its daemon. If the daemon is killed or crashes
 during a recording, the movie is not finalized. At most, it is playable through
 the last completed fragment that reached the disk. Fragments still buffered by
-the file writer are lost. In one test, killing the daemon 12 seconds into a
+the file writer are lost, which during a disk stall can be up to 32 MiB. In one test, killing the daemon 12 seconds into a
 static-desktop recording left an empty file.
 
 While recording, resource use is the daemon plus its worker. Measuring the
@@ -272,6 +272,22 @@ Audio encoding runs on the CPU. Use `--no-system-audio` when no audio service is
 available. Configure devices in desktop sound settings. Linux cannot apply the
 shared wrec window-hiding or custom microphone-indicator options; job settings
 report them disabled with a warning. The desktop controls its sharing indicator.
+
+The movie writer takes the next sample of every track in time order, so a track
+that stops delivering holds up the others. Encoded video and each audio track
+can wait about 4 seconds for the rest. Encoded movie data can wait for the disk
+in a 32 MiB buffer, about 16 seconds at 16 Mbit/s. These buffers stay nearly
+empty unless something stalls. Past those limits the recording keeps going with
+gaps: the capture queue drops video frames, and an audio source overwrites audio
+that nothing read in time. A stalled video encoder always costs the frames
+captured meanwhile, since raw frames are too large to keep.
+
+If an audio source fails, for example because PipeWire or PulseAudio restarts,
+its track ends at that point and video and the other track keep recording. A
+completed job is not proof of a whole movie. When frames were dropped, audio has
+gaps, or a track ended early or never started, the job finishes `completed` with
+a `media_lost` warning that states what is missing, and the job events record when
+each audio gap happened. `wrec record` prints the warning when it finishes.
 
 On Wayland, a recording watches four things besides its frames: the ScreenCast
 session's `Closed` signal, the D-Bus owner of `org.freedesktop.portal.Desktop`,
