@@ -167,6 +167,8 @@ struct Timeline {
     paused_at: Option<gst::ClockTime>,
     offset: gst::ClockTime,
     accept_from: gst::ClockTime,
+    // Finished pauses, in running time, oldest first.
+    pauses: Vec<(gst::ClockTime, gst::ClockTime)>,
 }
 
 impl Timeline {
@@ -178,15 +180,19 @@ impl Timeline {
         if let Some(paused_at) = self.paused_at.take() {
             self.offset += now.saturating_sub(paused_at);
             self.accept_from = now;
+            self.pauses.push((paused_at, now));
         }
     }
 
-    // Time spent paused before `now`, including a pause still going on.
-    fn paused(&self, now: gst::ClockTime) -> gst::ClockTime {
-        self.offset
-            + self
-                .paused_at
-                .map_or(gst::ClockTime::ZERO, |at| now.saturating_sub(at))
+    // How much of the running time from `start` to `end` was paused.
+    fn paused_between(&self, start: gst::ClockTime, end: gst::ClockTime) -> gst::ClockTime {
+        self.paused_at
+            .map(|at| (at, gst::ClockTime::MAX))
+            .into_iter()
+            .chain(self.pauses.iter().rev().copied())
+            .take_while(|&(_, resumed)| resumed > start)
+            .map(|(paused, resumed)| end.min(resumed).saturating_sub(start.max(paused)))
+            .sum()
     }
 
     fn position(&self, now: gst::ClockTime) -> gst::ClockTime {
@@ -871,11 +877,11 @@ const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 // drops any. When downstream does not read pulsesrc in time, its ring buffer
 // overwrites the oldest audio, and the next buffer is stamped where capture
 // actually resumed. Sources keep capturing while paused, so a pause leaves no
-// gap, and the paused part of a gap is not in the movie.
+// gap, and the paused part of a gap is not in the movie. Capture timestamps
+// and pauses are both in running time.
 fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<Counters>) {
-    // Where the next buffer should start, and the paused time when it was due.
-    let next = Mutex::new(None::<(gst::ClockTime, gst::ClockTime)>);
-    let clock = source.clone();
+    // Where the next buffer should start.
+    let next = Mutex::new(None::<gst::ClockTime>);
     source
         .static_pad("src")
         .unwrap()
@@ -886,21 +892,19 @@ fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<C
             else {
                 return gst::PadProbeReturn::Ok;
             };
-            let paused = counters
-                .timeline
-                .lock()
-                .unwrap()
-                .paused(clock.current_running_time().unwrap_or_default());
             let mut next = next.lock().unwrap();
-            if let Some((expected, before)) = *next {
-                let missing = pts
-                    .saturating_sub(expected)
-                    .saturating_sub(paused.saturating_sub(before));
+            if let Some(expected) = next.filter(|&expected| pts > expected) {
+                let paused = counters
+                    .timeline
+                    .lock()
+                    .unwrap()
+                    .paused_between(expected, pts);
+                let missing = pts.saturating_sub(expected).saturating_sub(paused);
                 if missing > AUDIO_HOLE {
                     lost.fetch_add(missing.nseconds(), Ordering::Relaxed);
                 }
             }
-            *next = Some((pts + duration, paused));
+            *next = Some(pts + duration);
             gst::PadProbeReturn::Ok
         });
 }
@@ -2611,6 +2615,71 @@ mod tests {
             (reported - hole).abs() < 0.05,
             "reported {reported}s, the movie misses {hole}s"
         );
+    }
+
+    // Audio lost between buffers with these capture times, in seconds, with
+    // the timeline's pauses as (start, end), and a pause still going on.
+    fn lost_between(buffers: &[(f64, f64)], pauses: &[(f64, f64)], paused_at: Option<f64>) -> f64 {
+        gst::init().unwrap();
+        let time = |seconds: f64| gst::ClockTime::from_nseconds((seconds * 1e9) as u64);
+        let counters = Arc::new(Counters::default());
+        {
+            let mut timeline = counters.timeline.lock().unwrap();
+            for &(start, end) in pauses {
+                timeline.pause(time(start));
+                timeline.resume(time(end));
+            }
+            if let Some(at) = paused_at {
+                timeline.pause(time(at));
+            }
+        }
+        let pipeline = PipelineGuard(gst::Pipeline::new());
+        let source = element("appsrc").unwrap();
+        source.set_property_from_str("format", "time");
+        source.set_property("caps", gst::Caps::new_empty_simple("audio/x-raw"));
+        let sink = element("fakesink").unwrap();
+        sink.set_property("sync", false);
+        pipeline.0.add_many([&source, &sink]).unwrap();
+        source.link(&sink).unwrap();
+        let lost = Arc::new(AtomicU64::new(0));
+        count_lost_audio(&source, lost.clone(), counters);
+        pipeline.0.set_state(gst::State::Playing).unwrap();
+        for &(start, end) in buffers {
+            let mut buffer = gst::Buffer::new();
+            let buffer_mut = buffer.get_mut().unwrap();
+            buffer_mut.set_pts(time(start));
+            buffer_mut.set_duration(time(end - start));
+            assert_eq!(
+                source.emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer]),
+                gst::FlowReturn::Ok
+            );
+        }
+        let _ = source.emit_by_name::<gst::FlowReturn>("end-of-stream", &[]);
+        let ended = pipeline.0.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(5),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        assert!(ended.is_some_and(|message| message.type_() == gst::MessageType::Eos));
+        lost.load(Ordering::Relaxed) as f64 / 1e9
+    }
+
+    // Capture timestamps decide, not when buffers arrive: a source that
+    // delivers late still has its gap inside the pause.
+    #[test]
+    fn only_the_unpaused_part_of_a_capture_gap_is_lost() {
+        let near = |lost: f64, expected: f64| (lost - expected).abs() < 1e-6;
+        // Inside a pause from 2 s to 4 s.
+        let lost = lost_between(&[(2.04, 2.05), (3.95, 3.96)], &[(2.0, 4.0)], None);
+        assert!(near(lost, 0.0), "{lost}");
+        // From 1.5 s to 4.5 s, half a second on each side of it.
+        let lost = lost_between(&[(1.49, 1.5), (4.5, 4.51)], &[(2.0, 4.0)], None);
+        assert!(near(lost, 1.0), "{lost}");
+        // Into a pause that has not ended.
+        let lost = lost_between(&[(1.49, 1.5), (3.0, 3.01)], &[], Some(2.0));
+        assert!(near(lost, 0.5), "{lost}");
+        // Shorter than a hole.
+        let lost = lost_between(&[(1.0, 1.01), (1.02, 1.03)], &[], None);
+        assert!(near(lost, 0.0), "{lost}");
     }
 
     // A source that reports a fatal error but leaves its branch open still
