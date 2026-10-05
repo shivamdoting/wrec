@@ -181,6 +181,14 @@ impl Timeline {
         }
     }
 
+    // Time spent paused before `now`, including a pause still going on.
+    fn paused(&self, now: gst::ClockTime) -> gst::ClockTime {
+        self.offset
+            + self
+                .paused_at
+                .map_or(gst::ClockTime::ZERO, |at| now.saturating_sub(at))
+    }
+
     fn position(&self, now: gst::ClockTime) -> gst::ClockTime {
         self.paused_at.unwrap_or(now).saturating_sub(self.offset)
     }
@@ -603,8 +611,7 @@ const OMITTED: u8 = 3;
 
 struct AudioTrack {
     name: &'static str,
-    // From the source to the queue that feeds the movie.
-    branch: Vec<gst::Element>,
+    source: gst::Element,
     pad: gst::Pad,
     probe: Option<gst::PadProbeId>,
     state: Arc<AtomicU8>,
@@ -689,8 +696,9 @@ impl Movie {
         &mut self,
         name: &'static str,
         queue: &gst::Element,
-        branch: Vec<gst::Element>,
-    ) -> Arc<AtomicU64> {
+        source: &gst::Element,
+        lost: Arc<AtomicU64>,
+    ) {
         let pad = queue.static_pad("src").unwrap();
         // Linking the track sends a reconfigure upstream. The encoder answers
         // with an allocation query, which waits behind this queue while qtmux
@@ -733,17 +741,15 @@ impl Movie {
                 }
             },
         );
-        let lost = Arc::new(AtomicU64::new(0));
         self.audio.push(AudioTrack {
             name,
-            branch,
+            source: source.clone(),
             pad,
             probe,
             state,
-            lost: lost.clone(),
+            lost,
             failed: None,
         });
-        lost
     }
 
     // Called on every pass of the run loop. Requests the audio pads once every
@@ -790,13 +796,11 @@ impl Movie {
         Ok(omitted)
     }
 
-    // The audio track whose branch posted a message, if any.
-    fn audio_track(&mut self, message: &gst::Message) -> Option<&mut AudioTrack> {
+    // The audio track whose source posted a message, if any.
+    fn audio_source(&mut self, message: &gst::Message) -> Option<&mut AudioTrack> {
         let src = message.src()?;
         self.audio.iter_mut().find(|track| {
-            track.branch.iter().any(|element| {
-                src == element.upcast_ref::<gst::Object>() || src.has_as_ancestor(element)
-            })
+            src == track.source.upcast_ref::<gst::Object>() || src.has_as_ancestor(&track.source)
         })
     }
 }
@@ -821,6 +825,9 @@ fn add_audio_source(
     name: &'static str,
     counters: &Arc<Counters>,
 ) -> Result<()> {
+    // Counted before pausing drops anything.
+    let lost = Arc::new(AtomicU64::new(0));
+    count_lost_audio(source, lost.clone(), counters.clone());
     attach_timing_probe(source, counters.clone());
     let convert = element("audioconvert")?;
     let resample = element("audioresample")?;
@@ -852,8 +859,7 @@ fn add_audio_source(
     ];
     movie.pipeline.add_many(chain).map_err(backend)?;
     gst::Element::link_many(chain).map_err(backend)?;
-    let lost = movie.add_audio(name, &queue, chain.map(|element| element.clone()).to_vec());
-    count_lost_audio(source, lost, counters.clone());
+    movie.add_audio(name, &queue, source, lost);
     Ok(())
 }
 
@@ -861,12 +867,15 @@ fn add_audio_source(
 // time, so a longer jump is lost audio.
 const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 
-// Counts audio missing between consecutive buffers. When downstream does not
-// read pulsesrc in time, its ring buffer overwrites the oldest audio, and the
-// next buffer is stamped where capture actually resumed.
+// Counts audio missing between consecutive captured buffers, before pausing
+// drops any. When downstream does not read pulsesrc in time, its ring buffer
+// overwrites the oldest audio, and the next buffer is stamped where capture
+// actually resumed. Sources keep capturing while paused, so a pause leaves no
+// gap, and the paused part of a gap is not in the movie.
 fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<Counters>) {
-    // Where the next buffer should start, and the pause offset it assumes.
+    // Where the next buffer should start, and the paused time when it was due.
     let next = Mutex::new(None::<(gst::ClockTime, gst::ClockTime)>);
+    let clock = source.clone();
     source
         .static_pad("src")
         .unwrap()
@@ -877,16 +886,21 @@ fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<C
             else {
                 return gst::PadProbeReturn::Ok;
             };
-            let offset = counters.timeline.lock().unwrap().offset;
+            let paused = counters
+                .timeline
+                .lock()
+                .unwrap()
+                .paused(clock.current_running_time().unwrap_or_default());
             let mut next = next.lock().unwrap();
             if let Some((expected, before)) = *next {
-                let missing = pts.saturating_sub(expected);
-                // A resume moves the timeline; audio dropped while paused is not lost.
-                if before == offset && missing > AUDIO_HOLE {
+                let missing = pts
+                    .saturating_sub(expected)
+                    .saturating_sub(paused.saturating_sub(before));
+                if missing > AUDIO_HOLE {
                     lost.fetch_add(missing.nseconds(), Ordering::Relaxed);
                 }
             }
-            *next = Some((pts + duration, offset));
+            *next = Some((pts + duration, paused));
             gst::PadProbeReturn::Ok
         });
 }
@@ -1222,10 +1236,20 @@ fn run(
         if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match message.view() {
                 gst::MessageView::Error(error) => {
-                    // A failed audio source ends its own track, and the movie
-                    // keeps recording the others.
-                    if let Some(track) = movie.audio_track(&message) {
+                    // A failed audio source, such as pulsesrc after its server
+                    // went away, ends its own track, and the movie keeps
+                    // recording the others. Other audio errors fail the job.
+                    if let Some(track) = movie.audio_source(&message) {
                         if track.failed.is_none() {
+                            // pulsesrc ends its branch after a fatal error; make
+                            // sure, without waiting on its stream lock here.
+                            if let Some(branch) =
+                                track.source.static_pad("src").and_then(|pad| pad.peer())
+                            {
+                                std::thread::spawn(move || {
+                                    branch.send_event(gst::event::Eos::new())
+                                });
+                            }
                             let position = counters
                                 .timeline
                                 .lock()
@@ -1311,16 +1335,17 @@ fn run(
             {
                 video_cut = true;
                 log(format!(
-                    "capture-engine: video encoding did not finish within {} s of stop; ending the video track so the movie can be finalized",
+                    "capture-engine: video did not reach the movie writer within {} s of stop while nothing waited downstream; ending the video track there so the movie can be finalized",
                     FINALIZING.as_secs()
                 ));
                 let video = movie.video.clone();
                 std::thread::spawn(move || video.send_event(gst::event::Eos::new()));
             }
             if !video_cut || stopping.is_some_and(|at| at.elapsed() > FINALIZING * 3 / 2) {
-                return Err(backend(
-                    "Movie finalization timed out after 10s; only completed fragments may be playable.",
-                ));
+                return Err(backend(format!(
+                    "Movie finalization timed out after {}s; only completed fragments may be playable.",
+                    stopping.unwrap().elapsed().as_secs()
+                )));
             }
         }
         if started && last_metrics.elapsed() >= Duration::from_secs(1) {
@@ -1393,7 +1418,10 @@ fn media_lost(
 ) -> Option<String> {
     let mut lost = Vec::new();
     if video_cut {
-        lost.push("video encoding stopped responding, so the video ends early".to_string());
+        lost.push(format!(
+            "video did not finish within {} s of stop, so the video ends early",
+            FINALIZING.as_secs()
+        ));
     }
     if dropped_frames > 0 {
         lost.push(format!("{dropped_frames} video frames were dropped"));
@@ -2530,6 +2558,118 @@ mod tests {
         }
     }
 
+    // The microphone's producer inside its ring-buffer bin.
+    fn producer(pipeline: &gst::Pipeline, name: &str) -> gst::Element {
+        pipeline
+            .by_name(name)
+            .unwrap()
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .by_name("producer")
+            .unwrap()
+    }
+
+    // The part of a stall spent paused is not in the movie, and the rest is
+    // lost audio.
+    #[test]
+    fn audio_lost_across_a_pause_counts_only_recorded_time() {
+        let mut recording =
+            TestRecording::start_with_audio(vec![("microphone", ring_buffer_audio("microphone"))]);
+        let start = Instant::now();
+        let silent = Duration::from_secs(2)..Duration::from_millis(4500);
+        producer(&recording.pipeline, "microphone")
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                if silent.contains(&start.elapsed()) {
+                    gst::PadProbeReturn::Drop
+                } else {
+                    gst::PadProbeReturn::Ok
+                }
+            });
+        std::thread::sleep(Duration::from_millis(2800));
+        recording.control(true);
+        std::thread::sleep(Duration::from_millis(700));
+        recording.control(false);
+        std::thread::sleep(Duration::from_secs(3));
+        recording.finish().unwrap();
+        let hole = audio_holes(&recording.probe())[0];
+        assert!((1.6..2.0).contains(&hole), "the movie misses {hole}s");
+        let message = recording
+            .events
+            .try_iter()
+            .find_map(|event| match event {
+                RecorderEvent::MediaLost { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("no media loss reported");
+        let reported: f64 = message
+            .split_once("microphone is missing ")
+            .and_then(|(_, rest)| rest.split_once(" s")?.0.parse().ok())
+            .unwrap();
+        assert!(
+            (reported - hole).abs() < 0.05,
+            "reported {reported}s, the movie misses {hole}s"
+        );
+    }
+
+    // A source that reports a fatal error but leaves its branch open still
+    // ends its track, so the muxer does not wait for it.
+    #[test]
+    fn a_failed_audio_source_that_keeps_its_branch_open_still_ends_its_track() {
+        let mut recording = TestRecording::start_with_audio(vec![
+            ("system audio", ring_buffer_audio("system-audio")),
+            ("microphone", ring_buffer_audio("microphone")),
+        ]);
+        let start = Instant::now();
+        let reported = std::sync::atomic::AtomicBool::new(false);
+        producer(&recording.pipeline, "microphone")
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |pad, _| {
+                if start.elapsed() < Duration::from_secs(2) {
+                    return gst::PadProbeReturn::Ok;
+                }
+                if !reported.swap(true, Ordering::SeqCst) {
+                    let source = pad.parent_element().unwrap();
+                    gst::element_error!(source, gst::ResourceError::Read, ("device unplugged"));
+                }
+                gst::PadProbeReturn::Drop
+            });
+        std::thread::sleep(Duration::from_secs(8));
+        recording.finish().unwrap();
+        let probe = recording.probe();
+        let missing = missing_video(&probe);
+        assert!(
+            missing < 0.05,
+            "{missing}s of video lost waiting for the failed microphone"
+        );
+        let message = recording
+            .events
+            .try_iter()
+            .find_map(|event| match event {
+                RecorderEvent::MediaLost { message, .. } => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert!(message.contains("microphone stopped at 2."), "{message}");
+    }
+
+    // Only a source going away is recoverable. Any other audio error fails
+    // the recording, as before.
+    #[test]
+    fn an_audio_encoder_error_fails_the_recording() {
+        let mut recording =
+            TestRecording::start_with_audio(vec![("microphone", ring_buffer_audio("microphone"))]);
+        let encoder = pipeline_element(&recording.pipeline, "avenc_aac")[0].clone();
+        std::thread::sleep(Duration::from_secs(1));
+        gst::element_error!(encoder, gst::LibraryError::Encode, ("encoder failed"));
+        let at = Instant::now();
+        let error = recording.finish().unwrap_err();
+        assert!(error.to_string().contains("encoder failed"), "{error}");
+        assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
+    }
+
     // What the recording reported matches what its movie is missing.
     fn assert_reports_its_losses(outcome: &StallOutcome) {
         let message = outcome
@@ -2950,7 +3090,7 @@ mod tests {
         pipeline.0.add_many([&video, &mux, &sink, &silent]).unwrap();
         mux.link(&sink).unwrap();
         let mut movie = Movie::new(&pipeline.0, &video, &mux, true).unwrap();
-        movie.add_audio("test audio", &silent, vec![silent.clone()]);
+        movie.add_audio("test audio", &silent, &silent, Arc::default());
         let held = pipeline.0.by_name(HELD_QUEUE).unwrap();
         pipeline.0.set_state(gst::State::Playing).unwrap();
         // Large constant-QP frames 10 ms apart reach the byte limit long

@@ -431,6 +431,10 @@ fn last_lines(stderr: ChildStderr) -> std::io::Result<mpsc::Receiver<String>> {
     Ok(receiver)
 }
 
+// Marks where the movie was finalized in the worker's event stream; it is
+// sent to the daemon as Message::Finalized, never as a log.
+const FINALIZED: &str = "\0wrec-capture-finalized";
+
 pub fn run() -> ! {
     unsafe {
         libc::prctl(libc::PR_SET_NAME, c"wrec-capture".as_ptr() as libc::c_ulong);
@@ -485,32 +489,48 @@ pub fn run() -> ! {
         control_stop.send_replace(true);
     });
     let stopping_output = output.clone();
+    let finalized = events.clone();
     let stopping = Arc::new(move |teardown: crate::pipeline::Teardown| {
-        send(
-            &stopping_output,
-            &match teardown {
-                crate::pipeline::Teardown::Recording => Message::Stopping,
-                crate::pipeline::Teardown::Finalized => Message::Finalized,
-                crate::pipeline::Teardown::AttemptStarted => Message::CleaningAttempt,
-                crate::pipeline::Teardown::AttemptFinished => Message::CleanedAttempt,
-            },
-        )
+        let message = match teardown {
+            crate::pipeline::Teardown::Recording => Message::Stopping,
+            // Behind the events sent before it, such as lost media, so the
+            // daemon has them even if cleanup then crashes.
+            crate::pipeline::Teardown::Finalized => {
+                let _ = finalized.send(RecorderEvent::Log {
+                    session_id: None,
+                    message: FINALIZED.into(),
+                });
+                return;
+            }
+            crate::pipeline::Teardown::AttemptStarted => Message::CleaningAttempt,
+            crate::pipeline::Teardown::AttemptFinished => Message::CleanedAttempt,
+        };
+        send(&stopping_output, &message)
     });
     let forwarder = spawn("wrec-capture-events", move || {
-        for event in outgoing {
-            let finished = matches!(
-                event,
-                RecorderEvent::Exited { .. } | RecorderEvent::Cancelled { .. }
-            );
-            send(&output, &Message::Event(event));
-            if finished {
-                break;
-            }
-        }
+        forward(outgoing, |message| send(&output, message))
     });
     capture(target, settings, session, events, receiver, stop, stopping);
     let _ = forwarder.join();
     std::process::exit(0)
+}
+
+// Writes the worker's events in the order they were sent, until the last one.
+fn forward(outgoing: mpsc::Receiver<RecorderEvent>, mut write: impl FnMut(&Message)) {
+    for event in outgoing {
+        let finished = matches!(
+            event,
+            RecorderEvent::Exited { .. } | RecorderEvent::Cancelled { .. }
+        );
+        if matches!(&event, RecorderEvent::Log { message, .. } if message == FINALIZED) {
+            write(&Message::Finalized);
+            continue;
+        }
+        write(&Message::Event(event));
+        if finished {
+            break;
+        }
+    }
 }
 
 fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
@@ -880,6 +900,36 @@ mod tests {
             fake.terminal(),
             RecorderEvent::Exited { success: false, status, .. } if status == "source lost"
         ));
+    }
+
+    #[test]
+    fn finalization_is_reported_after_the_events_before_it() {
+        let (events, outgoing) = mpsc::channel();
+        for event in [
+            RecorderEvent::MediaLost {
+                session_id: 0,
+                message: "lost".into(),
+            },
+            RecorderEvent::Log {
+                session_id: None,
+                message: FINALIZED.into(),
+            },
+            RecorderEvent::Exited {
+                session_id: 0,
+                success: true,
+                status: "recording finalized".into(),
+            },
+        ] {
+            events.send(event).unwrap();
+        }
+        let mut written = Vec::new();
+        forward(outgoing, |message| {
+            written.push(serde_json::to_string(message).unwrap())
+        });
+        assert_eq!(written.len(), 3, "{written:?}");
+        assert!(written[0].contains("MediaLost"), "{written:?}");
+        assert_eq!(written[1], r#""Finalized""#);
+        assert!(written[2].contains("Exited"), "{written:?}");
     }
 
     #[test]

@@ -284,7 +284,9 @@ that nothing read in time. A stalled video encoder always costs the frames
 captured meanwhile, since raw frames are too large to keep.
 
 If an audio source fails, for example because PipeWire or PulseAudio restarts,
-its track ends at that point and video and the other track keep recording. A
+its track ends at that point and video and the other track keep recording. An
+error anywhere else in the audio chain, such as the AAC encoder, still fails the
+job. A
 completed job is not proof of a whole movie. When frames were dropped, audio has
 gaps, or a track ended early or never started, the job finishes `completed` with
 a `media_lost` warning that states what is missing, and the job events record when
@@ -317,10 +319,12 @@ message instead of finalizing it.
 
 Stop drains the encoders and finalizes the movie, including when paused. If
 video still has not reached the movie writer 10 seconds after stop while nothing
-waits for the disk or for audio, the video encoder is stuck. wrec then ends the
-video track at the writer and finalizes the movie with the video it already has,
-and the job reports the shorter video as lost media. A disk that stalls for more
-than 10 seconds during finalization still fails the job. The
+waits for the disk or for audio, wrec ends the video track at the writer and
+finalizes the movie with the video it already has, and the job reports the
+shorter video as lost media. This rescues a movie whose encoder hung; an encoder
+that is only very slow loses the frames it had not finished. If that takes more
+than 5 more seconds, or a disk stalls for more than 10 seconds during
+finalization, the job fails as before. The
 writer requests ten-second movie fragments; encoder keyframes can close them
 earlier. An interrupted recording may only be playable through its last completed
 fragment. Audio sources can deliver their
