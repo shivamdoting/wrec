@@ -2508,7 +2508,9 @@ mod tests {
         }
 
         // `config` adds modules. Without shm all audio goes through the
-        // socket, so a SlowLink can carry it.
+        // socket, so a SlowLink can carry it. The server loads its modules
+        // in order and the socket last, so once the socket exists, so does
+        // everything the modules make, such as a pipe source's fifo.
         fn start_with(config: &str, shm: bool) -> Self {
             static ID: AtomicU64 = AtomicU64::new(0);
             let directory = std::env::temp_dir().join(format!(
@@ -2522,11 +2524,11 @@ mod tests {
             std::fs::write(
                 &script,
                 format!(
-                    "load-module module-native-protocol-unix socket={} auth-anonymous=1\n\
-                     load-module module-null-sink sink_name=wrec_test rate=48000 channels=2\n\
-                     load-module module-sine sink=wrec_test frequency=440\n{}",
-                    socket.display(),
-                    config.replace("{dir}", &directory.display().to_string())
+                    "load-module module-null-sink sink_name=wrec_test rate=48000 channels=2\n\
+                     load-module module-sine sink=wrec_test frequency=440\n{}\
+                     load-module module-native-protocol-unix socket={} auth-anonymous=1\n",
+                    config.replace("{dir}", &directory.display().to_string()),
+                    socket.display()
                 ),
             )
             .unwrap();
@@ -2535,6 +2537,7 @@ mod tests {
                 .args(["--use-pid-file=no", "--system=no", "-F"])
                 .arg(&script)
                 .arg(format!("--disable-shm={}", !shm))
+                .arg("--log-target=stderr")
                 .env("HOME", &directory)
                 .env("XDG_RUNTIME_DIR", &directory)
                 .env("PULSE_RUNTIME_PATH", &directory)
@@ -2543,16 +2546,28 @@ mod tests {
                     format!("unix:path={}", directory.join("no-bus").display()),
                 )
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::fs::File::create(directory.join("log")).unwrap())
                 .spawn()
                 .expect("pulseaudio is not installed");
-            let server = Self { process, directory };
             let deadline = Instant::now() + Duration::from_secs(10);
+            let mut server = Self { process, directory };
             while !socket.exists() {
-                assert!(Instant::now() < deadline, "pulseaudio did not start");
+                if let Some(status) = server.process.try_wait().unwrap() {
+                    panic!("pulseaudio exited ({status}):\n{}", server.log());
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "pulseaudio did not start within 10 s:\n{}",
+                    server.log()
+                );
                 std::thread::sleep(Duration::from_millis(50));
             }
             server
+        }
+
+        // What the server wrote to stderr, such as a module it couldn't load.
+        fn log(&self) -> String {
+            std::fs::read_to_string(self.directory.join("log")).unwrap_or_default()
         }
 
         fn source(&self) -> gst::Element {
@@ -2581,7 +2596,9 @@ mod tests {
 
     impl Drop for PulseServer {
         fn drop(&mut self) {
-            unsafe { libc::kill(self.process.id() as libc::pid_t, libc::SIGCONT) };
+            if let Ok(None) = self.process.try_wait() {
+                unsafe { libc::kill(self.process.id() as libc::pid_t, libc::SIGCONT) };
+            }
             let _ = self.process.kill();
             let _ = self.process.wait();
             let _ = std::fs::remove_dir_all(&self.directory);
@@ -2677,7 +2694,12 @@ mod tests {
                 .write(true)
                 .custom_flags(libc::O_NONBLOCK)
                 .open(server.directory.join("fifo"))
-                .unwrap();
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "module-pipe-source made no fifo ({error}). The server said:\n{}",
+                        server.log()
+                    )
+                });
             // 0.34 s of this audio, on any kernel.
             unsafe { libc::fcntl(fifo.as_raw_fd(), libc::F_SETPIPE_SZ, 65536) };
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2766,6 +2788,8 @@ mod tests {
         reported: f64,
         // Where the audio ends after the video.
         after_video: f64,
+        // Where the audio starts after the video.
+        starts_after_video: f64,
         // When the system audio track ended, if it failed.
         stopped: Option<String>,
         // When the recording had started.
@@ -2814,6 +2838,7 @@ mod tests {
             hole: audio_holes(&probe)[0],
             reported,
             after_video: end_seconds(&probe, "aac") - end_seconds(&probe, "h264"),
+            starts_after_video: start_seconds(&probe, "aac")[0] - start_seconds(&probe, "h264")[0],
             stopped: lost
                 .split_once("system audio stopped at ")
                 .map(|(_, rest)| rest.to_string()),
@@ -3028,6 +3053,167 @@ mod tests {
         let (recorded, lost) = record_device_loss(&server, &link.socket, || {
             link.set_delay(Duration::from_millis(250));
             std::thread::sleep(Duration::from_secs(1));
+            server.stop_for(Duration::from_millis(800));
+            std::thread::sleep(Duration::from_secs(1));
+            link.set_delay(Duration::ZERO);
+        });
+        assert!(lost > 0.3, "{lost} s lost: {recorded:?}");
+        assert!(
+            (recorded.hole - lost).abs() < 0.03 && (recorded.reported - recorded.hole).abs() < 0.02,
+            "{lost} s lost: {recorded:?}"
+        );
+        assert!(
+            recorded.after_video.abs() < 0.05,
+            "{lost} s lost: {recorded:?}"
+        );
+    }
+
+    // The wall clock of this process and of the audio servers it starts,
+    // which a test sets forward or back through wall_clock.c without
+    // touching the system's.
+    struct WallClock(&'static std::sync::atomic::AtomicI64);
+
+    impl WallClock {
+        // Runs `test` again in a new process with wall_clock.c preloaded,
+        // and returns None once it passed there. In that process, returns
+        // the clock it shares with the servers it starts.
+        fn shared(test: &str) -> Option<Self> {
+            if let Some(path) = std::env::var_os("WREC_TEST_WALL_CLOCK") {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .unwrap();
+                let offset = unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        8,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED,
+                        file.as_raw_fd(),
+                        0,
+                    )
+                };
+                assert_ne!(offset, libc::MAP_FAILED);
+                return Some(Self(unsafe { &*offset.cast() }));
+            }
+            let directory = std::env::temp_dir()
+                .join(format!("wrec-linux-test-wall-clock-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let (source, shim) = (
+                directory.join("wall_clock.c"),
+                directory.join("wall_clock.so"),
+            );
+            std::fs::write(&source, include_str!("wall_clock.c")).unwrap();
+            let built = std::process::Command::new("cc")
+                .args(["-shared", "-fPIC", "-o"])
+                .args([&shim, &source])
+                .arg("-ldl")
+                .status()
+                .expect("no C compiler");
+            assert!(built.success());
+            let clock = directory.join("offset");
+            std::fs::write(&clock, 0i64.to_ne_bytes()).unwrap();
+            let ran = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    test,
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("LD_PRELOAD", &shim)
+                .env("WREC_TEST_WALL_CLOCK", &clock)
+                .status()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(ran.success(), "{test} failed while its clock was set");
+            None
+        }
+
+        // How far the wall clock is from the monotonic clock, in nanoseconds.
+        fn offset() -> i64 {
+            let read = |clock| {
+                let mut time = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                unsafe { libc::clock_gettime(clock, &mut time) };
+                time.tv_sec * 1_000_000_000 + time.tv_nsec
+            };
+            read(libc::CLOCK_REALTIME) - read(libc::CLOCK_MONOTONIC)
+        }
+
+        // Sets the clock `by` nanoseconds forward, or back, and checks this
+        // process sees that.
+        fn set(&self, by: i64) {
+            let before = Self::offset();
+            self.0.fetch_add(by, Ordering::Relaxed);
+            let moved = Self::offset() - before;
+            assert!((moved - by).abs() < 1_000_000, "moved {moved} ns");
+        }
+
+        // Checks `server` reads this clock too.
+        fn shared_with(&self, server: &PulseServer) {
+            let maps = std::fs::read_to_string(format!("/proc/{}/maps", server.process.id()));
+            assert!(maps.unwrap().contains("wall_clock.so"));
+        }
+    }
+
+    // Setting the system clock forward or back while the server's answers
+    // are on the way, among the first that place the audio and later on,
+    // moves no audio, nor does it hide or add to audio the device lost
+    // meanwhile. The server and libpulse say when they answered and asked by
+    // the wall clock, and those answers straddle the change.
+    #[test]
+    #[ignore = "needs pulseaudio and a C compiler"]
+    fn audio_a_pulse_server_while_the_clock_is_set_keeps_its_place() {
+        const SECOND: i64 = 1_000_000_000;
+        let Some(clock) = WallClock::shared(
+            "pipeline::tests::audio_a_pulse_server_while_the_clock_is_set_keeps_its_place",
+        ) else {
+            return;
+        };
+        // Answers take 0.6 s, so those to the first questions, asked once
+        // audio arrives 0.6 s in, are on the way 0.9 s in.
+        for (first, later) in [(2 * SECOND, -2 * SECOND), (-2 * SECOND, 2 * SECOND)] {
+            let server = PulseServer::start_with(PipeDevice::CONFIG, false);
+            clock.shared_with(&server);
+            let device = PipeDevice::start(&server);
+            let link = SlowLink::new(&server);
+            link.set_delay(Duration::from_millis(600));
+            let source = server.source_from("wrec_pipe", &link.socket);
+            let placed = device.placement(&source);
+            let mut began = None;
+            let recorded = record_system_audio_with(source, |_| {
+                began = Some(Instant::now());
+                std::thread::sleep(Duration::from_millis(900));
+                clock.set(first);
+                std::thread::sleep(Duration::from_millis(3100));
+                clock.set(later);
+                std::thread::sleep(Duration::from_secs(1));
+                link.set_delay(Duration::ZERO);
+                std::thread::sleep(Duration::from_secs(3));
+            });
+            assert_placed(&placed.lock().unwrap(), recorded.began);
+            let lost = device.stop().into_iter().filter(|&at| at >= began.unwrap());
+            assert_eq!(
+                lost.count(),
+                0,
+                "the device lost audio during the recording"
+            );
+            assert!(
+                recorded.whole() && recorded.starts_after_video.abs() < 0.05,
+                "set {first} then {later} ns: {recorded:?}"
+            );
+        }
+        let server = PulseServer::start_with(PipeDevice::CONFIG, false);
+        clock.shared_with(&server);
+        let link = SlowLink::new(&server);
+        let (recorded, lost) = record_device_loss(&server, &link.socket, || {
+            link.set_delay(Duration::from_millis(600));
+            std::thread::sleep(Duration::from_secs(1));
+            clock.set(-SECOND / 2);
             server.stop_for(Duration::from_millis(800));
             std::thread::sleep(Duration::from_secs(1));
             link.set_delay(Duration::ZERO);

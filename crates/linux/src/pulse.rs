@@ -241,7 +241,7 @@ impl Capture {
             held: Vec::new(),
             end: None,
             last_request: None,
-            asking: 0,
+            asking: std::collections::VecDeque::new(),
             last_arrival: None,
             resumed: false,
         }));
@@ -359,8 +359,8 @@ struct Reader {
     // Where the last buffer pushed ended.
     end: Option<i64>,
     last_request: Option<gst::ClockTime>,
-    // Questions on the way.
-    asking: u32,
+    // Questions on the way, and wall_clock's distance when each was asked.
+    asking: std::collections::VecDeque<i64>,
     last_arrival: Option<gst::ClockTime>,
     // Since audio stopped arriving for a while, until the server says
     // whether it lost any meanwhile.
@@ -414,7 +414,29 @@ unsafe extern "C" fn timing_updated(_: *mut Stream, success: c_int, reader: *mut
 }
 
 // Questions on the way at most, as for a server that stopped answering.
-const ASKING: u32 = 64;
+const ASKING: usize = 64;
+
+// A change in wall_clock's distance of more than this is the clock being
+// set. Reading the two clocks one after the other takes microseconds.
+const CLOCK_SET: i64 = 1_000_000;
+
+// The wall clock, and its distance from the monotonic clock, in
+// nanoseconds. NTP adjusts both alike, so the distance changes only when
+// someone sets the wall clock, or the machine sleeps, which the monotonic
+// clock doesn't count.
+fn wall_clock() -> (i64, i64) {
+    let read = |clock| {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(clock, &mut time) };
+        time.tv_sec * 1_000_000_000 + time.tv_nsec
+    };
+    let monotonic = read(libc::CLOCK_MONOTONIC);
+    let wall = read(libc::CLOCK_REALTIME);
+    (wall, wall - monotonic)
+}
 
 // How long video waits for an audio track to start.
 const FIRST_ACCOUNT: gst::ClockTime = crate::pipeline::HELD_VIDEO_LIMIT;
@@ -521,9 +543,11 @@ impl Reader {
     // Answers come in order, each after the audio sent before it, and more
     // than one can be on the way, up to ASKING for a server that stopped.
     unsafe fn request_timing(&mut self) {
-        if self.closed || self.asking >= ASKING {
+        if self.closed || self.asking.len() >= ASKING {
             return;
         }
+        // Before libpulse reads the wall clock for the question.
+        let asked = wall_clock().1;
         let operation = (self.library.stream_update_timing_info)(
             self.stream,
             Some(timing_updated),
@@ -533,7 +557,7 @@ impl Reader {
             return;
         }
         (self.library.operation_unref)(operation);
-        self.asking += 1;
+        self.asking.push_back(asked);
         self.last_request = self.now().map(|(_, running)| running);
     }
 
@@ -543,7 +567,7 @@ impl Reader {
     // behind; the reply comes after the audio sent before it. libpulse
     // already took off what it holds, and read() takes all it holds.
     unsafe fn timing_updated(&mut self, success: bool) {
-        self.asking = self.asking.saturating_sub(1);
+        let asked = self.asking.pop_front();
         // libpulse can answer after close() let go of the stream.
         if self.closed {
             return;
@@ -555,16 +579,19 @@ impl Reader {
         if success && info.read_index_corrupt == 0 && info.read_index > self.position {
             self.position = info.read_index;
         }
-        let mut realtime = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        libc::clock_gettime(libc::CLOCK_REALTIME, &mut realtime);
-        // How long ago, by the system's wall clock, the server answered.
-        let age = (realtime.tv_sec - info.timestamp.tv_sec) * 1_000_000_000 + realtime.tv_nsec
-            - info.timestamp.tv_usec * 1000;
+        // The server says when it answered by its wall clock. libpulse
+        // takes that if it falls between when it asked and heard back by
+        // its own, and otherwise halfway between those. A server on this
+        // machine reads the same system clock, so either is right unless
+        // someone set that clock since the question, which makes the answer
+        // seem older or newer by as much. Such an answer says nothing about
+        // when.
+        let (wall, offset) = wall_clock();
+        let set = asked.map_or(true, |asked| (offset - asked).abs() > CLOCK_SET);
+        let age = wall - info.timestamp.tv_sec * 1_000_000_000 - info.timestamp.tv_usec * 1000;
         let answered = now.nseconds() as i64 - age;
         if success
+            && !set
             && info.write_index_corrupt == 0
             && info.playing != 0
             && info.write_index > 0
