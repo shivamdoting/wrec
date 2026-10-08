@@ -30,7 +30,7 @@ pub(crate) fn check_plugins(settings: &RecorderSettings) -> Result<()> {
         "capsfilter",
         "queue",
         parser_name(settings.codec),
-        "qtmux",
+        "mp4mux",
         "filesink",
     ] {
         element(factory)?;
@@ -97,8 +97,12 @@ fn capture_caps(dmabuf: bool, pipewire: bool, fps: u32) -> gst::Caps {
     }
 }
 
+// qtmux guesses a 4:3 or 16:9 TV picture for widths 641 through 1052 and
+// heights 480 through 576, and writes a clean aperture that makes players crop
+// a window of, say, 800x528 to 704x528. mp4mux is the same muxer writing the
+// ISO flavor, which declares the full picture.
 fn movie_mux() -> Result<gst::Element> {
-    let mux = element("qtmux")?;
+    let mux = element("mp4mux")?;
     mux.set_property("fragment-duration", 10000u32);
     mux.set_property_from_str("fragment-mode", "first-moov-then-finalise");
     // Preserve sub-frame timestamps around pause/resume instead of rounding
@@ -109,7 +113,7 @@ fn movie_mux() -> Result<gst::Element> {
 
 const WRITE_QUEUE: &str = "write-queue";
 
-// qtmux writes each sample as it muxes it, so while a write blocks every
+// mp4mux writes each sample as it muxes it, so while a write blocks every
 // track waits behind it: video drops at capture within two frames, and audio
 // once its queue fills. This buffer stays empty unless the disk stalls; at
 // the highest bitrate-mode quality (16 Mbit/s) it covers about 16 seconds.
@@ -627,13 +631,13 @@ struct AudioTrack {
     failed: Option<(gst::ClockTime, String)>,
 }
 
-// The recording pipeline and the tracks of its movie. qtmux writes a track
+// The recording pipeline and the tracks of its movie. mp4mux writes a track
 // for every pad requested from it, and a track that never received audio has
 // no sample description, which makes the whole movie unreadable. AAC encoders
 // only learn their format from their first input buffer, so audio pads are
 // requested once each track has delivered a buffer or ended without one.
 // Until then video waits in a queue instead of being dropped at capture.
-// qtmux takes nothing while any track is empty, so afterwards the same queue
+// mp4mux takes nothing while any track is empty, so afterwards the same queue
 // lets video wait for a stalled audio track as long as audio can wait for
 // video, instead of dropping frames at capture.
 struct Movie {
@@ -707,7 +711,7 @@ impl Movie {
     ) {
         let pad = queue.static_pad("src").unwrap();
         // Linking the track sends a reconfigure upstream. The encoder answers
-        // with an allocation query, which waits behind this queue while qtmux
+        // with an allocation query, which waits behind this queue while mp4mux
         // holds audio for the next video frame, and pulsesrc loses audio
         // meanwhile. The audio caps are fixed, so nothing needs it.
         pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_, info| {
@@ -850,7 +854,7 @@ fn add_audio_source(
     let parser = element("aacparse")?;
     let queue = element("queue")?;
     // Holds audio while the movie waits for video, or for another audio
-    // track to start, which can take HELD_VIDEO_LIMIT. qtmux writes a video
+    // track to start, which can take HELD_VIDEO_LIMIT. mp4mux writes a video
     // frame only when the next one arrives and holds later audio until then,
     // so at an idle screen's keepalive rate audio waits up to two keepalives,
     // and a pause that swallows a frame makes it almost three.
@@ -993,7 +997,7 @@ fn match_keyframes_to_capture(encoder: &gst::Element, fps: u32) {
 }
 
 // A capture rate change reconfigures the encoder, which writes new parameter
-// sets. qtmux stores those as an extra sample description, which a fragmented
+// sets. mp4mux stores those as an extra sample description, which a fragmented
 // movie cannot reference, so the movie keeps its first description and every
 // keyframe carries its own parameter sets (avc3/hev1).
 fn movie_format(codec: Codec, fps: u32) -> Result<gst::Element> {
@@ -1007,7 +1011,7 @@ fn movie_format(codec: Codec, fps: u32) -> Result<gst::Element> {
         .field("alignment", "au")
         .build(),
     );
-    // qtmux times each sample by the next one and takes the last sample's
+    // mp4mux times each sample by the next one and takes the last sample's
     // duration from its buffer. Some encoders (x265enc 1.24) leave it unset
     // for variable-rate capture, and players skip a zero-length last frame,
     // so a frame without one lasts a frame at the current capture rate, or at
@@ -1067,7 +1071,7 @@ fn attach_capture_probe(
                             if width >= 2 && height >= 2 {
                                 let mut dimensions = counters.dimensions.lock().unwrap();
                                 resized.store(dimensions.is_some(), Ordering::Relaxed);
-                                // A MOV track has a fixed canvas. Window resizes are
+                                // A movie track has a fixed canvas. Window resizes are
                                 // scaled/letterboxed into the initial output size.
                                 let (w, h) = dimensions
                                     .map(|d| (d.output_width as i32, d.output_height as i32))
@@ -1776,7 +1780,7 @@ mod tests {
             let session = RecordingSession {
                 id,
                 output_path: std::env::temp_dir()
-                    .join(format!("wrec-linux-test-{}-{id}.mov", std::process::id())),
+                    .join(format!("wrec-linux-test-{}-{id}.mp4", std::process::id())),
             };
             // Synthetic software encoding is confined to tests. Exercise the same
             // bus/control/mux code without pretending this is a hardware benchmark.
@@ -2108,7 +2112,7 @@ mod tests {
         });
     }
 
-    // Seconds missing from each audio track. qtmux stretches the packet
+    // Seconds missing from each audio track. mp4mux stretches the packet
     // before a hole over it, so a hole is packet spacing beyond one AAC frame.
     fn audio_holes(probe: &serde_json::Value) -> Vec<f64> {
         let packets = probe["packets"].as_array().unwrap();
@@ -2838,7 +2842,7 @@ mod tests {
         let delay = gst::ClockTime::from_seconds(1);
         let mut recording = TestRecording::start_with_audio_delays(&[gst::ClockTime::ZERO, delay]);
         std::thread::sleep(Duration::from_secs(13));
-        let partial = recording.session.output_path.with_extension("partial.mov");
+        let partial = recording.session.output_path.with_extension("partial.mp4");
         std::fs::copy(&recording.session.output_path, &partial).unwrap();
         recording.finish().unwrap();
         let seconds = delay.nseconds() as f64 / 1_000_000_000.0;
@@ -3062,7 +3066,7 @@ mod tests {
         let mut recording =
             TestRecording::start_with_audio_delays(&[gst::ClockTime::from_seconds(1)]);
         // An idle screen sends no frames, so when the late track is linked
-        // qtmux holds its audio until the next frame arrives.
+        // mp4mux holds its audio until the next frame arrives.
         let idle = gst::ClockTime::from_mseconds(500)..gst::ClockTime::from_mseconds(2200);
         recording
             .pipeline
@@ -3084,7 +3088,7 @@ mod tests {
             }
         };
         // Audio that arrives while paused is dropped, so audio stuck behind
-        // qtmux before the pause would leave a hole.
+        // mp4mux before the pause would leave a hole.
         wait_until(2000);
         recording.control(true);
         wait_until(2500);
@@ -3285,7 +3289,7 @@ mod tests {
     }
 
     // An idle screen sends a frame each keepalive. A short pause that swallows
-    // one leaves almost two keepalives between the frames around it, and qtmux
+    // one leaves almost two keepalives between the frames around it, and mp4mux
     // holds audio until the frame after those. The audio queue must absorb
     // that wait: a full queue blocks pulsesrc, which then drops audio.
     #[test]
@@ -3338,7 +3342,7 @@ mod tests {
         recording.finish().unwrap();
         assert!(
             !full.load(Ordering::SeqCst),
-            "audio queue filled while qtmux waited for idle video"
+            "audio queue filled while mp4mux waited for idle video"
         );
         recording.probe();
     }
@@ -3349,7 +3353,7 @@ mod tests {
         RecordingSession {
             id,
             output_path: std::env::temp_dir().join(format!(
-                "wrec-linux-record-test-{}-{id}.mov",
+                "wrec-linux-record-test-{}-{id}.mp4",
                 std::process::id()
             )),
         }
@@ -3439,6 +3443,85 @@ mod tests {
         }
     }
 
+    // record() on its own thread. Every wait on it has a deadline, so an engine
+    // failure fails the test instead of hanging it. Dropping it stops the
+    // recording and waits as long as the daemon waits for a worker to exit.
+    struct RecordThread {
+        stop: watch::Sender<bool>,
+        returned: mpsc::Receiver<Result<()>>,
+    }
+
+    impl RecordThread {
+        fn spawn(
+            capture: CaptureInput,
+            session: &RecordingSession,
+            codec: Codec,
+            events: mpsc::Sender<RecorderEvent>,
+        ) -> Self {
+            let (commands, receiver) = mpsc::sync_channel(1);
+            let (stop, stopped) = watch::channel(false);
+            let (done, returned) = mpsc::channel();
+            let session = session.clone();
+            std::thread::spawn(move || {
+                let _commands = commands;
+                let result = record(
+                    &capture,
+                    &session,
+                    &silent_settings(codec),
+                    &events,
+                    receiver,
+                    &stopped,
+                    &|_| {},
+                );
+                let _ = done.send(result);
+            });
+            Self { stop, returned }
+        }
+
+        fn assert_running(&self) {
+            match self.returned.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {}
+                outcome => panic!("the recording ended early: {outcome:?}"),
+            }
+        }
+
+        fn finish(&self) -> Result<()> {
+            self.stop.send_replace(true);
+            self.returned
+                .recv_timeout(crate::worker::EXIT_DEADLINE)
+                .unwrap_or_else(|error| panic!("the recording did not return after stop: {error}"))
+        }
+    }
+
+    impl Drop for RecordThread {
+        fn drop(&mut self) {
+            self.stop.send_replace(true);
+            let _ = self.returned.recv_timeout(crate::worker::EXIT_DEADLINE);
+        }
+    }
+
+    // The test's appsrc once the recording plays it.
+    fn playing_source(
+        source: &Mutex<Option<gst::Element>>,
+        recording: &RecordThread,
+    ) -> gst::Element {
+        let start = Instant::now();
+        loop {
+            recording.assert_running();
+            let created = source.lock().unwrap().clone();
+            if let Some(appsrc) =
+                created.filter(|appsrc| appsrc.current_state() == gst::State::Playing)
+            {
+                return appsrc;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the capture source did not play within 10s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     // Each recording paces real frames through a leaky queue; running two at
     // once on a shared encoder would turn scheduling delays into frame drops.
     static RATE_CHANGE_RECORDING: Mutex<()> = Mutex::new(());
@@ -3477,34 +3560,10 @@ mod tests {
             source
         }));
         let session = test_session();
-        let partial = session.output_path.with_extension("partial.mov");
+        let partial = session.output_path.with_extension("partial.mp4");
         let (events, received) = mpsc::channel();
-        let (_commands, receiver) = mpsc::sync_channel(1);
-        let (stop, stopped) = watch::channel(false);
-        let worker_session = session.clone();
-        let worker = std::thread::spawn(move || {
-            record(
-                &capture,
-                &worker_session,
-                &silent_settings(codec),
-                &events,
-                receiver,
-                &stopped,
-                &|_| {},
-            )
-        });
-        let appsrc = loop {
-            if let Some(source) = source.lock().unwrap().clone() {
-                break source;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let playing = Instant::now();
-        while appsrc.current_state() != gst::State::Playing
-            && playing.elapsed() < Duration::from_secs(10)
-        {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let recording = RecordThread::spawn(capture, &session, codec, events);
+        let appsrc = playing_source(&source, &recording);
         // Stamp each frame with its schedule rather than the time the source
         // thread happens to forward it, so every packet maps to one pushed frame.
         let origin = appsrc.current_running_time().unwrap_or_default();
@@ -3536,7 +3595,7 @@ mod tests {
         {
             std::thread::sleep(Duration::from_millis(10));
         }
-        // qtmux writes a fragment when the next keyframe reaches it, so wait
+        // mp4mux writes a fragment when the next keyframe reaches it, so wait
         // for one that holds frames after the first rate change.
         let changed = phases[0].1 as f64;
         let copied = Instant::now();
@@ -3549,8 +3608,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        stop.send_replace(true);
-        let result = worker.join().unwrap();
+        let result = recording.finish();
         let events: Vec<RecorderEvent> = received.try_iter().collect();
         let factory = events
             .iter()
@@ -3750,6 +3808,212 @@ mod tests {
     fn hevc_recordings_survive_capture_rate_changes() {
         assert_rate_changes_stay_playable(Codec::Hevc, "hevc", &RISING);
         assert_rate_changes_stay_playable(Codec::Hevc, "hevc", &FALLING);
+    }
+
+    // Records white edges around a black picture and returns the movie.
+    fn record_framed_picture(codec: Codec, width: i32, height: i32) -> RecordingSession {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("format", "BGRx")
+            .field("width", width)
+            .field("height", height)
+            .field("framerate", gst::Fraction::new(0, 1))
+            .field("max-framerate", gst::Fraction::new(10, 1))
+            .build();
+        let mut picture = vec![0u8; (width * height * 4) as usize];
+        for (index, pixel) in picture.chunks_mut(4).enumerate() {
+            let (x, y) = (index as i32 % width, index as i32 / width);
+            if x.min(width - 1 - x).min(y).min(height - 1 - y) < EDGE {
+                pixel.fill(255);
+            }
+        }
+        let source = Arc::new(Mutex::new(None::<gst::Element>));
+        let created = source.clone();
+        let capture = CaptureInput::Element(Box::new(move || {
+            let source = element("appsrc").unwrap();
+            source.set_property("is-live", true);
+            source.set_property_from_str("format", "time");
+            source.set_property("caps", &caps);
+            *created.lock().unwrap() = Some(source.clone());
+            source
+        }));
+        let session = test_session();
+        let (events, _received) = mpsc::channel();
+        let recording = RecordThread::spawn(capture, &session, codec, events);
+        let appsrc = playing_source(&source, &recording);
+        let origin = appsrc.current_running_time().unwrap_or_default();
+        for frame in 0..10 {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut buffer = gst::Buffer::from_slice(picture.clone());
+            let buffer_mut = buffer.get_mut().unwrap();
+            buffer_mut.set_pts(origin + gst::ClockTime::from_mseconds(100 * frame));
+            assert_eq!(
+                appsrc.emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer]),
+                gst::FlowReturn::Ok
+            );
+        }
+        let pushed = Instant::now();
+        while appsrc.property::<u64>("current-level-buffers") > 0 {
+            recording.assert_running();
+            assert!(
+                pushed.elapsed() < Duration::from_secs(5),
+                "the recording took no frame for 5s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        recording.finish().unwrap();
+        session
+    }
+
+    const EDGE: i32 = 16;
+
+    // The pictures a player shows, decoded with FFmpeg's default cropping.
+    fn decoded_pictures(movie: &Path) -> Vec<(usize, usize, Vec<u8>)> {
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(movie)
+            .args(["-map", "0:v:0", "-vsync", "0", "-pix_fmt", "gray"])
+            .args(["-c:v", "pgm", "-f", "image2pipe", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut pictures = Vec::new();
+        let mut rest = &output.stdout[..];
+        while !rest.is_empty() {
+            // "P5\n<width> <height>\n255\n" followed by the pixels.
+            let mut fields = Vec::new();
+            while fields.len() < 4 {
+                let end = rest.iter().position(u8::is_ascii_whitespace).unwrap();
+                fields.push(String::from_utf8(rest[..end].to_vec()).unwrap());
+                rest = &rest[end + 1..];
+            }
+            let width: usize = fields[1].parse().unwrap();
+            let height: usize = fields[2].parse().unwrap();
+            pictures.push((width, height, rest[..width * height].to_vec()));
+            rest = &rest[width * height..];
+        }
+        pictures
+    }
+
+    // Boxes in the movie's final index, down to each video sample entry. A
+    // finished movie keeps its first index inside its media data box as
+    // "hoov", where this walk does not look, so a partial movie's first index
+    // goes unchecked.
+    fn video_boxes(movie: &Path) -> Vec<(String, Vec<u8>)> {
+        fn children(data: &[u8]) -> Vec<(&str, &[u8])> {
+            let mut boxes = Vec::new();
+            let mut rest = data;
+            while rest.len() >= 8 {
+                let size = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+                let size = if size == 0 { rest.len() } else { size };
+                if size < 8 || size > rest.len() {
+                    break;
+                }
+                let name = std::str::from_utf8(&rest[4..8]).unwrap_or("?");
+                boxes.push((name, &rest[8..size]));
+                rest = &rest[size..];
+            }
+            boxes
+        }
+        fn walk(name: &str, body: &[u8], found: &mut Vec<(String, Vec<u8>)>) {
+            let body = match name {
+                "moov" | "trak" | "tapt" | "mdia" | "minf" | "stbl" => body,
+                // A full box with an entry count.
+                "stsd" => &body[8..],
+                // The fields of a visual sample entry come before its boxes.
+                "avc1" | "avc3" | "hvc1" | "hev1" => &body[78..],
+                _ => return,
+            };
+            for (child, payload) in children(body) {
+                found.push((child.to_string(), payload.to_vec()));
+                walk(child, payload, found);
+            }
+        }
+        let data = std::fs::read(movie).unwrap();
+        let mut found = Vec::new();
+        for (name, body) in children(&data) {
+            walk(name, body, &mut found);
+        }
+        found
+    }
+
+    fn assert_records_every_pixel(codec: Codec, width: i32, height: i32) {
+        let session = record_framed_picture(codec, width, height);
+        let movie = &session.output_path;
+        let file_type = std::fs::read(movie).unwrap()[4..12].to_vec();
+        let boxes = video_boxes(movie);
+        let pictures = decoded_pictures(movie);
+        let _ = std::fs::remove_file(movie);
+        // Players crop to a clean aperture ("clap") or a track aperture
+        // ("tapt"). FFmpeg 8.0 applies clap when decoding; FFmpeg 7.0 does not.
+        let size = (width as u32, height as u32);
+        for (name, payload) in &boxes {
+            let field = |index: usize| {
+                u32::from_be_bytes(payload[index * 4..index * 4 + 4].try_into().unwrap())
+            };
+            let aperture = match name.as_str() {
+                // Width and height as fractions.
+                "clap" => (field(0) / field(1), field(2) / field(3)),
+                // A full box header, then 16.16 fixed-point width and height.
+                "clef" | "prof" | "enof" => (field(1) >> 16, field(2) >> 16),
+                _ => continue,
+            };
+            assert_eq!(aperture, size, "{name} crops the movie's picture");
+        }
+        assert!(
+            boxes
+                .iter()
+                .any(|(name, _)| name == "avcC" || name == "hvcC"),
+            "found no video sample entry in {boxes:?}"
+        );
+        assert!(!pictures.is_empty());
+        for (shown_width, shown_height, pixels) in pictures {
+            let shown = (shown_width as u32, shown_height as u32);
+            assert_eq!(shown, size, "the player shows a different picture");
+            let luma = |x: usize, y: usize| pixels[y * shown_width + x];
+            let (right, bottom) = (shown_width - 1, shown_height - 1);
+            let middle = (shown_width / 2, shown_height / 2);
+            let edges = [
+                (0, middle.1),
+                (right, middle.1),
+                (middle.0, 0),
+                (middle.0, bottom),
+                (0, 0),
+                (right, bottom),
+            ];
+            for (x, y) in edges {
+                assert!(luma(x, y) > 200, "the edge at {x},{y} is missing");
+            }
+            for (x, y) in [
+                (EDGE as usize + 2, middle.1),
+                (right - EDGE as usize - 2, middle.1),
+                middle,
+            ] {
+                assert!(luma(x, y) < 50, "the picture at {x},{y} moved");
+            }
+        }
+
+        // Linux names recordings ".mp4", so the file must say it is MP4.
+        assert_eq!(
+            String::from_utf8_lossy(&file_type),
+            "ftypmp42",
+            "the movie's file type"
+        );
+    }
+
+    // qtmux crops these sizes to a guessed TV aspect ratio; see movie_mux.
+    #[test]
+    fn h264_recordings_keep_every_pixel_at_tv_like_sizes() {
+        assert_records_every_pixel(Codec::H264, 800, 528);
+    }
+
+    #[test]
+    fn hevc_recordings_keep_every_pixel_at_tv_like_sizes() {
+        assert_records_every_pixel(Codec::Hevc, 800, 528);
     }
 
     // Rust heap bytes allocated and not yet freed by each thread. GStreamer

@@ -48,7 +48,7 @@ def main():
 
             result = run("record", "--target", "display:0", "--duration", "1s", "--json", success=False)
             assert "Wayland or X11 desktop session" in result.stdout + result.stderr
-            assert not list(Path(directory).rglob("*.mov"))
+            assert not list(Path(directory).rglob("*.mp4"))
             print("PASS: unsupported capture fails without a recording artifact")
 
             jobs = json.loads(run("jobs", "--json").stdout)

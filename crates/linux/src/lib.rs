@@ -97,7 +97,7 @@ impl RecorderEngine for LinuxRecorder {
         let id = now.max(previous.saturating_add(1));
         let session = RecordingSession {
             id,
-            output_path: settings.output_dir.join(format!("wrec-{id}.mov")),
+            output_path: settings.output_dir.join(format!("wrec-{id}.mp4")),
         };
         self.active = Some(worker::Worker::spawn(
             Path::new(worker::PROGRAM),

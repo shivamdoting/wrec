@@ -13,10 +13,22 @@ the worker exits at the end of each recording. On glibc builds, the worker also
 asks the allocator to return freed heap pages between encoder attempts.
 
 On compatible Wayland/VA-API systems, the preferred pipeline is
-`pipewiresrc → DMA-BUF → vapostproc → VA encoder → qtmux`. Rust manages sessions
+`pipewiresrc → DMA-BUF → vapostproc → VA encoder → mp4mux`. Rust manages sessions
 and buffer metadata without mapping video pixels. The source negotiates four to
 eight buffers and the capture queue holds at most two frames. Conversion and scaling
 can allocate GPU surfaces; this does not imply zero total copies.
+
+Linux recordings are `wrec-<id>.mp4` files in ISO MP4 format (file type
+`mp42`, also listing `mp41`, `isom` and `iso2`). macOS recordings are still
+QuickTime `.mov` files. On Linux, wrec uses `mp4mux` rather than GStreamer's
+QuickTime writer, `qtmux`. For widths 641 through 1052 and heights 480 through
+576, `qtmux` guesses a 4:3 or 16:9 TV picture and declares a clean aperture for
+it. FFmpeg 8.0 crops to that aperture, so an 800x528 window would play as
+704x528; FFmpeg 7.0 ignores it. `mp4mux` is the same GStreamer muxer writing the
+ISO variant, and it declares the full picture. Tracks, codecs, timing and
+fragments are the same with either. The `.mp4` name matches the contents, so
+tools that pick a reader or a MIME type from the extension get MP4. QuickTime
+and Safari playback of Linux recordings has not been tested.
 
 When audio is requested, encoded video waits until each audio track starts or
 ends. A track that never supplies a sample would otherwise make the whole movie
@@ -55,9 +67,10 @@ The movie writer uses frame timestamps for playback timing. Refresh-rate
 changes can also change the encoder's parameter sets. The movie keeps its
 initial track description and carries those parameter sets with each keyframe,
 using `avc3` for H.264 and `hev1` for HEVC. This avoids changing the sample
-description in a fragmented movie, which can make older qtmux versions write
-unplayable fragments. Playback requires a reader that supports these sample
-entries; FFmpeg playback is covered by the recording tests.
+description in a fragmented movie, which can make older versions of
+GStreamer's movie muxer write unplayable fragments. Playback requires a reader
+that supports these sample entries; FFmpeg playback is covered by the recording
+tests.
 When an encoder omits a frame's duration, wrec supplies one frame at the
 current capture rate, falling back to the requested rate when the encoded caps
 have no rate. The last frame then has a nonzero duration in the finalized movie.
@@ -204,6 +217,58 @@ cargo build --release -p cli -p daemon
 Wayland needs PipeWire and the ScreenCast portal backend for the desktop, such as
 `xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`. Use the backend for your
 desktop. X11 needs an accessible X server and the `ximagesrc` plugin.
+
+### Portal frontend hangs on xdg-desktop-portal before 1.22.1
+
+The portal frontend (`xdg-desktop-portal`) before 1.22.1 loads PipeWire's
+realtime module each time it opens a PipeWire remote for a screen cast. That
+module asks the frontend's own Realtime portal for limits over D-Bus, and the
+frontend can deadlock on itself until the D-Bus call times out after 25
+seconds. While it waits, every portal call stalls. After you approve a source,
+the job fails with "Opening the PipeWire remote timed out" or "ScreenCast
+portal did not respond within 5s".
+
+This was reproduced on KDE Plasma 6.6.6 with Ubuntu's
+`xdg-desktop-portal 1.21.1+ds-1ubuntu3.1` and PipeWire 1.6.2. A separate
+GStreamer client reproduced it with the wrec daemon stopped: five screen casts
+worked and the sixth hung. Installing RealtimeKit did not help; a session still
+hung on the sixth try. The fault is in the portal frontend, not in wrec or the
+desktop backend, so it can affect any desktop that runs an affected frontend.
+
+Upstream commit
+[89f2f5e](https://github.com/flatpak/xdg-desktop-portal/commit/89f2f5e3d219bc5fd66a2505ee772b16022e8575)
+("pipewire: Disable loading module-rt") fixes it and is in xdg-desktop-portal
+1.22.1. Upgrade the frontend through your distribution when it ships 1.22.1 or
+a build with that commit. That version was read but not run in wrec's tests.
+
+Until then, you can turn the realtime module off for the frontend only. wrec
+never changes the portal setup itself. On the KDE system above, a frontend
+started with this setting passed 10 of 10 repeated screen casts and the full
+recording checks. Removing it brought the hang back on the second screen cast.
+The commands below apply this setting through a systemd drop-in. Copy
+PipeWire's client config and set
+`module.rt = false` in its `context.properties`:
+
+```bash
+mkdir -p ~/.config/pipewire ~/.config/systemd/user/xdg-desktop-portal.service.d
+sed 's/^context.properties = {/&\n    module.rt = false/' \
+  /usr/share/pipewire/client.conf > ~/.config/pipewire/wrec-portal.conf
+printf '[Service]\nEnvironment=PIPEWIRE_CONFIG_NAME=wrec-portal.conf\n' \
+  > ~/.config/systemd/user/xdg-desktop-portal.service.d/wrec-portal.conf
+systemctl --user daemon-reload
+systemctl --user restart xdg-desktop-portal.service
+```
+
+Check that `~/.config/pipewire/wrec-portal.conf` has `module.rt = false` right
+under `context.properties = {`. Only the frontend service reads this file;
+other PipeWire clients keep the stock config. To undo it after upgrading:
+
+```bash
+rm ~/.config/systemd/user/xdg-desktop-portal.service.d/wrec-portal.conf \
+  ~/.config/pipewire/wrec-portal.conf
+systemctl --user daemon-reload
+systemctl --user restart xdg-desktop-portal.service
+```
 
 Install the driver for your GPU. Check `vainfo` and
 `gst-inspect-1.0 vah264enc` / `vah264lpenc` for Intel/AMD, or

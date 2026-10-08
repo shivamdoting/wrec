@@ -589,7 +589,7 @@ mod tests {
             let session = RecordingSession {
                 id,
                 output_path: std::env::temp_dir()
-                    .join(format!("wrec-worker-test-{}-{id}.mov", std::process::id())),
+                    .join(format!("wrec-worker-test-{}-{id}.mp4", std::process::id())),
             };
             let (events, received) = mpsc::channel();
             let worker = Worker::spawn(
@@ -654,7 +654,7 @@ mod tests {
         }
 
         fn pid_file(&self) -> std::path::PathBuf {
-            self.session.output_path.with_extension("mov.pid")
+            self.session.output_path.with_extension("mp4.pid")
         }
     }
 
