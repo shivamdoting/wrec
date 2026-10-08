@@ -164,7 +164,7 @@ impl RecordingRuntime for LinuxRuntime {
 
     fn microphone_permission_status(&self) -> Result<PermissionStatus, AgentError> {
         // Native PulseAudio clients have no separate TCC permission prompt.
-        // The audio server checks access when pulsesrc connects.
+        // The audio server checks access when the recording connects.
         Ok(PermissionStatus::Granted)
     }
 

@@ -339,27 +339,46 @@ available. Configure devices in desktop sound settings. Linux cannot apply the
 shared wrec window-hiding or custom microphone-indicator options; job settings
 report them disabled with a warning. The desktop controls its sharing indicator.
 
-Each audio source retains up to one second of raw audio, about 384 kB per
-F32 stereo track, while capture latency remains 10 ms. Sample-count timestamps
-preserve audio held through a short recorder stall. If audio instead stays more
-than 200 ms late with steady arrival timing for a second, wrec moves later
-samples back into alignment and reports the corresponding gap.
+wrec reads audio from the audio server with libpulse, which PulseAudio and
+`pipewire-pulse` both serve, so recording audio needs `libpulse.so.0`; the
+daemon loads it only then. Each audio source keeps up to one second of raw
+audio, about 384 kB per F32 stereo track, while downstream stops taking it, and
+asks its server to hold another second. While confirming server timing, it can
+hold another second, or three seconds before the first timing reply. These
+queues are bounded and normally stay nearly empty. Capture latency remains
+10 ms.
 
-This recovery has limits. After real loss, the correction appears about a second
-later, and the intervening audio can play early by the amount lost. Loss below
-200 ms can remain undetected. A stall beyond the one-second source buffer can
-lose samples and leave about 100 ms of offset, as observed in the controlled
-1.5-second stall. Physical microphone clock drift is not validated. These are
-experimental support limits; a completed job alone does not establish A/V sync.
+Each sample goes where the audio server says it captured it. wrec asks the
+server ten times a second for the capture time of its newest audio and how much
+audio it has captured and sent. Audio that takes longer to arrive, or a recorder
+that stops reading for a moment, leaves that account unchanged, so the audio
+keeps its place and nothing is reported. Audio the server lost leaves a gap of
+the same length where it was lost, and wrec reports it. That covers audio its
+device or graph lost, audio PulseAudio dropped because the recorder fell more
+than both buffers behind, and audio `pipewire-pulse` skipped for the same
+reason. A device clock that runs faster or slower than the system clock moves
+the audio at most 1 ms per second and is not reported.
+
+This has limits. Changes in the server's account of 20 ms or less are never
+reported; the audio moves smoothly instead. A device clock more than 1000 parts
+per million slow builds up until it reads as lost audio, and one that fast
+leaves the audio drifting late. A loss is placed at the newest audio the server
+had captured when it first reported it, so audio captured right after a loss can
+play that much early; in the controlled tests every buffer stayed within 11 ms
+of its capture time. The account is only as good as the server's latency
+reporting. Clock drift is validated only with a synthetic device 800 parts per
+million fast or slow, not with physical microphones. These are experimental
+support limits; a completed job alone does not establish A/V sync.
 
 The movie writer takes the next sample of every track in time order, so a track
 that stops delivering holds up the others. Encoded video and each audio track
 can wait about 4 seconds for the rest. Encoded movie data can wait for the disk
 in a 32 MiB buffer, about 16 seconds at 16 Mbit/s. These buffers stay nearly
 empty unless something stalls. Past those limits the recording keeps going with
-gaps: the capture queue drops video frames, and an audio source overwrites audio
-that nothing read in time. A stalled video encoder always costs the frames
-captured meanwhile, since raw frames are too large to keep.
+gaps: the capture queue drops video frames, and an audio source's server drops
+audio that nothing read in time, which is reported as lost. A stalled video
+encoder always costs the frames captured meanwhile, since raw frames are too
+large to keep.
 
 If an audio source fails, for example because PipeWire or PulseAudio restarts,
 its track ends at that point and video and the other track keep recording. An

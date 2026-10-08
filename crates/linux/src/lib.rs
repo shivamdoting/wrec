@@ -4,6 +4,7 @@ mod desktop;
 mod encoding;
 mod pipeline;
 mod portal;
+mod pulse;
 mod worker;
 mod x11;
 

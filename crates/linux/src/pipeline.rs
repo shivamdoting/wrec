@@ -37,7 +37,7 @@ pub(crate) fn check_plugins(settings: &RecorderSettings) -> Result<()> {
     }
     if settings.include_system_audio || settings.include_microphone {
         for factory in [
-            "pulsesrc",
+            "appsrc",
             "audioconvert",
             "audioresample",
             "avenc_aac",
@@ -45,6 +45,7 @@ pub(crate) fn check_plugins(settings: &RecorderSettings) -> Result<()> {
         ] {
             element(factory)?;
         }
+        crate::pulse::available()?;
     }
     Ok(())
 }
@@ -610,7 +611,7 @@ fn keep_capture_timestamps(encoder: &gst::Element, parser: &gst::Element) {
 // limit, the movie starts without the audio tracks that have not delivered a
 // buffer. Paused time does not count, since no video arrives while paused.
 // Constant-QP output has no fixed bitrate, so bytes are bounded separately.
-const HELD_VIDEO_LIMIT: gst::ClockTime = gst::ClockTime::from_seconds(3);
+pub(crate) const HELD_VIDEO_LIMIT: gst::ClockTime = gst::ClockTime::from_seconds(3);
 const HELD_VIDEO_BYTES: u32 = 32 << 20;
 const HELD_QUEUE: &str = "held-video-queue";
 
@@ -712,7 +713,7 @@ impl Movie {
         let pad = queue.static_pad("src").unwrap();
         // Linking the track sends a reconfigure upstream. The encoder answers
         // with an allocation query, which waits behind this queue while mp4mux
-        // holds audio for the next video frame, and pulsesrc loses audio
+        // holds audio for the next video frame, and the audio source fills
         // meanwhile. The audio caps are fixed, so nothing needs it.
         pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_, info| {
             if info
@@ -825,85 +826,12 @@ fn add_audio(
 }
 
 fn pulse_source(device: Option<&str>) -> Result<gst::Element> {
-    let source = element("pulsesrc")?;
-    source.set_property("provide-clock", false);
-    source.set_property("buffer-time", AUDIO_BUFFER.useconds() as i64);
-    source.set_property_from_str("slave-method", "none");
-    if let Some(device) = device {
-        source.set_property("device", device);
-    }
-    stamp_by_arrival(&source);
-    Ok(source)
+    crate::pulse::source(None, device, AUDIO_BUFFER)
 }
 
-// pulsesrc keeps this much audio for a reader that stops, and asks its
-// server to hold as much: 384 kB per track at F32 stereo.
+// Each audio source keeps this much audio while downstream stops taking it,
+// and asks its server to hold as much more: 384 kB each at F32 stereo.
 const AUDIO_BUFFER: gst::ClockTime = gst::ClockTime::SECOND;
-
-// pulsesrc's default buffer-time, so how late audio could get before it
-// restamped. Smaller changes, like a stream's latency settling after it
-// starts, are not lost audio.
-const AUDIO_LATE: gst::ClockTime = gst::ClockTime::from_mseconds(200);
-
-// audiobasesink's default alignment-threshold: timestamps within this of
-// each other are arrival jitter.
-const AUDIO_JITTER: gst::ClockTime = gst::ClockTime::from_mseconds(40);
-
-// Slaved to the pipeline clock, pulsesrc restamps at the clock whenever the
-// clock gets a whole buffer ahead of the audio read so far. After the engine
-// stops for a moment that happens before it has read the audio its server
-// held meanwhile, so that audio and everything after it plays late, and the
-// restamp reads as lost audio. Unslaved, pulsesrc stamps by sample count and
-// the held audio keeps its place; this places the count in running time. The
-// first buffer ends when it arrives. Reading held audio makes it less late
-// with every buffer, and losing more makes it later. Audio that instead
-// stays more than AUDIO_LATE late, within AUDIO_JITTER, for AUDIO_BUFFER of
-// audio lost samples on the way, so later audio moves later by the least it
-// was late. count_lost_audio sees the gap.
-fn stamp_by_arrival(source: &gst::Element) {
-    // How far timestamps sit from the sample count, and, while audio is
-    // late, where that began, how late it was then, and the least since.
-    let state = Mutex::new((None::<i64>, None::<(gst::ClockTime, i64, i64)>));
-    let element = source.downgrade();
-    source
-        .static_pad("src")
-        .unwrap()
-        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-            let now = element
-                .upgrade()
-                .and_then(|element| element.current_running_time());
-            let (Some(now), Some(gst::PadProbeData::Buffer(buffer))) = (now, info.data.as_mut())
-            else {
-                return gst::PadProbeReturn::Ok;
-            };
-            let Some((pts, duration)) = buffer.pts().zip(buffer.duration()) else {
-                return gst::PadProbeReturn::Ok;
-            };
-            let arrived = now.nseconds() as i64 - (pts + duration).nseconds() as i64;
-            let mut state = state.lock().unwrap();
-            let (offset, late) = &mut *state;
-            let offset = offset.get_or_insert(arrived);
-            let behind = arrived - *offset;
-            match late {
-                _ if behind <= AUDIO_LATE.nseconds() as i64 => *late = None,
-                Some((start, first, least))
-                    if (behind - *first).abs() <= AUDIO_JITTER.nseconds() as i64 =>
-                {
-                    *least = (*least).min(behind);
-                    if pts.saturating_sub(*start) >= AUDIO_BUFFER {
-                        *offset += *least;
-                        *late = None;
-                    }
-                }
-                _ => *late = Some((pts, behind, behind)),
-            }
-            let pts = (pts.nseconds() as i64 + *offset).max(0) as u64;
-            buffer
-                .make_mut()
-                .set_pts(gst::ClockTime::from_nseconds(pts));
-            gst::PadProbeReturn::Ok
-        });
-}
 
 fn add_audio_source(
     movie: &mut Movie,
@@ -949,17 +877,15 @@ fn add_audio_source(
     Ok(())
 }
 
-// pulsesrc keeps buffers contiguous unless it skipped audio nobody read in
-// time or stamp_by_arrival moved past audio lost on the way, so a longer
-// jump is lost audio.
-const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
+// Audio sources keep buffers contiguous except where their server lost or
+// skipped audio, so a longer jump is lost audio.
+pub(crate) const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 
 // Counts audio missing between consecutive captured buffers, before pausing
-// drops any. When downstream does not read pulsesrc in time, its ring buffer
-// overwrites the oldest audio, and the next buffer is stamped where capture
-// actually resumed. Sources keep capturing while paused, so a pause leaves no
-// gap, and the paused part of a gap is not in the movie. Capture timestamps
-// and pauses are both in running time.
+// drops any. Audio a source's server lost leaves the next buffer stamped
+// where capture actually resumed. Sources keep capturing while paused, so a
+// pause leaves no gap, and the paused part of a gap is not in the movie.
+// Capture timestamps and pauses are both in running time.
 fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<Counters>) {
     // Where the next buffer should start.
     let next = Mutex::new(None::<gst::ClockTime>);
@@ -1321,13 +1247,13 @@ fn run(
         if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match message.view() {
                 gst::MessageView::Error(error) => {
-                    // A failed audio source, such as pulsesrc after its server
-                    // went away, ends its own track, and the movie keeps
+                    // A failed audio source, such as one whose server went
+                    // away, ends its own track, and the movie keeps
                     // recording the others. Other audio errors fail the job.
                     if let Some(track) = movie.audio_source(&message) {
                         if track.failed.is_none() {
-                            // pulsesrc ends its branch after a fatal error; make
-                            // sure, without waiting on its stream lock here.
+                            // End its branch, without waiting on its stream
+                            // lock here.
                             if let Some(branch) =
                                 track.source.static_pad("src").and_then(|pad| pad.peer())
                             {
@@ -1867,6 +1793,8 @@ mod tests {
             .unwrap()
             .downcast::<gst::Pipeline>()
             .unwrap();
+            // Like production.
+            pipeline.use_clock(Some(&gst::SystemClock::obtain()));
             // Like production, frames the encoder cannot take are dropped
             // before encoding instead of stalling capture.
             let queue = video_queue().unwrap();
@@ -2148,9 +2076,9 @@ mod tests {
         source
     }
 
-    // Live capture like pulsesrc: the producer keeps real time, and when
-    // nobody reads its 200 ms ring buffer in time it overwrites the oldest
-    // audio and marks the next buffer DISCONT. A leaky queue does the same.
+    // Live capture whose producer keeps real time, and when nobody reads its
+    // 200 ms ring buffer in time overwrites the oldest audio and marks the
+    // next buffer DISCONT. A leaky queue does the same.
     fn ring_buffer_audio(name: &str) -> gst::Element {
         audio_bin(
             name,
@@ -2264,8 +2192,8 @@ mod tests {
         Encoder,
         // The microphone captures nothing.
         AudioProducer,
-        // The microphone's server goes away, like pulsesrc after a
-        // PipeWire or PulseAudio restart.
+        // The microphone's server goes away, as in a PipeWire or
+        // PulseAudio restart.
         AudioFailure,
     }
 
@@ -2576,6 +2504,12 @@ mod tests {
 
     impl PulseServer {
         fn start() -> Self {
+            Self::start_with("", true)
+        }
+
+        // `config` adds modules. Without shm all audio goes through the
+        // socket, so a SlowLink can carry it.
+        fn start_with(config: &str, shm: bool) -> Self {
             static ID: AtomicU64 = AtomicU64::new(0);
             let directory = std::env::temp_dir().join(format!(
                 "wrec-linux-test-pulse-{}-{}",
@@ -2584,21 +2518,23 @@ mod tests {
             ));
             std::fs::create_dir_all(&directory).unwrap();
             let socket = directory.join("native");
-            let config = directory.join("default.pa");
+            let script = directory.join("default.pa");
             std::fs::write(
-                &config,
+                &script,
                 format!(
                     "load-module module-native-protocol-unix socket={} auth-anonymous=1\n\
                      load-module module-null-sink sink_name=wrec_test rate=48000 channels=2\n\
-                     load-module module-sine sink=wrec_test frequency=440\n",
-                    socket.display()
+                     load-module module-sine sink=wrec_test frequency=440\n{}",
+                    socket.display(),
+                    config.replace("{dir}", &directory.display().to_string())
                 ),
             )
             .unwrap();
             let process = std::process::Command::new("pulseaudio")
                 .args(["-n", "--daemonize=no", "--exit-idle-time=-1"])
                 .args(["--use-pid-file=no", "--system=no", "-F"])
-                .arg(&config)
+                .arg(&script)
+                .arg(format!("--disable-shm={}", !shm))
                 .env("HOME", &directory)
                 .env("XDG_RUNTIME_DIR", &directory)
                 .env("PULSE_RUNTIME_PATH", &directory)
@@ -2620,11 +2556,17 @@ mod tests {
         }
 
         fn source(&self) -> gst::Element {
+            self.source_from("wrec_test.monitor", &self.directory.join("native"))
+        }
+
+        fn source_from(&self, device: &str, socket: &Path) -> gst::Element {
             gst::init().unwrap();
-            let source = pulse_source(Some("wrec_test.monitor")).unwrap();
-            let socket = self.directory.join("native");
-            source.set_property("server", format!("unix:{}", socket.display()));
-            source
+            crate::pulse::source(
+                Some(&format!("unix:{}", socket.display())),
+                Some(device),
+                AUDIO_BUFFER,
+            )
+            .unwrap()
         }
 
         // The server makes no audio meanwhile, then catches up at once, like
@@ -2646,74 +2588,697 @@ mod tests {
         }
     }
 
-    // Records a tone through pulsesrc while its server stops once. Returns
-    // the seconds missing from the audio track, the seconds reported lost,
-    // and where the audio ends after the video.
-    fn record_server_stop(stall: Duration) -> (f64, f64, f64) {
-        let server = PulseServer::start();
-        let mut recording =
-            TestRecording::start_with_audio(vec![("system audio", server.source())]);
-        std::thread::sleep(Duration::from_secs(3));
-        server.stop_for(stall);
-        std::thread::sleep(Duration::from_secs(4));
+    // Passes connections to a PulseAudio server through `socket`, holding
+    // back everything the server sends by `delay`, without dropping or
+    // reordering any of it, like a slower way to the server.
+    struct SlowLink {
+        socket: std::path::PathBuf,
+        delay: Arc<AtomicU64>,
+    }
+
+    impl SlowLink {
+        fn new(server: &PulseServer) -> Self {
+            Self::between(
+                server.directory.join("native"),
+                server.directory.join("slow"),
+            )
+        }
+
+        fn between(target: std::path::PathBuf, socket: std::path::PathBuf) -> Self {
+            use std::io::{Read, Write};
+            use std::os::unix::net::{UnixListener, UnixStream};
+            let listener = UnixListener::bind(&socket).unwrap();
+            let delay = Arc::new(AtomicU64::new(0));
+            let link_delay = delay.clone();
+            std::thread::spawn(move || {
+                for client in listener.incoming() {
+                    let Ok(mut client) = client else { break };
+                    let Ok(mut upstream) = UnixStream::connect(&target) else {
+                        break;
+                    };
+                    let (mut from_client, mut from_server) =
+                        (client.try_clone().unwrap(), upstream.try_clone().unwrap());
+                    std::thread::spawn(move || std::io::copy(&mut from_client, &mut upstream));
+                    let (held, holding) = mpsc::channel::<(Instant, Vec<u8>)>();
+                    let delay = link_delay.clone();
+                    std::thread::spawn(move || {
+                        let mut bytes = vec![0; 65536];
+                        while let Ok(read @ 1..) = from_server.read(&mut bytes) {
+                            let due = Instant::now()
+                                + Duration::from_nanos(delay.load(Ordering::Relaxed));
+                            if held.send((due, bytes[..read].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    std::thread::spawn(move || {
+                        for (due, bytes) in holding {
+                            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                            if client.write_all(&bytes).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            Self { socket, delay }
+        }
+
+        fn set_delay(&self, delay: Duration) {
+            self.delay.store(delay.as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    // Feeds module-pipe-source a tone in 10 ms blocks in real time, like a
+    // capture device. A block the pipe has no room for, because the server
+    // stopped reading, is lost, and stopping returns when each was.
+    struct PipeDevice {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        writer: std::thread::JoinHandle<Vec<Instant>>,
+        // When it wrote its first block, and how long each block is.
+        start: Instant,
+        block: Duration,
+    }
+
+    impl PipeDevice {
+        const CONFIG: &str = "load-module module-pipe-source source_name=wrec_pipe file={dir}/fifo format=s16le rate=48000 channels=2\n";
+
+        fn start(server: &PulseServer) -> Self {
+            Self::start_with_clock(server, 0)
+        }
+
+        // A device whose clock runs `ppm` parts per million fast. Each frame
+        // holds its index, in two channels of 15 bits, so a recording shows
+        // when the device wrote any frame of it.
+        fn start_with_clock(server: &PulseServer, ppm: i64) -> Self {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut fifo = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(server.directory.join("fifo"))
+                .unwrap();
+            // 0.34 s of this audio, on any kernel.
+            unsafe { libc::fcntl(fifo.as_raw_fd(), libc::F_SETPIPE_SZ, 65536) };
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stopping = stop.clone();
+            let block = Duration::from_nanos((10_000_000_000_000 / (1_000_000 + ppm)) as u64);
+            let start = Instant::now();
+            let writer = std::thread::spawn(move || {
+                let mut lost = Vec::new();
+                for n in 0u32.. {
+                    if stopping.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let bytes: Vec<u8> = (n * 480..n * 480 + 480)
+                        .flat_map(|frame| {
+                            [(frame % 32768) as i16, (frame / 32768) as i16]
+                                .into_iter()
+                                .flat_map(i16::to_le_bytes)
+                        })
+                        .collect();
+                    if fifo.write(&bytes).ok() != Some(bytes.len()) {
+                        lost.push(Instant::now());
+                    }
+                    std::thread::sleep(
+                        (start + block * (n + 1)).saturating_duration_since(Instant::now()),
+                    );
+                }
+                lost
+            });
+            Self {
+                stop,
+                writer,
+                start,
+                block,
+            }
+        }
+
+        // Records, for each buffer `source` sends, its pts and how far that is
+        // from when the device wrote its first frame, both in seconds, and
+        // when that was.
+        fn placement(&self, source: &gst::Element) -> Arc<Mutex<Vec<(f64, f64, Instant)>>> {
+            let placed = Arc::new(Mutex::new(Vec::new()));
+            let (start, block, placing) = (self.start, self.block, placed.clone());
+            let element = source.downgrade();
+            source.static_pad("src").unwrap().add_probe(
+                gst::PadProbeType::BUFFER,
+                move |_, info| {
+                    let (Some(buffer), Some(now)) = (
+                        info.buffer(),
+                        element
+                            .upgrade()
+                            .and_then(|element| element.current_running_time()),
+                    ) else {
+                        return gst::PadProbeReturn::Ok;
+                    };
+                    let at = Instant::now();
+                    let map = buffer.map_readable().unwrap();
+                    let sample = |i: usize| {
+                        (f32::from_le_bytes(map[i * 4..i * 4 + 4].try_into().unwrap()) * 32768.0)
+                            .round() as u64
+                    };
+                    let frame = sample(0) + sample(1) * 32768;
+                    let written = start + block * (frame / 480) as u32;
+                    let expected = now.nseconds() as f64 / 1e9
+                        - at.saturating_duration_since(written).as_secs_f64()
+                        + written.saturating_duration_since(at).as_secs_f64();
+                    let pts = buffer.pts().unwrap().nseconds() as f64 / 1e9;
+                    placing.lock().unwrap().push((pts, pts - expected, written));
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            placed
+        }
+
+        fn stop(self) -> Vec<Instant> {
+            self.stop.store(true, Ordering::Relaxed);
+            self.writer.join().unwrap()
+        }
+    }
+
+    // What a recording of system audio came out with.
+    #[derive(Debug)]
+    struct Recorded {
+        // Seconds missing from the audio track.
+        hole: f64,
+        // Seconds reported lost.
+        reported: f64,
+        // Where the audio ends after the video.
+        after_video: f64,
+        // When the system audio track ended, if it failed.
+        stopped: Option<String>,
+        // When the recording had started.
+        began: Instant,
+    }
+
+    impl Recorded {
+        fn whole(&self) -> bool {
+            self.hole == 0.0 && self.reported == 0.0 && self.after_video.abs() < 0.05
+        }
+    }
+
+    // Records `source` as system audio, runs `meanwhile` three seconds in,
+    // and finishes four seconds after that.
+    fn record_system_audio(source: gst::Element, meanwhile: impl FnOnce()) -> Recorded {
+        record_system_audio_with(source, |recording| {
+            std::thread::sleep(Duration::from_secs(3));
+            meanwhile();
+            std::thread::sleep(Duration::from_secs(4));
+            let _ = recording;
+        })
+    }
+
+    fn record_system_audio_with(
+        source: gst::Element,
+        during: impl FnOnce(&TestRecording),
+    ) -> Recorded {
+        let mut recording = TestRecording::start_with_audio(vec![("system audio", source)]);
+        let began = Instant::now();
+        during(&recording);
         recording.finish().unwrap();
         let probe = recording.probe();
-        let reported = recording
+        let lost = recording
             .events
             .try_iter()
             .find_map(|event| match event {
                 RecorderEvent::MediaLost { message, .. } => Some(message),
                 _ => None,
             })
-            .and_then(|message| {
-                let (_, rest) = message.split_once("system audio is missing ")?;
-                rest.split_once(" s")?.0.parse().ok()
-            })
+            .unwrap_or_default();
+        let reported = lost
+            .split_once("system audio is missing ")
+            .and_then(|(_, rest)| rest.split_once(" s")?.0.parse().ok())
             .unwrap_or(0.0);
-        let after_video = end_seconds(&probe, "aac") - end_seconds(&probe, "h264");
-        (audio_holes(&probe)[0], reported, after_video)
+        Recorded {
+            hole: audio_holes(&probe)[0],
+            reported,
+            after_video: end_seconds(&probe, "aac") - end_seconds(&probe, "h264"),
+            stopped: lost
+                .split_once("system audio stopped at ")
+                .map(|(_, rest)| rest.to_string()),
+            began,
+        }
     }
 
-    // Slaved to the clock, pulsesrc stamped the audio the server made up late,
-    // and reported almost half a second lost. Run with
-    // `cargo test -p linux pulse_server -- --ignored`.
+    // A server that stops for 250 ms or 1.5 s makes up the audio of the
+    // meantime at once, and nothing of it is lost: no gap, nothing reported,
+    // and the audio ends with the video. Slaved to the clock, pulsesrc
+    // stamped the audio the server made up late and reported almost half a
+    // second lost; a reader that keeps only a second loses the rest of the
+    // 1.5 s. Run the real-server tests with
+    // `cargo test -p linux pulse_server -- --ignored --test-threads=1`.
     #[test]
     #[ignore = "needs pulseaudio"]
     fn audio_a_pulse_server_held_keeps_its_place() {
-        let (hole, reported, after_video) = record_server_stop(Duration::from_millis(250));
+        for stall in [250, 1500] {
+            let server = PulseServer::start();
+            let recorded = record_system_audio(server.source(), || {
+                server.stop_for(Duration::from_millis(stall))
+            });
+            assert!(recorded.whole(), "{stall} ms stop: {recorded:?}");
+        }
+    }
+
+    // A server whose audio takes 250 ms, 600 ms or 1.5 s longer to arrive
+    // from three seconds in loses nothing. Its audio keeps its place, nothing
+    // is reported lost, and once the delay goes away again the audio ends
+    // with the video. Placed by when it arrived, it moved later by the delay
+    // and reported that as lost.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_that_gets_slower_keeps_its_place() {
+        for delay in [250, 600, 1500] {
+            let server = PulseServer::start_with("", false);
+            let link = SlowLink::new(&server);
+            let source = server.source_from("wrec_test.monitor", &link.socket);
+            let recorded = record_system_audio(source, || {
+                link.set_delay(Duration::from_millis(delay));
+                std::thread::sleep(Duration::from_secs(3));
+                link.set_delay(Duration::ZERO);
+            });
+            assert!(recorded.whole(), "{delay} ms slower: {recorded:?}");
+        }
+    }
+
+    // The same while the recording starts: audio that is slower before it
+    // first arrives, or 200 ms in, keeps its place. The pipe device sends
+    // audio at once. The null sink's monitor takes up to two seconds to, so
+    // its first audio waits no longer than the server's answer about it if
+    // it is to make the three seconds video waits for a track.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_that_starts_slow_keeps_its_place() {
+        for (pipe, before, delay) in [
+            (false, true, 600),
+            (true, true, 600),
+            (true, false, 250),
+            (true, false, 1500),
+        ] {
+            let server = PulseServer::start_with(if pipe { PipeDevice::CONFIG } else { "" }, false);
+            let device = pipe.then(|| PipeDevice::start(&server));
+            let placed = Arc::new(Mutex::new(Vec::new()));
+            let link = SlowLink::new(&server);
+            if before {
+                link.set_delay(Duration::from_millis(delay));
+            }
+            let source = server.source_from(
+                if pipe {
+                    "wrec_pipe"
+                } else {
+                    "wrec_test.monitor"
+                },
+                &link.socket,
+            );
+            let placed = device
+                .as_ref()
+                .map_or(placed, |device| device.placement(&source));
+            let mut began = None;
+            let recorded = record_system_audio_with(source, |_| {
+                began = Some(Instant::now());
+                std::thread::sleep(Duration::from_millis(200));
+                link.set_delay(Duration::from_millis(delay));
+                std::thread::sleep(Duration::from_secs(3));
+                link.set_delay(Duration::ZERO);
+                std::thread::sleep(Duration::from_secs(3));
+            });
+            // Before the recording, while the stream connected over the slow
+            // link and nothing read the pipe, it may have lost audio.
+            if let Some(device) = device {
+                assert_placed(&placed.lock().unwrap(), recorded.began);
+                let lost = device.stop().into_iter().filter(|&at| at >= began.unwrap());
+                assert_eq!(
+                    lost.count(),
+                    0,
+                    "the device lost audio during the recording"
+                );
+            }
+            assert!(
+                recorded.whole(),
+                "{delay} ms slower {} from {}: {recorded:?}",
+                if before {
+                    "from the start"
+                } else {
+                    "200 ms in"
+                },
+                if pipe { "a pipe" } else { "a monitor" }
+            );
+        }
+    }
+
+    // Every buffer of audio written since the recording began, before and
+    // after any loss, starts within 20 ms of when the device wrote its first
+    // frame. The device writes 10 ms at a time, so a frame can wait up to
+    // that long to be written. Its pipe keeps audio from before the stream
+    // started, and a loss before the server's first account of its audio
+    // is one the server never saw.
+    fn assert_placed(placed: &[(f64, f64, Instant)], since: Instant) {
+        let placed: Vec<_> = placed.iter().filter(|entry| entry.2 >= since).collect();
+        let worst = placed
+            .iter()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .unwrap();
+        let measured = format!(
+            "{} buffers, worst {:.4} s off at {:.3} s",
+            placed.len(),
+            worst.1,
+            worst.0
+        );
+        println!("placement: {measured}");
+        assert!(placed.len() > 300 && worst.1.abs() < 0.02, "{measured}");
+    }
+
+    // Records the pipe device on `server`, through `socket`, while `meanwhile`
+    // runs three seconds in. Every buffer must be placed where the device
+    // wrote it. Returns the recording and the seconds of audio the device
+    // lost while the server was stopped, failing if it lost any at another
+    // time during the recording, which would make the test meaningless.
+    fn record_device_loss(
+        server: &PulseServer,
+        socket: &Path,
+        meanwhile: impl FnOnce(),
+    ) -> (Recorded, f64) {
+        let device = PipeDevice::start(server);
+        let source = server.source_from("wrec_pipe", socket);
+        let placed = device.placement(&source);
+        let mut stopped = None;
+        let recorded = record_system_audio(source, || {
+            stopped = Some(Instant::now());
+            meanwhile();
+        });
+        assert_placed(&placed.lock().unwrap(), recorded.began);
+        let stopped = stopped.unwrap();
+        // Before the recording began, while nothing read its pipe, the
+        // device can lose audio the recording never had.
+        let (before, lost): (Vec<_>, Vec<_>) = device
+            .stop()
+            .into_iter()
+            .partition(|&at| at < recorded.began);
+        let (during, outside): (Vec<_>, Vec<_>) = lost
+            .into_iter()
+            .partition(|&at| at >= stopped && at < stopped + Duration::from_secs(3));
+        println!(
+            "device lost {} s before the recording",
+            before.len() as f64 / 100.0
+        );
+        let since = |at: &Instant| at.duration_since(recorded.began).as_secs_f64();
         assert!(
-            hole == 0.0 && reported == 0.0,
-            "{hole}s gap, {reported}s reported"
+            outside.is_empty(),
+            "{} s lost outside the stop, from {:.2} s to {:.2} s into the recording, \
+             which stopped the server {:.2} s in",
+            outside.len() as f64 / 100.0,
+            outside.first().map_or(0.0, since),
+            outside.last().map_or(0.0, since),
+            since(&stopped)
+        );
+        (recorded, during.len() as f64 / 100.0)
+    }
+
+    // A capture device keeps going while its server stops for 0.8 s, and its
+    // pipe holds only 0.34 s, so the rest is lost inside the server. The
+    // movie has a gap of that length, the same is reported, and the audio
+    // after it ends with the video.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_device_lost_is_reported_and_the_rest_keeps_its_place() {
+        let server = PulseServer::start_with(PipeDevice::CONFIG, true);
+        let (recorded, lost) =
+            record_device_loss(&server, &server.directory.join("native"), || {
+                server.stop_for(Duration::from_millis(800))
+            });
+        assert!(lost > 0.3, "{lost} s lost: {recorded:?}");
+        assert!(
+            (recorded.hole - lost).abs() < 0.03 && (recorded.reported - recorded.hole).abs() < 0.02,
+            "{lost} s lost: {recorded:?}"
         );
         assert!(
-            after_video.abs() < 0.05,
-            "audio ends {after_video}s after video"
+            recorded.after_video.abs() < 0.05,
+            "{lost} s lost: {recorded:?}"
         );
     }
 
-    // PulseAudio's null sink makes up little of a 1.5 s stop, so most of it
-    // is lost. The movie has that gap, the same amount is reported, and the
-    // audio after it plays within AUDIO_LATE of the video, which is as close
-    // as a loss too small to see can leave it.
+    // The same while the server's audio takes 250 ms longer to arrive: only
+    // what the device lost is a gap, not the delay as well.
     #[test]
     #[ignore = "needs pulseaudio"]
-    fn audio_a_pulse_server_lost_is_reported_and_the_rest_keeps_its_place() {
-        let (hole, reported, after_video) = record_server_stop(Duration::from_millis(1500));
-        assert!(hole > 0.5, "{hole}s gap");
+    fn audio_a_pulse_server_that_got_slower_then_lost_audio_reports_only_the_loss() {
+        let server = PulseServer::start_with(PipeDevice::CONFIG, false);
+        let link = SlowLink::new(&server);
+        link.set_delay(Duration::ZERO);
+        let (recorded, lost) = record_device_loss(&server, &link.socket, || {
+            link.set_delay(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_secs(1));
+            server.stop_for(Duration::from_millis(800));
+            std::thread::sleep(Duration::from_secs(1));
+            link.set_delay(Duration::ZERO);
+        });
+        assert!(lost > 0.3, "{lost} s lost: {recorded:?}");
         assert!(
-            (reported - hole).abs() < 0.05,
-            "{reported}s reported, {hole}s gap"
+            (recorded.hole - lost).abs() < 0.03 && (recorded.reported - recorded.hole).abs() < 0.02,
+            "{lost} s lost: {recorded:?}"
         );
         assert!(
-            after_video.abs() < AUDIO_LATE.nseconds() as f64 / 1e9,
-            "audio ends {after_video}s after video"
+            recorded.after_video.abs() < 0.05,
+            "{lost} s lost: {recorded:?}"
         );
+    }
+
+    // When downstream stops taking audio for 3.5 s, the source holds a
+    // second and its server another, and the server drops the rest. That is
+    // a gap of the same length as reported, and the audio after it ends with
+    // the video. Without shm, all the audio waits in the socket.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_reader_stopped_past_its_buffer_reports_the_rest() {
+        let server = PulseServer::start_with("", false);
+        let source = server.source();
+        stall_once(
+            &source.static_pad("src").unwrap(),
+            Duration::from_secs(3),
+            Duration::from_millis(3500),
+        );
+        let recorded = record_system_audio(source, || {});
+        assert!(recorded.hole > 0.5, "{recorded:?}");
+        assert!(
+            (recorded.reported - recorded.hole).abs() < 0.02,
+            "{recorded:?}"
+        );
+        assert!(recorded.after_video.abs() < 0.05, "{recorded:?}");
+    }
+
+    // A device whose clock is 800 parts per million fast or slow loses
+    // nothing. Nothing is reported, and every buffer is placed when the
+    // device wrote it, so the audio ends with the video.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_device_with_another_clock_reports_nothing() {
+        for ppm in [800, -800] {
+            let server = PulseServer::start_with(PipeDevice::CONFIG, true);
+            let device = PipeDevice::start_with_clock(&server, ppm);
+            let source = server.source_from("wrec_pipe", &server.directory.join("native"));
+            let placed = device.placement(&source);
+            let recorded = record_system_audio(source, || {});
+            assert_placed(&placed.lock().unwrap(), recorded.began);
+            assert!(device.stop().is_empty(), "the device lost audio");
+            assert!(recorded.whole(), "{ppm} ppm: {recorded:?}");
+        }
+    }
+
+    // Short and repeated pauses drop audio without reporting it lost, and
+    // the audio stays with the video.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_paused_briefly_and_often_keeps_its_place() {
+        let server = PulseServer::start();
+        let recorded = record_system_audio_with(server.source(), |recording| {
+            std::thread::sleep(Duration::from_secs(2));
+            for pause in [300, 100, 100, 50, 600] {
+                recording.control(true);
+                std::thread::sleep(Duration::from_millis(pause));
+                recording.control(false);
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        assert!(recorded.whole(), "{recorded:?}");
+    }
+
+    // Stopping while paused, or while downstream holds the source's audio
+    // and the source waits for room, still ends the source's track and
+    // finalizes the movie.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_recording_stops_while_paused_or_blocked() {
+        let server = PulseServer::start();
+        let mut recording =
+            TestRecording::start_with_audio(vec![("system audio", server.source())]);
+        std::thread::sleep(Duration::from_secs(2));
+        recording.control(true);
+        std::thread::sleep(Duration::from_millis(500));
+        recording.finish().unwrap();
+        assert_eq!(stream_counts(&recording.probe()), (1, 1));
+
+        let source = server.source();
+        stall_once(
+            &source.static_pad("src").unwrap(),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        );
+        let mut recording = TestRecording::start_with_audio(vec![("system audio", source)]);
+        std::thread::sleep(Duration::from_secs(3));
+        let stopping = Instant::now();
+        recording.finish().unwrap();
+        assert!(
+            stopping.elapsed() < Duration::from_secs(5),
+            "stopping took {:?}",
+            stopping.elapsed()
+        );
+        assert_eq!(stream_counts(&recording.probe()), (1, 1));
+    }
+
+    // A server that goes away ends its track where it did, with that
+    // reported, and the recording keeps going; a new server records whole.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_lost_ends_its_track_and_a_new_one_records() {
+        let mut server = PulseServer::start();
+        let recorded = record_system_audio(server.source(), || {
+            let _ = server.process.kill();
+        });
+        let stopped = recorded.stopped.clone().unwrap_or_default();
+        let at: f64 = stopped
+            .split_once(" s")
+            .and_then(|(at, _)| at.parse().ok())
+            .unwrap_or(0.0);
+        assert!((2.5..4.0).contains(&at), "{recorded:?}");
+        assert!(recorded.after_video < -2.5, "{recorded:?}");
+        let server = PulseServer::start();
+        let recorded = record_system_audio(server.source(), || {});
+        assert!(recorded.whole(), "{recorded:?}");
+    }
+
+    // A device that sends nothing is left out, and one that starts late
+    // keeps its place.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_device_that_starts_late_or_never_keeps_the_video() {
+        let server = PulseServer::start_with(PipeDevice::CONFIG, true);
+        let source = server.source_from("wrec_pipe", &server.directory.join("native"));
+        let mut recording = TestRecording::start_with_audio(vec![("system audio", source)]);
+        std::thread::sleep(Duration::from_secs(5));
+        recording.finish().unwrap();
+        let probe = recording.probe();
+        assert_eq!(stream_counts(&probe), (1, 0));
+
+        let server = PulseServer::start_with(PipeDevice::CONFIG, true);
+        let source = server.source_from("wrec_pipe", &server.directory.join("native"));
+        let mut device = None;
+        let placed = Arc::new(Mutex::new(None));
+        let placing = placed.clone();
+        let recorded = record_system_audio_with(source.clone(), |_| {
+            std::thread::sleep(Duration::from_millis(1500));
+            let started = PipeDevice::start(&server);
+            *placing.lock().unwrap() = Some(started.placement(&source));
+            device = Some(started);
+            std::thread::sleep(Duration::from_secs(4));
+        });
+        assert_placed(
+            &placed.lock().unwrap().take().unwrap().lock().unwrap(),
+            recorded.began,
+        );
+        assert!(device.unwrap().stop().is_empty(), "the device lost audio");
+        assert!(recorded.whole(), "{recorded:?}");
+    }
+
+    // libpulse threads of this process, which name themselves.
+    fn pulse_threads() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+            .filter(|name| name.trim() == "wrec-pulse")
+            .count()
+    }
+
+    // A source ends its libpulse thread and connection when it goes away:
+    // never played, stopped while the server is slow to answer, and stopped
+    // while it waits for room. A server or device that isn't there fails it
+    // at once.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_source_lets_go_of_everything() {
+        gst::init().unwrap();
+        let before = pulse_threads();
+        let server = PulseServer::start_with("", false);
+        drop(server.source());
+        let link = SlowLink::new(&server);
+        let source = server.source_from("wrec_test.monitor", &link.socket);
+        let pipeline = gst::Pipeline::new();
+        let sink = element("fakesink").unwrap();
+        let arrived = Arc::new(AtomicU64::new(0));
+        let arriving = arrived.clone();
+        sink.static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                arriving.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        pipeline.add_many([&source, &sink]).unwrap();
+        source.link(&sink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while arrived.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(arrived.load(Ordering::Relaxed) > 0, "no audio arrived");
+        // Audio asks for answers as it arrives, so once the slower audio
+        // arrives, answers are on their way when the pipeline stops.
+        link.set_delay(Duration::from_millis(400));
+        std::thread::sleep(Duration::from_millis(700));
+        pipeline.set_state(gst::State::Null).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        drop((pipeline, source, sink));
+
+        let source = server.source();
+        let pipeline = gst::Pipeline::new();
+        let sink = element("fakesink").unwrap();
+        sink.static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, |_, _| {
+                std::thread::sleep(Duration::from_secs(3));
+                gst::PadProbeReturn::Ok
+            });
+        pipeline.add_many([&source, &sink]).unwrap();
+        source.link(&sink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let stopping = Instant::now();
+        pipeline.set_state(gst::State::Null).unwrap();
+        drop((pipeline, source, sink));
+        assert!(stopping.elapsed() < Duration::from_secs(4));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pulse_threads() > before && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(pulse_threads(), before);
+
+        let missing = server.directory.join("missing");
+        let started = Instant::now();
+        assert!(crate::pulse::source(
+            Some(&format!("unix:{}", missing.display())),
+            None,
+            AUDIO_BUFFER
+        )
+        .is_err());
+        let socket = format!("unix:{}", server.directory.join("native").display());
+        assert!(crate::pulse::source(Some(&socket), Some("no_such_device"), AUDIO_BUFFER).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(pulse_threads(), before);
     }
 
     // Stops a recording `after` something in it got stuck at two seconds.
     // Returns the finished recording, its result and how long after stop
-    // run() returned. Like pulsesrc, the audio sources' streaming threads
-    // block on full queues.
+    // run() returned. The audio sources' streaming threads block on full
+    // queues.
     fn stop_while_stuck(
         after: Duration,
         stuck: impl FnOnce(&gst::Pipeline),
@@ -3557,7 +4122,8 @@ mod tests {
     // An idle screen sends a frame each keepalive. A short pause that swallows
     // one leaves almost two keepalives between the frames around it, and mp4mux
     // holds audio until the frame after those. The audio queue must absorb
-    // that wait: a full queue blocks pulsesrc, which then drops audio.
+    // that wait: a full queue blocks the audio source, and then its server
+    // drops audio.
     #[test]
     fn audio_waiting_for_idle_video_across_a_pause_never_fills_its_queue() {
         let mut recording = TestRecording::start_idle(2);
