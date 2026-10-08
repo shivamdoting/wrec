@@ -334,9 +334,9 @@ impl PrivatePipeWire {
     }
 
     fn node(&self, name: &str) -> u32 {
-        let provider = gst::DeviceProviderFactory::by_name("pipewiredeviceprovider").unwrap();
         for _ in 0..50 {
             let fd = self.connect();
+            let provider = pipewire_provider().unwrap();
             provider.set_property("fd", fd.as_raw_fd());
             provider.start().unwrap();
             let found = provider.devices().iter().find_map(|device| {
@@ -345,7 +345,8 @@ impl PrivatePipeWire {
                     .then(|| node_id(device))
                     .flatten()
             });
-            provider.stop();
+            // Kept like NodeWatch's provider: see pipewire_provider.
+            std::mem::forget((provider, fd));
             if let Some(node) = found {
                 return node;
             }

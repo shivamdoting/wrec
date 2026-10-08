@@ -380,7 +380,9 @@ visible on the second remote, or PipeWire does not list its nodes within 5
 seconds, the job logs that stream removal will not be detected and records
 without the watch. If a desktop removes the node before its `Closed` signal
 arrives, a stop from its sharing indicator fails the job with the stream-ended
-message instead of finalizing it.
+message instead of finalizing it. The watch never stops its device provider.
+Before PipeWire 0.3.78, which includes Debian 12's 0.3.65, stopping the provider
+can corrupt memory, so its connection stays open until the capture worker exits.
 
 Stop drains the encoders and finalizes the movie, including when paused. If
 video still has not reached the movie writer 10 seconds after stop while nothing
@@ -436,7 +438,8 @@ without consuming socket data. The node watch test starts a private PipeWire
 daemon in a temporary directory, without the session bus. It checks that an
 idle node is not reported, that removing the node is reported, that a missing
 node disables the watch instead of failing, and that the watch stops promptly
-after the daemon dies.
+after the daemon dies. On PipeWire before 0.3.78, running it under
+`taskset -c 0` makes a provider teardown race fail reliably if one returns.
 
 Real hardware validation on Corex (Ryzen 9 5900H / Radeon Cezanne, Ubuntu 26.04,
 GNOME Wayland, GStreamer 1.28.2) recorded H.264 displays and an animated HEVC

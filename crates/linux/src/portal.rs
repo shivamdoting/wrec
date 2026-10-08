@@ -144,9 +144,7 @@ impl NodeWatch {
     }
 
     async fn watch(remote: PipeWireStream) -> Result<Self> {
-        gst::init().map_err(backend)?;
-        let provider = gst::DeviceProviderFactory::by_name("pipewiredeviceprovider")
-            .ok_or_else(|| backend("GStreamer's PipeWire device provider is not installed"))?;
+        let provider = pipewire_provider()?;
         provider.set_property("fd", remote.fd.as_raw_fd());
         let bus = provider.bus();
         let (stop, stops) = mpsc::channel();
@@ -178,8 +176,9 @@ impl NodeWatch {
                         break;
                     }
                 }
-                provider.stop();
-                drop(remote);
+                // Never stopped; see pipewire_provider. Drop its later messages.
+                bus.set_flushing(true);
+                std::mem::forget((provider, remote));
                 let _ = finished.send(());
             })
             .map_err(backend)?;
@@ -201,6 +200,29 @@ impl Drop for NodeWatch {
             let _ = done.recv_timeout(Duration::from_secs(3));
         }
     }
+}
+
+// A new PipeWire device provider. Callers start it and then keep it, and the fd
+// it connects through, until the process exits. A capture worker records once,
+// so that is one idle connection. Before PipeWire 0.3.78 (Debian 12 ships
+// 0.3.65) the provider cannot be torn down safely. stop() destroys its registry
+// without the PipeWire loop lock (fixed upstream in b0a7e4a2 and 140374d2), so
+// an event arriving then corrupts the heap. stop() and probing also clear the
+// provider's connection before draining its events, so a late node update
+// dereferences NULL. The plugin shares connections by fd number, so the fd must
+// stay open while the connection lives. DeviceProviderFactory::by_name returns
+// one provider for the whole process, so each caller gets a new one instead.
+fn pipewire_provider() -> Result<gst::DeviceProvider> {
+    gst::init().map_err(backend)?;
+    let factory = gst::DeviceProviderFactory::find("pipewiredeviceprovider")
+        .ok_or_else(|| backend("GStreamer's PipeWire device provider is not installed"))?
+        .load()
+        .map_err(backend)?
+        .downcast::<gst::DeviceProviderFactory>()
+        .map_err(|_| backend("GStreamer's PipeWire device provider did not load"))?;
+    gst::glib::Object::with_type(factory.device_provider_type())
+        .downcast::<gst::DeviceProvider>()
+        .map_err(|_| backend("GStreamer's PipeWire device provider did not load"))
 }
 
 fn node_id(device: &gst::Device) -> Option<u32> {
