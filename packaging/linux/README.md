@@ -339,6 +339,19 @@ available. Configure devices in desktop sound settings. Linux cannot apply the
 shared wrec window-hiding or custom microphone-indicator options; job settings
 report them disabled with a warning. The desktop controls its sharing indicator.
 
+Each audio source retains up to one second of raw audio, about 384 kB per
+F32 stereo track, while capture latency remains 10 ms. Sample-count timestamps
+preserve audio held through a short recorder stall. If audio instead stays more
+than 200 ms late with steady arrival timing for a second, wrec moves later
+samples back into alignment and reports the corresponding gap.
+
+This recovery has limits. After real loss, the correction appears about a second
+later, and the intervening audio can play early by the amount lost. Loss below
+200 ms can remain undetected. A stall beyond the one-second source buffer can
+lose samples and leave about 100 ms of offset, as observed in the controlled
+1.5-second stall. Physical microphone clock drift is not validated. These are
+experimental support limits; a completed job alone does not establish A/V sync.
+
 The movie writer takes the next sample of every track in time order, so a track
 that stops delivering holds up the others. Encoded video and each audio track
 can wait about 4 seconds for the rest. Encoded movie data can wait for the disk
@@ -406,19 +419,22 @@ desktop. HDR is not supported.
 ## Validate
 
 ```bash
-sudo apt install ffmpeg dbus-daemon xvfb x11-apps pipewire
+sudo apt install ffmpeg dbus-daemon xvfb x11-apps pipewire pulseaudio
 cargo fmt --check
 cargo check --workspace --locked
 cargo test --workspace --locked
 dbus-run-session -- cargo test -p linux portal_roundtrip --locked -- --ignored
 cargo test -p linux node_watch --locked -- --ignored
+cargo test -p linux pulse_server --locked -- --ignored --test-threads=1
 cargo build -p cli -p daemon
 python3 scripts/test-capture-linux.py target/debug/wrec
 ```
 
 The full test suite requires `x265enc` from the GStreamer runtime packages
 listed above. The HEVC latency regression fails if that encoder is absent,
-so a passing suite always includes it.
+so a passing suite always includes it. The private PulseAudio regressions stop
+only their own server to check held audio, real loss reporting and A/V alignment;
+they require `pulseaudio` and run separately with the command above.
 
 The isolated Xvfb test records actual X11 display/window pixels through the CLI
 and daemon, checks H.264/HEVC decoding and timestamps, and exercises pause/resume
