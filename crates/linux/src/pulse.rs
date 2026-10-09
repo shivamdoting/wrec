@@ -795,27 +795,28 @@ impl Reader {
     }
 
     // Held audio from `from` to `to` has no known place: it goes, and audio
-    // from `to` on stays.
+    // before `from` and from `to` on stays, also from a buffer either falls
+    // inside.
     fn drop_held_between(&mut self, from: i64, to: i64) {
         let unanswered = self.held.len() - self.unanswered;
         let first = self.held.get(unanswered).map_or(i64::MAX, |held| held.0);
         self.held = std::mem::take(&mut self.held)
             .into_iter()
-            .filter_map(|(position, buffer)| {
+            .flat_map(|(position, buffer)| {
                 let end = position + buffer.size() as i64;
                 if end <= from || position >= to {
-                    return Some((position, buffer));
+                    return [Some((position, buffer)), None];
                 }
-                (end > to).then(|| {
-                    let at = (to - position) as usize;
-                    (
-                        to,
-                        buffer
-                            .copy_region(gst::BufferCopyFlags::MEMORY, at..)
-                            .unwrap(),
-                    )
-                })
+                let part = |start: i64, stop: i64| {
+                    (start < stop).then(|| {
+                        let range = (start - position) as usize..(stop - position) as usize;
+                        let part = buffer.copy_region(gst::BufferCopyFlags::MEMORY, range);
+                        (start, part.unwrap())
+                    })
+                };
+                [part(position, from), part(to, end)]
             })
+            .flatten()
             .collect();
         self.unanswered = self.held.iter().filter(|held| held.0 >= first).count();
     }
@@ -1570,26 +1571,101 @@ mod tests {
     // before it that came after the loss have no known place and go with it.
     #[test]
     fn audio_pipewire_pulse_took_in_after_a_loss_it_had_not_reported_is_lost_with_it() {
+        let sent = graph_loss(144000, &[144000], false);
+        assert_eq!(assert_placed(&sent), [(144000, 144240 + LOST)]);
+    }
+
+    // Frames pipewire-pulse lost in its graph in graph_loss.
+    const LOST: u64 = 298 * 48;
+
+    // pipewire-pulse says it captured audio up to frame 144000 when it has
+    // sent audio up to `sent`, then stops as above. Resuming, it sends the
+    // audio from `sent` in buffers that start at `cuts`, before or after its
+    // second answer.
+    fn graph_loss(sent: u64, cuts: &[u64], answer_first: bool) -> Vec<Sent> {
         let mut wire = Wire::new();
         wire.reader.graph_holds = true;
-        wire.steady(0..300);
+        wire.steady(0..299);
+        wire.tick(3000);
+        if sent > 299 * 480 {
+            wire.audio(3000, 299 * 480..sent);
+        }
+        wire.answer(3000, 300 * 480, sent);
         for ms in [3100, 3200, 3300] {
             wire.tick(ms);
         }
-        wire.answer_with(3300, 300 * 480, 300 * 480, 5000);
-        let lost = 298 * 48;
-        let mut frames: Vec<u64> = (144000..144096).collect();
-        frames.extend((144096..144480).map(|frame| frame + lost));
-        wire.audio_frames(3313, frames);
-        wire.answer_with(3313, 301 * 480, 301 * 480, 5000);
+        wire.answer_with(3300, 300 * 480, sent, 5000);
+        if answer_first {
+            wire.tick(3313);
+            wire.answer_with(3313, 301 * 480, sent, 5000);
+        }
+        let truth = |frame: u64| if frame < 144096 { frame } else { frame + LOST };
+        for (i, &start) in cuts.iter().enumerate() {
+            let end = cuts.get(i + 1).copied().unwrap_or(301 * 480);
+            wire.audio_frames(3313, (start..end).map(truth).collect());
+        }
+        if !answer_first {
+            wire.answer_with(3313, 301 * 480, 301 * 480, 5000);
+        }
         for n in 301..400 {
             let ms = (n as i64 + 1) * 10 + 303;
             wire.tick(ms);
-            wire.audio_frames(ms, (n * 480 + lost..(n + 1) * 480 + lost).collect());
+            wire.audio_frames(ms, (n * 480 + LOST..(n + 1) * 480 + LOST).collect());
             wire.answer_with(ms, (n + 1) * 480, (n + 1) * 480, 5000);
         }
-        let sent = wire.sent();
-        assert_eq!(assert_placed(&sent), [(144000, 144240 + lost)]);
+        wire.sent()
+    }
+
+    // When the server stops before it sends what it said it captured, the
+    // audio before that arrives with the loss and keeps its place, whether
+    // one buffer holds both ends of the audio that goes, two hold one each,
+    // or none holds either, and whether it arrives before or after an answer.
+    #[test]
+    fn audio_from_before_pipewire_pulse_said_it_captured_it_keeps_its_place() {
+        let (prefix, kept) = ((143760, 143999), (144240 + LOST, 144479 + LOST));
+        for (sent, cuts, answer_first, around) in [
+            (
+                143760,
+                &[143760][..],
+                false,
+                [(143520, 143759), prefix, kept],
+            ),
+            (
+                143760,
+                &[143760][..],
+                true,
+                [(143520, 143759), prefix, kept],
+            ),
+            (
+                143760,
+                &[143760, 144120][..],
+                false,
+                [(143520, 143759), prefix, kept],
+            ),
+            (
+                143520,
+                &[143520, 144000, 144240][..],
+                false,
+                [(143040, 143519), (143520, 143999), kept],
+            ),
+        ] {
+            let sent = graph_loss(sent, cuts, answer_first);
+            let lost = assert_placed(&sent);
+            assert_eq!(lost, [(144000, 144240 + LOST)], "{cuts:?} {answer_first}");
+            let at = sent
+                .iter()
+                .position(|buffer| buffer.first == around[0].0)
+                .unwrap();
+            let got: Vec<_> = sent[at..at + 3].iter().map(|b| (b.first, b.last)).collect();
+            assert_eq!(got, around, "{cuts:?} {answer_first}");
+            // The gap count_lost_audio reports, within the account's lateness.
+            let gap = sent[at + 2].pts - (sent[at + 1].pts + sent[at + 1].duration);
+            let missing = frame_time(144240 + LOST) - frame_time(144000);
+            assert!(
+                (gap - missing).abs() <= MS,
+                "{cuts:?} {answer_first}: {gap} ns, not {missing}"
+            );
+        }
     }
 
     // A buffer a step falls inside goes out in two: its audio up to the step

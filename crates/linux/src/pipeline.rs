@@ -3235,8 +3235,10 @@ mod tests {
         ) else {
             return;
         };
-        // Answers take 0.6 s, so those to the first questions, asked once
-        // audio arrives 0.6 s in, are on the way 0.9 s in.
+        // This closure starts about 0.1 s in, and wrec asks the server every
+        // 0.1 s. Answers take 0.6 s, so the three that place the start of the
+        // audio, asked 0.1 to 0.3 s in, are all on the way 0.5 s in, when the
+        // clock is first set.
         for (first, later) in [(2 * SECOND, -2 * SECOND), (-2 * SECOND, 2 * SECOND)] {
             let server = PulseServer::start_with(PipeDevice::CONFIG, false);
             clock.shared_with(&server);
@@ -3248,9 +3250,9 @@ mod tests {
             let mut began = None;
             let recorded = record_system_audio_with(source, |_| {
                 began = Some(Instant::now());
-                std::thread::sleep(Duration::from_millis(900));
+                std::thread::sleep(Duration::from_millis(400));
                 clock.set(first);
-                std::thread::sleep(Duration::from_millis(3100));
+                std::thread::sleep(Duration::from_millis(3600));
                 clock.set(later);
                 std::thread::sleep(Duration::from_secs(1));
                 link.set_delay(Duration::ZERO);
