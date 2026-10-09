@@ -145,22 +145,54 @@ const KEEPALIVE: gst::ClockTime = gst::ClockTime::SECOND;
 // screen with its last repaint, seconds old, so the next new frame waited that
 // long and capture stopped meanwhile. Without a clock a source passes frames
 // on as they arrive, so the source goes in a bin that keeps the pipeline's
-// clock from it, and each frame is stamped with the running time it left the
-// source.
-fn stamp_on_arrival(source: gst::Element) -> Result<gst::Element> {
-    let bin = arrival::Unclocked::default();
+// clock from it, and each frame is stamped here instead.
+//
+// Each frame is stamped with when the compositor captured it, the time audio
+// and pausing go by. Delivery takes tens of milliseconds, so a frame stamped
+// on arrival would play that much after its sound. pipewiresrc gives the
+// compositor's time on the pipeline clock since PipeWire 0.3.70 (`absolute`),
+// and in running time before that.
+fn stamp_capture_time(
+    source: gst::Element,
+    absolute: bool,
+    counters: Arc<Counters>,
+) -> Result<gst::Element> {
+    let bin = unclocked::Unclocked::default();
     bin.add(&source).map_err(backend)?;
     let pad = source.static_pad("src").unwrap();
     let stamper = bin.downgrade();
+    let times = Mutex::new(CaptureTimes::default());
+    let copies = source
+        .has_property("always-copy", None)
+        .then(|| Mutex::new(MemPtrCopies::new(&source)));
     pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-        if let (Some(bin), Some(gst::PadProbeData::Buffer(buffer))) =
+        let (Some(bin), Some(gst::PadProbeData::Buffer(buffer))) =
             (stamper.upgrade(), info.data.as_mut())
-        {
-            let now = bin.running_time();
-            let buffer = buffer.make_mut();
-            buffer.set_pts(now);
-            buffer.set_dts(now);
+        else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(now) = bin.running_time() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let base = if absolute { bin.base_time() } else { None };
+        let mut times = times.lock().unwrap();
+        let (stamp, earliest) = times.stamp(buffer, base, now);
+        if let Some(copies) = &copies {
+            copies.lock().unwrap().protect(buffer);
         }
+        // Pausing takes out what may have been captured while paused.
+        let paused = counters
+            .timeline
+            .lock()
+            .unwrap()
+            .paused_between(earliest, now);
+        if paused > gst::ClockTime::ZERO {
+            return gst::PadProbeReturn::Drop;
+        }
+        times.passed = Some(stamp);
+        let buffer = buffer.make_mut();
+        buffer.set_pts(stamp);
+        buffer.set_dts(stamp);
         gst::PadProbeReturn::Ok
     });
     let ghost = gst::GhostPad::builder_with_target(&pad)
@@ -171,7 +203,113 @@ fn stamp_on_arrival(source: gst::Element) -> Result<gst::Element> {
     Ok(bin.upcast())
 }
 
-mod arrival {
+// pipewiresrc gives a frame with a compositor header the header's sequence
+// number as its offset and the header's timestamp as its PTS. A keepalive
+// repeats the last frame with the same offset and, without a clock, no PTS.
+fn is_keepalive(frame: &gst::BufferRef) -> bool {
+    frame.offset() != gst::ffi::GST_BUFFER_OFFSET_NONE && frame.pts().is_none()
+}
+
+// When each frame from pipewiresrc was captured, in running time. KWin stamps
+// a frame with the screen's previous presentation, which after an idle screen
+// is seconds before it rendered the picture, and it stamped the first frame of
+// a recording with its last repaint. So a timestamp only says the picture is
+// no older than that, and the frame's arrival says it is no newer.
+#[derive(Default)]
+struct CaptureTimes {
+    // The last frame's stamp, and the running time it arrived.
+    last: Option<(gst::ClockTime, gst::ClockTime)>,
+    // The last stamp passed on.
+    passed: Option<gst::ClockTime>,
+}
+
+impl CaptureTimes {
+    // The frame's stamp, and the earliest it may have been captured. `base`
+    // is running time 0 on an absolute source's clock; `now` is the running
+    // time the frame arrived.
+    fn stamp(
+        &mut self,
+        frame: &gst::BufferRef,
+        base: Option<gst::ClockTime>,
+        now: gst::ClockTime,
+    ) -> (gst::ClockTime, gst::ClockTime) {
+        if is_keepalive(frame) {
+            // The screen still shows the last frame's picture, as much later
+            // as the keepalive came after that frame.
+            let stamp = self
+                .last
+                .map_or(now, |(stamp, arrived)| stamp + now.saturating_sub(arrived));
+            self.last = Some((stamp, now));
+            return (stamp, stamp);
+        }
+        let captured = frame
+            .pts()
+            .filter(|_| frame.offset() != gst::ffi::GST_BUFFER_OFFSET_NONE)
+            // A frame stamped before the start shows the screen at the start.
+            .map(|pts| base.map_or(pts, |base| pts.saturating_sub(base)))
+            // A frame isn't captured after it arrives.
+            .filter(|&captured| captured <= now);
+        // A timestamp no later than the last frame or keepalive passed on
+        // says nothing about when this picture was made, as KWin's first
+        // frame after an idle screen shows, so the frame goes by its arrival.
+        let stamp = captured
+            .filter(|&captured| self.passed.map_or(true, |passed| captured > passed))
+            .unwrap_or(now);
+        self.last = Some((stamp, now));
+        (stamp, captured.unwrap_or(now))
+    }
+}
+
+// pipewiresrc hands over a MemPtr frame as a bare pointer into PipeWire's
+// mapping of the producer's memory, which PipeWire unmaps when the producer
+// goes away, even while wrec is still converting the frame or pipewiresrc
+// sends it again as a keepalive. Compositors share MemFd or DMA-BUF memory,
+// which pipewiresrc maps itself. Once a frame turns out to be MemPtr,
+// pipewiresrc copies each later frame while it holds PipeWire's lock, wrec
+// copies that first frame itself, and keepalives repeat wrec's copy instead of
+// pipewiresrc's last frame.
+struct MemPtrCopies {
+    source: gst::glib::WeakRef<gst::Element>,
+    copying: bool,
+    last: Option<gst::Buffer>,
+}
+
+impl MemPtrCopies {
+    fn new(source: &gst::Element) -> Self {
+        Self {
+            source: source.downgrade(),
+            copying: false,
+            last: None,
+        }
+    }
+
+    fn protect(&mut self, buffer: &mut gst::Buffer) {
+        if !self.copying
+            && buffer.n_memory() > 0
+            && !buffer
+                .iter_memories()
+                .any(|memory| memory.is_memory_type::<gstreamer_allocators::FdMemory>())
+        {
+            self.copying = true;
+            if let Some(source) = self.source.upgrade() {
+                source.set_property("always-copy", true);
+            }
+            if let Ok(copy) = buffer.copy_deep() {
+                *buffer = copy;
+            }
+        }
+        if !self.copying {
+            return;
+        }
+        if !is_keepalive(buffer) {
+            self.last = Some(buffer.clone());
+        } else if let Some(last) = &self.last {
+            *buffer = last.clone();
+        }
+    }
+}
+
+mod unclocked {
     use gstreamer::{self as gst, glib, prelude::*, subclass::prelude::*};
 
     glib::wrapper! {
@@ -418,6 +556,9 @@ pub(crate) enum CaptureInput {
     },
     #[cfg(test)]
     Element(Box<dyn Fn() -> gst::Element + Send>),
+    // A stand-in for pipewiresrc since PipeWire 0.3.70, stamped like it.
+    #[cfg(test)]
+    Compositor(Box<dyn Fn() -> gst::Element + Send>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -547,7 +688,11 @@ fn record_attempt(
             source.set_property("max-buffers", 8i32);
             source.set_property("keepalive-time", KEEPALIVE.mseconds() as i32);
             source.set_property("resend-last", true);
-            stamp_on_arrival(source)?
+            let absolute = source
+                .factory()
+                .and_then(|factory| encoding::plugin_version(&factory))
+                .is_some_and(|version| version >= vec![0, 3, 70]);
+            stamp_capture_time(source, absolute, attempt.counters.clone())?
         }
         CaptureInput::X11 { display, xid } => {
             let source = element("ximagesrc")?;
@@ -565,6 +710,10 @@ fn record_attempt(
                 source.set_property("do-timestamp", true);
             }
             source
+        }
+        #[cfg(test)]
+        CaptureInput::Compositor(source) => {
+            stamp_capture_time(source(), true, attempt.counters.clone())?
         }
     };
     let input = element("capsfilter")?;
@@ -5352,6 +5501,7 @@ mod tests {
     // failure fails the test instead of hanging it. Dropping it stops the
     // recording and waits as long as the daemon waits for a worker to exit.
     struct RecordThread {
+        commands: mpsc::SyncSender<Command>,
         stop: watch::Sender<bool>,
         returned: mpsc::Receiver<Result<()>>,
     }
@@ -5368,7 +5518,6 @@ mod tests {
             let (done, returned) = mpsc::channel();
             let session = session.clone();
             std::thread::spawn(move || {
-                let _commands = commands;
                 let result = record(
                     &capture,
                     &session,
@@ -5380,7 +5529,23 @@ mod tests {
                 );
                 let _ = done.send(result);
             });
-            Self { stop, returned }
+            Self {
+                commands,
+                stop,
+                returned,
+            }
+        }
+
+        fn control(&self, pause: bool) {
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.commands
+                .send(if pause {
+                    Command::Pause(tx)
+                } else {
+                    Command::Resume(tx)
+                })
+                .unwrap();
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
         }
 
         fn assert_running(&self) {
@@ -5467,12 +5632,8 @@ mod tests {
         gst::init().unwrap();
         let source = Arc::new(Mutex::new(None::<gst::Element>));
         let created = source.clone();
-        let capture = CaptureInput::Element(Box::new(move || {
-            let screen = stamp_on_arrival(compositor(
-                Duration::from_secs(3),
-                Duration::from_millis(100),
-            ))
-            .unwrap();
+        let capture = CaptureInput::Compositor(Box::new(move || {
+            let screen = compositor(Duration::from_secs(3), Duration::from_millis(100));
             *created.lock().unwrap() = Some(screen.clone());
             screen
         }));
@@ -5498,6 +5659,202 @@ mod tests {
             span > 1.0 && gap < 0.5,
             "1.5 s of new frames 0.1 s apart became {} frames over {span:.3} s, the longest gap {gap:.3} s",
             times.len()
+        );
+    }
+
+    // pipewiresrc since PipeWire 0.3.70 as wrec runs it, without a clock:
+    // each frame carries the compositor's timestamp on the pipeline clock and
+    // its header number, and a keepalive repeats the last frame's number
+    // without a timestamp. The test pushes each frame when it arrives.
+    struct Screen {
+        appsrc: gst::Element,
+        clock: gst::Clock,
+        number: u64,
+        last: Option<gst::Buffer>,
+    }
+
+    impl Screen {
+        fn record(session: &RecordingSession) -> (Self, RecordThread) {
+            gst::init().unwrap();
+            let source = Arc::new(Mutex::new(None::<gst::Element>));
+            let created = source.clone();
+            let capture = CaptureInput::Compositor(Box::new(move || {
+                let appsrc = element("appsrc").unwrap();
+                appsrc.set_property("is-live", true);
+                appsrc.set_property_from_str("format", "time");
+                appsrc.set_property(
+                    "caps",
+                    gst::Caps::builder("video/x-raw")
+                        .field("format", "BGRx")
+                        .field("width", 64i32)
+                        .field("height", 36i32)
+                        .field("framerate", gst::Fraction::new(0, 1))
+                        .field("max-framerate", gst::Fraction::new(30, 1))
+                        .build(),
+                );
+                *created.lock().unwrap() = Some(appsrc.clone());
+                appsrc
+            }));
+            let (events, _received) = mpsc::channel();
+            let recording = RecordThread::spawn(capture, session, Codec::H264, events);
+            let appsrc = playing_source(&source, &recording);
+            let screen = Self {
+                appsrc,
+                clock: gst::SystemClock::obtain(),
+                number: 0,
+                last: None,
+            };
+            (screen, recording)
+        }
+
+        fn now(&self) -> gst::ClockTime {
+            self.clock.time().unwrap()
+        }
+
+        // A frame filled with `shade`, captured at `captured` on the clock.
+        fn frame(&mut self, shade: u8, captured: gst::ClockTime) {
+            let mut frame = gst::Buffer::from_mut_slice(vec![shade; 64 * 36 * 4]);
+            let header = frame.get_mut().unwrap();
+            header.set_pts(captured);
+            header.set_offset(self.number);
+            self.number += 1;
+            self.last = Some(frame.clone());
+            self.push(frame);
+        }
+
+        fn keepalive(&mut self) {
+            let mut frame = self.last.as_ref().unwrap().copy();
+            frame.get_mut().unwrap().set_pts(gst::ClockTime::NONE);
+            self.push(frame);
+        }
+
+        fn push(&self, frame: gst::Buffer) {
+            assert_eq!(
+                self.appsrc
+                    .emit_by_name::<gst::FlowReturn>("push-buffer", &[&frame]),
+                gst::FlowReturn::Ok
+            );
+        }
+    }
+
+    // The shades a player shows, in order, each as the nearest of `shades`.
+    fn shown(movie: &Path, shades: &[u8]) -> Vec<u8> {
+        decoded_pictures(movie)
+            .into_iter()
+            .map(|(width, height, pixels)| {
+                let luma = pixels[height / 2 * width + width / 2] as f64;
+                *shades
+                    .iter()
+                    .min_by_key(|&&shade| {
+                        ((16.0 + 219.0 * shade as f64 / 255.0 - luma).abs() * 100.0) as u64
+                    })
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    // A compositor delivers a frame tens of milliseconds after it captures
+    // it. One captured just before the resume and delivered just after it
+    // shows what was on screen while paused.
+    #[test]
+    fn a_frame_captured_while_paused_stays_out_after_the_resume() {
+        let session = test_session();
+        let (mut screen, recording) = Screen::record(&session);
+        for _ in 0..5 {
+            screen.frame(40, screen.now() - gst::ClockTime::from_mseconds(20));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        recording.control(true);
+        std::thread::sleep(Duration::from_millis(300));
+        let paused = screen.now();
+        recording.control(false);
+        std::thread::sleep(Duration::from_millis(60));
+        screen.frame(250, paused);
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(100));
+            screen.frame(40, screen.now() - gst::ClockTime::from_mseconds(20));
+        }
+        recording.finish().unwrap();
+        let shades = shown(&session.output_path, &[40, 250]);
+        let _ = std::fs::remove_file(&session.output_path);
+        assert!(shades.contains(&40), "{shades:?}");
+        assert!(
+            !shades.contains(&250),
+            "a frame captured while paused was shown after the resume: {shades:?}"
+        );
+    }
+
+    // Frames go into the movie by when they were captured, so a compositor
+    // whose delivery takes 20 ms, then 45 ms, keeps its frames 1/30 s apart.
+    #[test]
+    fn frames_keep_their_capture_spacing_when_delivery_varies() {
+        let session = test_session();
+        let (mut screen, recording) = Screen::record(&session);
+        let start = screen.now();
+        let interval = gst::ClockTime::SECOND / 30;
+        for frame in 0..30u64 {
+            let captured = start + interval * frame;
+            let delay = gst::ClockTime::from_mseconds(if frame % 2 == 0 { 20 } else { 45 });
+            let arrives = captured + delay;
+            std::thread::sleep(Duration::from_nanos(
+                arrives.saturating_sub(screen.now()).nseconds(),
+            ));
+            screen.frame(30 + 20 * (frame % 2) as u8, captured);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        recording.finish().unwrap();
+        let mut times: Vec<f64> = video_packets(&decode_movie(&session.output_path))
+            .into_iter()
+            .map(|(time, _)| time)
+            .collect();
+        let _ = std::fs::remove_file(&session.output_path);
+        times.sort_by(f64::total_cmp);
+        let spacing: Vec<f64> = times.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(
+            times.len() >= 29
+                && spacing
+                    .iter()
+                    .all(|interval| (interval - 1.0 / 30.0).abs() < 0.002),
+            "frames captured 1/30 s apart were {spacing:?} s apart"
+        );
+    }
+
+    // KWin stamps a frame with the screen's previous presentation, seconds
+    // before it rendered the picture if the screen was idle. After a
+    // keepalive such a frame still goes in, by its arrival. And one rendered
+    // while paused, stamped with a presentation before the pause, stays out.
+    #[test]
+    fn stale_compositor_timestamps_lose_no_frame_and_let_no_paused_frame_in() {
+        let session = test_session();
+        let (mut screen, recording) = Screen::record(&session);
+        let shown_at = screen.now() - gst::ClockTime::from_mseconds(20);
+        screen.frame(60, shown_at);
+        std::thread::sleep(Duration::from_millis(1000));
+        screen.keepalive();
+        std::thread::sleep(Duration::from_millis(300));
+        let presented = screen.now();
+        screen.frame(120, shown_at + gst::ClockTime::from_mseconds(40));
+        std::thread::sleep(Duration::from_millis(200));
+        recording.control(true);
+        std::thread::sleep(Duration::from_millis(300));
+        screen.frame(240, presented + gst::ClockTime::from_mseconds(16));
+        std::thread::sleep(Duration::from_millis(300));
+        recording.control(false);
+        std::thread::sleep(Duration::from_millis(100));
+        for _ in 0..3 {
+            screen.frame(30, screen.now() - gst::ClockTime::from_mseconds(20));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        recording.finish().unwrap();
+        let shades = shown(&session.output_path, &[30, 60, 120, 240]);
+        let _ = std::fs::remove_file(&session.output_path);
+        assert!(
+            shades.contains(&60) && shades.contains(&120) && shades.contains(&30),
+            "a frame was lost: {shades:?}"
+        );
+        assert!(
+            !shades.contains(&240),
+            "a frame rendered while paused was shown: {shades:?}"
         );
     }
 

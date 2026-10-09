@@ -106,7 +106,18 @@ KWin can stamp the first frame of an idle screen with the time of its last
 repaint, seconds before capture started. GStreamer then held each new frame
 for that long, so a recording of a still screen froze for seconds once
 something moved. wrec gives `pipewiresrc` no clock, so it passes each frame on
-as it arrives, and stamps every frame with the time it arrived.
+as it arrives, and stamps each frame with the compositor's timestamp rather
+than its arrival, so the time the compositor takes to deliver a frame does not
+delay video against audio. KWin stamps a frame with the screen's previous presentation, which after
+an idle screen is seconds before it rendered the picture. A timestamp no later
+than the previous frame's says nothing about when its picture was made, so
+that frame is stamped with when it arrived.
+
+A screen-capture stream can share frames as plain pointers into PipeWire's
+memory (MemPtr) instead of file descriptors (MemFd or DMA-BUF). PipeWire
+unmaps that memory when the producer exits, even while wrec still uses a
+frame, so wrec copies MemPtr frames. KWin, mutter, xdg-desktop-portal-wlr and
+gamescope share MemFd or DMA-BUF, which wrec does not copy.
 
 wrec sets the movie's output size when the first source caps arrive. Changing
 a capsfilter normally asks every upstream element to renegotiate, and
@@ -330,9 +341,12 @@ pauses; the movie omits paused time. Pause keeps the approved source streams ali
 video and audio before conversion/encoding; timestamps remove the pause on resume.
 Rust only changes buffer metadata, preserving GPU memory. This also avoids
 PipeWire source renegotiation on resume. What a pause drops is decided by when it
-was captured, not when it arrives. Audio and video captured before a pause stay
-even when they arrive during it, as when a stalled movie writer held the audio
-back, and nothing captured while paused stays. A pause that starts or ends inside
+was captured, not when it arrives. Audio captured before a pause stays even
+when it arrives during it, as when a stalled movie writer held the audio back,
+and nothing captured while paused stays. A Wayland screen frame was captured
+somewhere between its compositor timestamp and its arrival, so a frame whose
+span touches a pause is dropped, including frames captured in the last few tens
+of milliseconds before the pause. A pause that starts or ends inside
 an audio buffer cuts it between samples. Failed starts do not report nonexistent files.
 
 Wayland permission status is `unknown` outside a recording because grants belong
