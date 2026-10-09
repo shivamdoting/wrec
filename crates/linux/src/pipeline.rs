@@ -2814,8 +2814,9 @@ mod tests {
         reported: f64,
         // Where the audio ends after the video.
         after_video: f64,
-        // Where the audio starts after the video.
-        starts_after_video: f64,
+        // Where the audio starts in the movie, which starts with its
+        // earliest track.
+        audio_starts: f64,
         // When the system audio track ended, if it failed.
         stopped: Option<String>,
         // When the recording had started.
@@ -2864,7 +2865,7 @@ mod tests {
             hole: audio_holes(&probe)[0],
             reported,
             after_video: end_seconds(&probe, "aac") - end_seconds(&probe, "h264"),
-            starts_after_video: start_seconds(&probe, "aac")[0] - start_seconds(&probe, "h264")[0],
+            audio_starts: start_seconds(&probe, "aac")[0],
             stopped: lost
                 .split_once("system audio stopped at ")
                 .map(|(_, rest)| rest.to_string()),
@@ -3262,9 +3263,19 @@ mod tests {
                 0,
                 "the device lost audio during the recording"
             );
+            // The device was writing before the recording, so the source's
+            // first audio is at running time 0, when the recording started,
+            // and the movie starts with it. Neither is judged against the
+            // video, because the test's videotestsrc stamps its first frame
+            // when its thread makes it. That is late if the thread doesn't
+            // run for a while after the pipeline plays, or its first
+            // allocation query waits for the encoder. The movie alone can't
+            // show running time, because mp4mux starts it at its earliest
+            // track.
+            let audio_began = placed.lock().unwrap()[0].0;
             assert!(
-                recorded.whole() && recorded.starts_after_video.abs() < 0.05,
-                "set {first} then {later} ns: {recorded:?}"
+                recorded.whole() && audio_began < 0.05 && recorded.audio_starts.abs() < 0.05,
+                "set {first} then {later} ns: audio began at {audio_began:.3} s, {recorded:?}"
             );
         }
         let server = PulseServer::start_with(PipeDevice::CONFIG, false);
