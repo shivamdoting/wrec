@@ -326,7 +326,11 @@ job without a movie. After capture starts, `--duration` counts wall time includi
 pauses; the movie omits paused time. Pause keeps the approved source streams alive but drops
 video and audio before conversion/encoding; timestamps remove the pause on resume.
 Rust only changes buffer metadata, preserving GPU memory. This also avoids
-PipeWire source renegotiation on resume. Failed starts do not report nonexistent files.
+PipeWire source renegotiation on resume. What a pause drops is decided by when it
+was captured, not when it arrives. Audio and video captured before a pause stay
+even when they arrive during it, as when a stalled movie writer held the audio
+back, and nothing captured while paused stays. A pause that starts or ends inside
+an audio buffer cuts it between samples. Failed starts do not report nonexistent files.
 
 Wayland permission status is `unknown` outside a recording because grants belong
 to individual sessions. Every recording asks for a source. Restore tokens,
@@ -396,7 +400,11 @@ can wait about 4 seconds for the rest. Encoded movie data can wait for the disk
 in a 32 MiB buffer, about 16 seconds at 16 Mbit/s. These buffers stay nearly
 empty unless something stalls. Past those limits the recording keeps going with
 gaps: the capture queue drops video frames, and an audio source's server drops
-audio that nothing read in time, which is reported as lost. A stalled video
+audio that nothing read in time, which is reported as lost. Audio still waiting in
+an audio source or its server when the recording stops never reaches the movie.
+When a track's audio ends more than 0.1 s of recorded time before the stop, wrec
+reports that end as missing audio; on a normal stop it is a few tens of
+milliseconds. A stalled video
 encoder always costs the frames captured meanwhile, since raw frames are too
 large to keep.
 

@@ -167,13 +167,19 @@ struct Counters {
     timeline: Mutex<Timeline>,
 }
 
+// Pausing takes out of the movie what was captured while paused, judged by
+// capture time, not by when it arrives: a source whose downstream holds it
+// back can deliver audio captured before a pause while paused, or audio
+// captured while paused after resuming.
 #[derive(Default)]
 struct Timeline {
     paused_at: Option<gst::ClockTime>,
+    // The length of the finished pauses.
     offset: gst::ClockTime,
-    accept_from: gst::ClockTime,
     // Finished pauses, in running time, oldest first.
     pauses: Vec<(gst::ClockTime, gst::ClockTime)>,
+    // When the recording stopped, in running time.
+    stopped_at: Option<gst::ClockTime>,
 }
 
 impl Timeline {
@@ -184,9 +190,13 @@ impl Timeline {
     fn resume(&mut self, now: gst::ClockTime) {
         if let Some(paused_at) = self.paused_at.take() {
             self.offset += now.saturating_sub(paused_at);
-            self.accept_from = now;
             self.pauses.push((paused_at, now));
         }
+    }
+
+    fn stop(&mut self, now: gst::ClockTime) {
+        self.resume(now);
+        self.stopped_at.get_or_insert(now);
     }
 
     // How much of the running time from `start` to `end` was paused.
@@ -204,19 +214,117 @@ impl Timeline {
         self.paused_at.unwrap_or(now).saturating_sub(self.offset)
     }
 
-    fn retime(&self, buffer: &mut gst::Buffer) -> bool {
-        if self.paused_at.is_some() || buffer.pts().is_some_and(|pts| pts < self.accept_from) {
-            return false;
+    // Pauses that ended after `time`, oldest first, then the one going on.
+    fn pauses_after(
+        &self,
+        time: gst::ClockTime,
+    ) -> impl Iterator<Item = (gst::ClockTime, gst::ClockTime)> + '_ {
+        self.closed_after(time)
+            .iter()
+            .copied()
+            .chain(self.paused_at.map(|at| (at, gst::ClockTime::MAX)))
+    }
+
+    fn closed_after(&self, time: gst::ClockTime) -> &[(gst::ClockTime, gst::ClockTime)] {
+        let first = self.pauses.partition_point(|&(_, resumed)| resumed <= time);
+        &self.pauses[first..]
+    }
+
+    // How much earlier what was captured at `time` goes in the movie: by
+    // every pause that ended by then. None if it was captured while paused.
+    fn offset_at(&self, time: gst::ClockTime) -> Option<gst::ClockTime> {
+        let later = self.closed_after(time);
+        if self.paused_at.is_some_and(|at| at <= time)
+            || later.first().is_some_and(|&(paused, _)| paused <= time)
+        {
+            return None;
         }
-        if self.offset > gst::ClockTime::ZERO {
+        let later: gst::ClockTime = later
+            .iter()
+            .map(|&(paused, resumed)| resumed - paused)
+            .sum();
+        Some(self.offset - later)
+    }
+
+    // A video frame goes by when it was captured.
+    fn retime(&self, buffer: &mut gst::Buffer) -> bool {
+        let offset = match buffer.pts() {
+            Some(pts) => self.offset_at(pts),
+            None => self.paused_at.is_none().then_some(self.offset),
+        };
+        let Some(offset) = offset else {
+            return false;
+        };
+        if offset > gst::ClockTime::ZERO {
             // make_mut copies a shared buffer header, retaining references to
             // its memory. DMA-BUF pixels remain on the GPU.
             let buffer = buffer.make_mut();
-            buffer.set_pts(buffer.pts().map(|pts| pts.saturating_sub(self.offset)));
-            buffer.set_dts(buffer.dts().map(|dts| dts.saturating_sub(self.offset)));
+            buffer.set_pts(buffer.pts().map(|pts| pts.saturating_sub(offset)));
+            buffer.set_dts(buffer.dts().map(|dts| dts.saturating_sub(offset)));
         }
         true
     }
+
+    // Audio goes frame by frame, `frame` bytes each at `rate`: a buffer a
+    // pause starts or ends inside keeps only its frames captured outside
+    // every pause, in one buffer, since taking the pauses out leaves them
+    // continuous.
+    fn retime_audio(&self, buffer: &mut gst::Buffer, rate: u32, frame: usize) -> bool {
+        let Some(pts) = buffer.pts() else {
+            return self.retime(buffer);
+        };
+        let frames = buffer.size() / frame;
+        // The first frame captured at or after `time`.
+        let index = |time: gst::ClockTime| {
+            let since = time.saturating_sub(pts).nseconds() as u128;
+            (since * rate as u128)
+                .div_ceil(1_000_000_000)
+                .min(frames as u128) as usize
+        };
+        let mut kept = Vec::new();
+        let mut from = 0;
+        for (paused, resumed) in self.pauses_after(pts) {
+            let start = index(paused);
+            if start > from {
+                kept.push(from..start);
+            }
+            from = from.max(index(resumed));
+            if from == frames {
+                break;
+            }
+        }
+        if from < frames {
+            kept.push(from..frames);
+        }
+        let Some(first) = kept.first().map(|frames| frames.start) else {
+            return false;
+        };
+        if kept[0] != (0..frames) {
+            let mut pieces = kept.iter().map(|frames| {
+                buffer
+                    .copy_region(
+                        gst::BufferCopyFlags::FLAGS | gst::BufferCopyFlags::MEMORY,
+                        frames.start * frame..frames.end * frame,
+                    )
+                    .unwrap()
+            });
+            let mut audio = pieces.next().unwrap();
+            for piece in pieces {
+                audio.append(piece);
+            }
+            let length: usize = kept.iter().map(|frames| frames.len()).sum();
+            let audio_mut = audio.get_mut().unwrap();
+            audio_mut.set_pts(pts + frame_time(first, rate));
+            audio_mut.set_duration(frame_time(length, rate));
+            *buffer = audio;
+        }
+        self.retime(buffer)
+    }
+}
+
+// How long `frames` audio frames at `rate` last.
+fn frame_time(frames: usize, rate: u32) -> gst::ClockTime {
+    gst::ClockTime::from_nseconds(frames as u64 * 1_000_000_000 / rate as u64)
 }
 
 pub(crate) enum CaptureInput {
@@ -628,6 +736,8 @@ struct AudioTrack {
     state: Arc<AtomicU8>,
     // Nanoseconds of audio missing between captured buffers.
     lost: Arc<AtomicU64>,
+    // Where the captured audio ends, in running time.
+    end: Arc<Mutex<Option<gst::ClockTime>>>,
     // Where in the movie the track failed, and why.
     failed: Option<(gst::ClockTime, String)>,
 }
@@ -709,6 +819,7 @@ impl Movie {
         queue: &gst::Element,
         source: &gst::Element,
         lost: Arc<AtomicU64>,
+        end: Arc<Mutex<Option<gst::ClockTime>>>,
     ) {
         let pad = queue.static_pad("src").unwrap();
         // Linking the track sends a reconfigure upstream. The encoder answers
@@ -759,6 +870,7 @@ impl Movie {
             probe,
             state,
             lost,
+            end,
             failed: None,
         });
     }
@@ -841,8 +953,9 @@ fn add_audio_source(
 ) -> Result<()> {
     // Counted before pausing drops anything.
     let lost = Arc::new(AtomicU64::new(0));
-    count_lost_audio(source, lost.clone(), counters.clone());
-    attach_timing_probe(source, counters.clone());
+    let end = Arc::new(Mutex::new(None));
+    count_lost_audio(source, lost.clone(), end.clone(), counters.clone());
+    attach_audio_timing_probe(source, counters.clone());
     let convert = element("audioconvert")?;
     let resample = element("audioresample")?;
     let caps = element("capsfilter")?;
@@ -873,7 +986,7 @@ fn add_audio_source(
     ];
     movie.pipeline.add_many(chain).map_err(backend)?;
     gst::Element::link_many(chain).map_err(backend)?;
-    movie.add_audio(name, &queue, source, lost);
+    movie.add_audio(name, &queue, source, lost, end);
     Ok(())
 }
 
@@ -886,9 +999,13 @@ pub(crate) const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 // where capture actually resumed. Sources keep capturing while paused, so a
 // pause leaves no gap, and the paused part of a gap is not in the movie.
 // Capture timestamps and pauses are both in running time.
-fn count_lost_audio(source: &gst::Element, lost: Arc<AtomicU64>, counters: Arc<Counters>) {
-    // Where the next buffer should start.
-    let next = Mutex::new(None::<gst::ClockTime>);
+// `next` is where the next buffer should start.
+fn count_lost_audio(
+    source: &gst::Element,
+    lost: Arc<AtomicU64>,
+    next: Arc<Mutex<Option<gst::ClockTime>>>,
+    counters: Arc<Counters>,
+) {
     source
         .static_pad("src")
         .unwrap()
@@ -923,12 +1040,71 @@ fn retime(info: &mut gst::PadProbeInfo<'_>, counters: &Counters) -> bool {
     true
 }
 
+// The pause gate for a video source.
+#[cfg(test)]
 fn attach_timing_probe(source: &gst::Element, counters: Arc<Counters>) {
     source
         .static_pad("src")
         .unwrap()
         .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if retime(info, &counters) {
+                gst::PadProbeReturn::Ok
+            } else {
+                gst::PadProbeReturn::Drop
+            }
+        });
+}
+
+// The rate and bytes per frame of interleaved raw audio.
+fn audio_frames(caps: &gst::CapsRef) -> Option<(u32, usize)> {
+    let structure = caps.structure(0)?;
+    if structure.get::<&str>("layout").ok() != Some("interleaved") {
+        return None;
+    }
+    let format = structure.get::<&str>("format").ok()?;
+    let bits: usize = format
+        .get(1..)?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    // S24_32LE and the like keep each sample in 32 bits.
+    let bytes = if format.contains("_32") {
+        4
+    } else {
+        bits.div_ceil(8)
+    };
+    let rate = structure.get::<i32>("rate").ok()?;
+    let channels = structure.get::<i32>("channels").ok()?;
+    (rate > 0 && channels > 0).then(|| (rate as u32, bytes * channels as usize))
+}
+
+fn attach_audio_timing_probe(source: &gst::Element, counters: Arc<Counters>) {
+    source
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let frames = pad.current_caps().and_then(|caps| audio_frames(&caps));
+            let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let timeline = counters.timeline.lock().unwrap();
+            let keep = match frames {
+                Some((rate, frame)) => timeline.retime_audio(buffer, rate, frame),
+                // Audio of unknown shape can't be cut, so it goes whole or
+                // not at all.
+                None => {
+                    let start = buffer.pts();
+                    let end = start
+                        .zip(buffer.duration())
+                        .map(|(pts, length)| pts + length);
+                    let paused = start.zip(end).is_some_and(|(start, end)| {
+                        timeline.paused_between(start, end) > gst::ClockTime::ZERO
+                    });
+                    !paused && timeline.retime(buffer)
+                }
+            };
+            if keep {
                 gst::PadProbeReturn::Ok
             } else {
                 gst::PadProbeReturn::Drop
@@ -1218,7 +1394,7 @@ fn run(
                 .timeline
                 .lock()
                 .unwrap()
-                .resume(pipeline.current_running_time().unwrap_or_default());
+                .stop(pipeline.current_running_time().unwrap_or_default());
             // A source pushing into a full queue holds its stream lock, and
             // sending it EOS waits for that lock, so wait here instead.
             let ending = pipeline.clone();
@@ -1299,6 +1475,7 @@ fn run(
                         &omitted,
                         dropped_frames(pipeline, counters),
                         video_cut,
+                        &counters.timeline.lock().unwrap(),
                     ) {
                         let _ = events.send(RecorderEvent::MediaLost {
                             session_id: session.id,
@@ -1419,6 +1596,27 @@ fn seconds(time: gst::ClockTime) -> f64 {
     time.nseconds() as f64 / 1e9
 }
 
+// Audio captured this long before the stop can still be on its way from its
+// server when the stop ends its track.
+const AUDIO_TAIL: gst::ClockTime = gst::ClockTime::from_mseconds(100);
+
+// Recorded time from where a track's captured audio ends to the stop. No
+// later audio shows this gap, as when its source waited on a full queue at
+// the stop, or its device went quiet.
+fn missing_end(timeline: &Timeline, end: Option<gst::ClockTime>) -> gst::ClockTime {
+    let (Some(end), Some(stopped)) = (end, timeline.stopped_at) else {
+        return gst::ClockTime::ZERO;
+    };
+    let missing = stopped
+        .saturating_sub(end)
+        .saturating_sub(timeline.paused_between(end, stopped));
+    if missing > AUDIO_TAIL {
+        missing
+    } else {
+        gst::ClockTime::ZERO
+    }
+}
+
 // What the finished movie is missing, if anything. A movie that plays is not
 // necessarily whole.
 fn media_lost(
@@ -1426,6 +1624,7 @@ fn media_lost(
     omitted: &[&str],
     dropped_frames: u64,
     video_cut: bool,
+    timeline: &Timeline,
 ) -> Option<String> {
     let mut lost = Vec::new();
     if video_cut {
@@ -1438,7 +1637,10 @@ fn media_lost(
         lost.push(format!("{dropped_frames} video frames were dropped"));
     }
     for track in &movie.audio {
-        let missing = track.lost.load(Ordering::Relaxed);
+        let mut missing = track.lost.load(Ordering::Relaxed);
+        if track.failed.is_none() && !omitted.contains(&track.name) {
+            missing += missing_end(timeline, *track.end.lock().unwrap()).nseconds();
+        }
         if missing > 0 {
             lost.push(format!(
                 "{} is missing {:.2} s of audio",
@@ -1777,6 +1979,16 @@ mod tests {
             audio: Vec<(&'static str, gst::Element)>,
             counting_encoder: bool,
         ) -> Self {
+            Self::start_watched(video, audio, counting_encoder, |_| {})
+        }
+
+        // `watch` sees the pipeline once it is built, before it plays.
+        fn start_watched(
+            video: &str,
+            audio: Vec<(&'static str, gst::Element)>,
+            counting_encoder: bool,
+            watch: impl FnOnce(&gst::Pipeline),
+        ) -> Self {
             gst::init().unwrap();
             static ID: AtomicU64 = AtomicU64::new(0);
             let id = ID.fetch_add(1, Ordering::Relaxed);
@@ -1842,6 +2054,7 @@ mod tests {
                 add_audio_source(&mut movie, source, name, &counters).unwrap();
             }
             attach_encoded_probe(&pipeline.by_name("parser").unwrap(), counters.clone());
+            watch(&pipeline);
             let (events_tx, events) = mpsc::channel();
             let (commands, commands_rx) = mpsc::sync_channel(1);
             let (stop, stopped) = watch::channel(false);
@@ -2083,18 +2296,6 @@ mod tests {
         audio_bin(
             name,
             "queue leaky=downstream max-size-time=200000000 max-size-buffers=0 max-size-bytes=0",
-        )
-    }
-
-    // Audio that reaches the pipeline `lag` after it was captured. Unlike
-    // the ring buffer it never drops audio, however long its reader takes.
-    fn lagging_audio(name: &str, lag: Duration) -> gst::Element {
-        audio_bin(
-            name,
-            &format!(
-                "queue max-size-time=0 max-size-buffers=0 max-size-bytes=0 min-threshold-time={}",
-                lag.as_nanos()
-            ),
         )
     }
 
@@ -2462,17 +2663,187 @@ mod tests {
         );
     }
 
-    // Audio captured before a pause but arriving after it is dropped by
-    // design. A source that delivers late makes that drop longer than a
-    // lost-audio hole. The source itself loses no audio, so any audio
-    // reported lost was dropped by pausing. Video frames a starved encoder
-    // drops are real losses, reported as such.
+    // Live audio whose frames hold their own index, in two channels of 15
+    // bits as PipeDevice writes them, and reach the pipeline `lag` after
+    // they were captured.
+    fn indexed_audio(name: &str, lag: Duration) -> gst::Element {
+        let bin = audio_bin(
+            name,
+            &format!(
+                "audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved \
+                 ! queue max-size-time=0 max-size-buffers=0 max-size-bytes=0 min-threshold-time={}",
+                lag.as_nanos()
+            ),
+        )
+        .downcast::<gst::Bin>()
+        .unwrap();
+        let next = AtomicU64::new(0);
+        bin.by_name("producer")
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+                    let mut map = buffer.make_mut().map_writable().unwrap();
+                    let first = next.fetch_add(map.len() as u64 / 8, Ordering::Relaxed);
+                    for (frame, bytes) in map.chunks_exact_mut(8).enumerate() {
+                        let n = first + frame as u64;
+                        let samples = [(n % 32768) as f32, (n / 32768) as f32];
+                        for (sample, value) in bytes.chunks_exact_mut(4).zip(samples) {
+                            sample.copy_from_slice(&(value / 32768.0).to_le_bytes());
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+        bin.upcast()
+    }
+
+    // The index of each frame of F32 stereo audio that holds its own.
+    fn frame_indices(buffer: &gst::BufferRef) -> Vec<u64> {
+        let map = buffer.map_readable().unwrap();
+        let sample =
+            |bytes: &[u8]| (f32::from_le_bytes(bytes.try_into().unwrap()) * 32768.0).round() as u64;
+        map.chunks_exact(8)
+            .map(|frame| sample(&frame[..4]) + sample(&frame[4..]) * 32768)
+            .collect()
+    }
+
+    type Frames = Arc<Mutex<Vec<(gst::ClockTime, Vec<u64>)>>>;
+
+    // Each buffer that passes `pad` from now on: its pts and the index of
+    // each of its frames.
+    fn record_frames(pad: &gst::Pad) -> Frames {
+        let frames = Frames::default();
+        let recorded = frames.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(buffer) = info.buffer() {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((buffer.pts().unwrap(), frame_indices(buffer)));
+            }
+            gst::PadProbeReturn::Ok
+        });
+        frames
+    }
+
+    // When frame `i` of a buffer stamped `pts` was captured.
+    fn capture_time(pts: gst::ClockTime, i: usize) -> gst::ClockTime {
+        pts + gst::ClockTime::from_nseconds(i as u64 * 1_000_000_000 / 48000)
+    }
+
+    // Checks the audio that left a source's pause gate, frame by frame,
+    // against the audio the source captured: no frame captured while paused
+    // left it, every other frame did, and each is where its capture time
+    // goes once the pauses before it are taken out. Returns how many frames
+    // were captured, and how many of those that left it were captured in
+    // the 200 ms before a pause.
+    fn assert_gated(
+        captured: &Frames,
+        passed: &Frames,
+        pauses: &[(gst::ClockTime, gst::ClockTime)],
+    ) -> (usize, usize) {
+        let paused = |time: gst::ClockTime| {
+            pauses
+                .iter()
+                .any(|&(at, until)| (at..until).contains(&time))
+        };
+        let offset = |time: gst::ClockTime| -> gst::ClockTime {
+            pauses
+                .iter()
+                .filter(|&&(_, until)| until <= time)
+                .map(|&(at, until)| until - at)
+                .sum()
+        };
+        let captured = captured.lock().unwrap();
+        let passed = passed.lock().unwrap();
+        let mut when = std::collections::HashMap::new();
+        for (pts, frames) in captured.iter() {
+            for (i, &n) in frames.iter().enumerate() {
+                assert!(
+                    when.insert(n, capture_time(*pts, i)).is_none(),
+                    "frame {n} captured twice"
+                );
+            }
+        }
+        let mut kept = std::collections::HashSet::new();
+        let mut leaked = Vec::new();
+        let mut misplaced = Vec::new();
+        for (pts, frames) in passed.iter() {
+            for (i, &n) in frames.iter().enumerate() {
+                let captured = *when
+                    .get(&n)
+                    .unwrap_or_else(|| panic!("frame {n} was never captured"));
+                assert!(kept.insert(n), "frame {n} left the gate twice");
+                if paused(captured) {
+                    leaked.push((n, seconds(captured)));
+                }
+                let placed = capture_time(*pts, i);
+                let due = captured - offset(captured);
+                if placed.max(due) - placed.min(due) > gst::ClockTime::from_useconds(100) {
+                    misplaced.push((n, seconds(placed), seconds(due)));
+                }
+            }
+        }
+        let dropped: Vec<_> = when
+            .iter()
+            .filter(|(n, &time)| !paused(time) && !kept.contains(n))
+            .map(|(&n, &time)| (n, seconds(time)))
+            .collect();
+        let late = passed
+            .iter()
+            .flat_map(|(_, frames)| frames)
+            .filter(|n| {
+                let time = when[n];
+                pauses
+                    .iter()
+                    .any(|&(at, _)| time < at && time + gst::ClockTime::from_mseconds(200) >= at)
+            })
+            .count();
+        let first =
+            |frames: &[(u64, f64)]| frames.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1));
+        assert!(
+            leaked.is_empty(),
+            "{} frames captured while paused are in the movie, the first {:?}; pauses {pauses:?}",
+            leaked.len(),
+            first(&leaked)
+        );
+        assert!(
+            dropped.is_empty(),
+            "{} frames captured while recording are not in the movie, the first {:?}; pauses {pauses:?}",
+            dropped.len(),
+            first(&dropped)
+        );
+        assert!(
+            misplaced.is_empty(),
+            "{} frames are not where their capture time goes, the first {:?}",
+            misplaced.len(),
+            misplaced.first()
+        );
+        (when.len(), late)
+    }
+
+    // Audio that arrives 100 ms after it was captured keeps what it captured
+    // before each pause, though that arrives while paused, and none of what
+    // it captured while paused, though that arrives once recording resumed.
+    // The source loses nothing, so nothing is reported lost. Video frames a
+    // starved encoder drops are real losses, reported as such.
     #[test]
-    fn audio_dropped_by_pausing_is_not_reported_lost() {
-        let mut recording = TestRecording::start_with_audio(vec![(
-            "microphone",
-            lagging_audio("microphone", Duration::from_millis(100)),
-        )]);
+    fn late_audio_keeps_what_it_captured_before_a_pause_and_nothing_from_it() {
+        let source = indexed_audio("microphone", Duration::from_millis(100));
+        let captured = record_frames(&source.static_pad("src").unwrap());
+        let mut passed = None;
+        let mut recording = TestRecording::start_watched(
+            MOVING_VIDEO,
+            vec![("microphone", source.clone())],
+            false,
+            |_| {
+                passed = Some(record_frames(
+                    &source.static_pad("src").unwrap().peer().unwrap(),
+                ))
+            },
+        );
         for _ in 0..3 {
             std::thread::sleep(Duration::from_millis(700));
             recording.control(true);
@@ -2481,6 +2852,11 @@ mod tests {
         }
         std::thread::sleep(Duration::from_millis(1200));
         recording.finish().unwrap();
+        let pauses = recording.counters.timeline.lock().unwrap().pauses.clone();
+        assert_eq!(pauses.len(), 3);
+        let (frames, late) = assert_gated(&captured, &passed.unwrap(), &pauses);
+        println!("{frames} frames captured, {late} of them in the 200 ms before a pause");
+        assert!(late > 3 * 9000, "{late} frames before the pauses");
         recording.probe();
         for event in recording.events.try_iter() {
             match event {
@@ -2671,6 +3047,9 @@ mod tests {
     // stopped reading, is lost, and stopping returns when each was.
     struct PipeDevice {
         stop: Arc<std::sync::atomic::AtomicBool>,
+        // While set, the device writes nothing, like one that went quiet
+        // without its server noticing, and keeps its schedule.
+        quiet: Arc<std::sync::atomic::AtomicBool>,
         writer: std::thread::JoinHandle<Vec<Instant>>,
         // When it wrote its first block, and how long each block is.
         start: Instant,
@@ -2707,6 +3086,8 @@ mod tests {
             unsafe { libc::fcntl(fifo.as_raw_fd(), libc::F_SETPIPE_SZ, 65536) };
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stopping = stop.clone();
+            let quiet = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let silent = quiet.clone();
             let block = Duration::from_nanos((10_000_000_000_000 / (1_000_000 + ppm)) as u64);
             let start = Instant::now();
             let behind = Arc::new(Mutex::new(Vec::new()));
@@ -2729,7 +3110,9 @@ mod tests {
                                 .flat_map(i16::to_le_bytes)
                         })
                         .collect();
-                    if fifo.write(&bytes).ok() != Some(bytes.len()) {
+                    if !silent.load(Ordering::Relaxed)
+                        && fifo.write(&bytes).ok() != Some(bytes.len())
+                    {
                         lost.push(Instant::now());
                     }
                     std::thread::sleep(
@@ -2740,6 +3123,7 @@ mod tests {
             });
             Self {
                 stop,
+                quiet,
                 writer,
                 start,
                 block,
@@ -3325,6 +3709,163 @@ mod tests {
         assert!(recorded.after_video.abs() < 0.05, "{recorded:?}");
     }
 
+    // Records the pipe device as system audio while `during` runs, and
+    // checks the audio that left the pause gate frame by frame against
+    // what the source captured. Returns the recorded time, from where the
+    // device wrote the first frame in the movie to the stop, that the
+    // movie has no audio for, by the device's own frame count, and the
+    // seconds reported missing.
+    fn record_device_frames(during: impl FnOnce(&TestRecording, &PipeDevice)) -> (f64, f64) {
+        let server = PulseServer::start_with(PipeDevice::CONFIG, true);
+        let device = PipeDevice::start(&server);
+        let source = server.source_from("wrec_pipe", &server.directory.join("native"));
+        let placed = device.placement(&source);
+        let captured = record_frames(&source.static_pad("src").unwrap());
+        let mut passed = None;
+        let mut recording = TestRecording::start_watched(
+            MOVING_VIDEO,
+            vec![("system audio", source.clone())],
+            false,
+            |_| {
+                passed = Some(record_frames(
+                    &source.static_pad("src").unwrap().peer().unwrap(),
+                ))
+            },
+        );
+        let began = Instant::now();
+        // In running time, which began after the device did.
+        let device_start = recording
+            .pipeline
+            .current_running_time()
+            .unwrap()
+            .nseconds() as i64
+            - began.duration_since(device.start).as_nanos() as i64;
+        during(&recording, &device);
+        recording.finish().unwrap();
+        recording.probe();
+        device.assert_placed(&placed, began);
+        let lost = device.stop().into_iter().filter(|&at| at >= began).count();
+        assert_eq!(lost, 0, "the device lost audio during the recording");
+        let (pauses, stopped) = {
+            let timeline = recording.counters.timeline.lock().unwrap();
+            (timeline.pauses.clone(), timeline.stopped_at.unwrap())
+        };
+        let passed = passed.unwrap();
+        assert_gated(&captured, &passed, &pauses);
+        let captured_at: std::collections::HashMap<u64, gst::ClockTime> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(pts, frames)| {
+                frames
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &n)| (n, capture_time(*pts, i)))
+            })
+            .collect();
+        let movie: Vec<u64> = passed
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, frames)| frames.iter().copied())
+            .filter(|n| captured_at[n] < stopped)
+            .collect();
+        let first = *movie.iter().min().unwrap();
+        let written = gst::ClockTime::from_nseconds(
+            (device_start + (first * 1_000_000_000 / 48000) as i64) as u64,
+        );
+        let paused: gst::ClockTime = pauses
+            .iter()
+            .map(|&(at, until)| stopped.min(until).saturating_sub(written.max(at)))
+            .sum();
+        let recorded = seconds(stopped - written) - seconds(paused);
+        let missing = recorded - movie.len() as f64 / 48000.0;
+        let reported = recording
+            .events
+            .try_iter()
+            .find_map(|event| match event {
+                RecorderEvent::MediaLost { message, .. } => Some(message),
+                _ => None,
+            })
+            .and_then(|message| {
+                message
+                    .split_once("system audio is missing ")
+                    .and_then(|(_, rest)| rest.split_once(" s")?.0.parse().ok())
+            })
+            .unwrap_or(0.0);
+        println!(
+            "recorded {recorded:.3} s, the movie has {:.3} s of audio, {missing:.3} s missing, {reported:.2} s reported; pauses {pauses:?}, stopped {stopped}",
+            movie.len() as f64 / 48000.0
+        );
+        (missing, reported)
+    }
+
+    // Video stops reaching the movie for 6 s, like a screen whose keepalive
+    // stopped, so mp4mux holds the audio until its queue fills, then the
+    // source fills and waits while its server holds more. Paused meanwhile
+    // and stopped before video returns, the movie keeps every frame captured
+    // outside the pause, though it left the source while paused or after the
+    // stop, and none from inside it. What never left the source or its
+    // server is reported missing.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_waiting_for_stalled_video_keeps_its_audio_and_reports_the_rest() {
+        let (missing, reported) = record_device_frames(|recording, _| {
+            let start = Instant::now();
+            let stalled = Duration::from_secs(1)..Duration::from_secs(7);
+            recording
+                .pipeline
+                .by_name("video")
+                .unwrap()
+                .static_pad("src")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                    if stalled.contains(&start.elapsed()) {
+                        gst::PadProbeReturn::Drop
+                    } else {
+                        gst::PadProbeReturn::Ok
+                    }
+                });
+            let until = |at: f64| {
+                std::thread::sleep(
+                    (start + Duration::from_secs_f64(at)).saturating_duration_since(Instant::now()),
+                )
+            };
+            until(5.3);
+            recording.control(true);
+            until(5.8);
+            recording.control(false);
+            until(6.8);
+        });
+        assert!(missing > 0.3, "{missing} s missing");
+        assert!(
+            (reported - missing).abs() < 0.05,
+            "reported {reported} s, the movie misses {missing} s"
+        );
+    }
+
+    // A device that goes quiet 2 s before the stop, with a pause of 0.5 s
+    // meanwhile, leaves its track 1.5 s short. No later audio shows the gap,
+    // and it is reported.
+    #[test]
+    #[ignore = "needs pulseaudio"]
+    fn audio_a_pulse_server_device_quiet_until_stop_reports_the_missing_end() {
+        let (missing, reported) = record_device_frames(|recording, device| {
+            std::thread::sleep(Duration::from_secs(3));
+            device.quiet.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(500));
+            recording.control(true);
+            std::thread::sleep(Duration::from_millis(500));
+            recording.control(false);
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        assert!((1.4..1.6).contains(&missing), "{missing} s missing");
+        assert!(
+            (reported - missing).abs() < 0.05,
+            "reported {reported} s, the movie misses {missing} s"
+        );
+    }
+
     // A device whose clock is 800 parts per million fast or slow loses
     // nothing. Nothing is reported, and every buffer is placed when the
     // device wrote it, so the audio ends with the video.
@@ -3587,7 +4128,29 @@ mod tests {
             }
         }
         assert!(ending);
-        assert!(lost.is_some_and(|message| message.contains("the video ends early")),);
+        let lost = lost.unwrap();
+        assert!(lost.contains("the video ends early"), "{lost}");
+        // The audio after that never left its blocked sources, and no later
+        // audio shows the gap: it is reported missing up to the stop.
+        let stopped = seconds(
+            recording
+                .counters
+                .timeline
+                .lock()
+                .unwrap()
+                .stopped_at
+                .unwrap(),
+        );
+        for track in ["system audio", "microphone"] {
+            let reported: f64 = lost
+                .split_once(&format!("{track} is missing "))
+                .and_then(|(_, rest)| rest.split_once(" s")?.0.parse().ok())
+                .unwrap_or(0.0);
+            assert!(
+                (reported - (stopped - audio)).abs() < 0.1,
+                "{track}: reported {reported} s, audio ends {audio} s, stopped {stopped} s: {lost}"
+            );
+        }
     }
 
     // Video waiting for the disk is not stuck, so it is never cut.
@@ -3697,7 +4260,7 @@ mod tests {
         pipeline.0.add_many([&source, &sink]).unwrap();
         source.link(&sink).unwrap();
         let lost = Arc::new(AtomicU64::new(0));
-        count_lost_audio(&source, lost.clone(), counters);
+        count_lost_audio(&source, lost.clone(), Default::default(), counters);
         pipeline.0.set_state(gst::State::Playing).unwrap();
         for &(start, end) in buffers {
             let mut buffer = gst::Buffer::new();
@@ -3735,6 +4298,164 @@ mod tests {
         // Shorter than a hole.
         let lost = lost_between(&[(1.0, 1.01), (1.02, 1.03)], &[], None);
         assert!(near(lost, 0.0), "{lost}");
+    }
+
+    // 10 ms of F32 stereo at 48 kHz stamped `pts`, each frame holding its
+    // index from `first`.
+    fn indexed_buffer(pts: gst::ClockTime, first: u64) -> gst::Buffer {
+        let bytes: Vec<u8> = (first..first + 480)
+            .flat_map(|n| [(n % 32768) as f32, (n / 32768) as f32])
+            .flat_map(|sample| (sample / 32768.0).to_le_bytes())
+            .collect();
+        let mut buffer = gst::Buffer::from_mut_slice(bytes);
+        let buffer_mut = buffer.get_mut().unwrap();
+        buffer_mut.set_pts(pts);
+        buffer_mut.set_duration(gst::ClockTime::from_mseconds(10));
+        buffer
+    }
+
+    // What the gate keeps of a buffer of frames 0 to 479 stamped 1 s, given
+    // pauses as (start, end) in nanoseconds after 1 s and one going on:
+    // its pts after the gate and the frames in it.
+    fn gate_audio(
+        pauses: &[(u64, u64)],
+        paused_at: Option<u64>,
+    ) -> Option<(gst::ClockTime, gst::ClockTime, Vec<u64>)> {
+        gst::init().unwrap();
+        let at = |ns: u64| gst::ClockTime::SECOND + gst::ClockTime::from_nseconds(ns);
+        let mut timeline = Timeline::default();
+        // One pause before the buffer, so it already has an offset.
+        timeline.pause(gst::ClockTime::from_mseconds(100));
+        timeline.resume(gst::ClockTime::from_mseconds(300));
+        for &(start, end) in pauses {
+            timeline.pause(at(start));
+            timeline.resume(at(end));
+        }
+        if let Some(start) = paused_at {
+            timeline.pause(at(start));
+        }
+        let mut buffer = indexed_buffer(gst::ClockTime::SECOND, 0);
+        timeline.retime_audio(&mut buffer, 48000, 8).then(|| {
+            (
+                buffer.pts().unwrap(),
+                buffer.duration().unwrap(),
+                frame_indices(&buffer),
+            )
+        })
+    }
+
+    // Frame n of a buffer stamped 1 s was captured n / 48000 s after it,
+    // and goes 200 ms earlier for the pause before it, and earlier again for
+    // a pause inside the buffer before it. A frame is captured while paused
+    // if it was captured at or after a pause started and before it ended,
+    // so cuts fall between frames, wherever in a frame a pause starts or
+    // ends, and nothing captured while paused is kept.
+    #[test]
+    fn the_pause_gate_cuts_audio_between_frames_at_every_pause_inside_a_buffer() {
+        let frame = |n: u64| n * 1_000_000_000 / 48000;
+        let ms = |ms: u64| gst::ClockTime::from_mseconds(ms);
+        let us = gst::ClockTime::from_nseconds;
+        let frames = |range: std::ops::Range<u64>| range.collect::<Vec<_>>();
+        // No pause inside: the buffer whole, 200 ms earlier.
+        assert_eq!(
+            gate_audio(&[], None),
+            Some((ms(800), ms(10), frames(0..480)))
+        );
+        // A pause from 100.5 frames to 300 frames in: frames 0 to 100 were
+        // captured before it, 101 to 299 during it.
+        let (pts, duration, kept) = gate_audio(&[(frame(100) + 10_417, frame(300))], None).unwrap();
+        assert_eq!(kept, [frames(0..101), frames(300..480)].concat());
+        assert_eq!((pts, duration), (ms(800), us(frame(281))));
+        // Pauses from frame 50 to 60.25 and from 400 to past the buffer.
+        let (pts, duration, kept) = gate_audio(
+            &[(frame(50), frame(60) + 5_208), (frame(400), 20_000_000)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(kept, [frames(0..50), frames(61..400)].concat());
+        assert_eq!((pts, duration), (ms(800), us(frame(389))));
+        // From before the buffer to frame 200.75: the rest goes where the
+        // pause ended, less both pauses.
+        let (pts, duration, kept) = gate_audio(&[(0, frame(200) + 15_625)], None).unwrap();
+        assert_eq!(kept, frames(201..480));
+        assert_eq!(pts, ms(800) + us(frame(201)) - us(frame(200) + 15_625));
+        assert_eq!(duration, us(frame(279)));
+        // A pause going on from frame 333.5: frames up to 333 stay.
+        let (pts, duration, kept) = gate_audio(&[], Some(frame(333) + 10_417)).unwrap();
+        assert_eq!(kept, frames(0..334));
+        assert_eq!((pts, duration), (ms(800), us(frame(334))));
+        // The whole buffer paused, closed or going on.
+        assert_eq!(gate_audio(&[(0, 10_000_000)], None), None);
+        assert_eq!(gate_audio(&[], Some(0)), None);
+    }
+
+    // A buffer the gate cuts keeps references to its audio, and one it
+    // keeps whole is the same buffer, so nothing is copied.
+    #[test]
+    fn the_pause_gate_copies_no_audio() {
+        gst::init().unwrap();
+        let mut timeline = Timeline::default();
+        timeline.pause(gst::ClockTime::from_mseconds(1002));
+        timeline.resume(gst::ClockTime::from_mseconds(1005));
+        let address = |buffer: &gst::Buffer| buffer.peek_memory(0).map_readable().unwrap().as_ptr();
+        let mut whole = indexed_buffer(gst::ClockTime::from_mseconds(990), 0);
+        let original = address(&whole);
+        assert!(timeline.retime_audio(&mut whole, 48000, 8));
+        assert_eq!(address(&whole), original);
+        let mut cut = indexed_buffer(gst::ClockTime::SECOND, 0);
+        let original = address(&cut);
+        assert!(timeline.retime_audio(&mut cut, 48000, 8));
+        assert_eq!(cut.n_memory(), 2);
+        assert_eq!(address(&cut), original);
+        assert_eq!(
+            cut.peek_memory(1).map_readable().unwrap().as_ptr(),
+            original.wrapping_add(240 * 8)
+        );
+    }
+
+    // A video frame goes by when it was captured, however late it arrives:
+    // one captured before a pause stays where it was, one captured while
+    // paused goes, and one captured after a pause goes earlier by that
+    // pause and every one before it. The gate changes its header, not its
+    // memory.
+    #[test]
+    fn the_pause_gate_takes_video_frames_by_capture_time() {
+        gst::init().unwrap();
+        let s = |s: f64| gst::ClockTime::from_nseconds((s * 1e9) as u64);
+        let mut timeline = Timeline::default();
+        timeline.pause(s(1.0));
+        timeline.resume(s(2.0));
+        timeline.pause(s(3.0));
+        timeline.resume(s(3.5));
+        timeline.pause(s(5.0));
+        let frame = gst::Buffer::from_mut_slice(vec![0u8; 64]);
+        let place = |pts: f64| {
+            // Shared, like a frame pipewiresrc keeps for its keepalive.
+            let mut buffer = frame.clone();
+            buffer.make_mut().set_pts(s(pts));
+            buffer.make_mut().set_dts(s(pts));
+            let pointer = buffer.peek_memory(0).map_readable().unwrap().as_ptr();
+            timeline.retime(&mut buffer).then(|| {
+                assert_eq!(
+                    buffer.peek_memory(0).map_readable().unwrap().as_ptr(),
+                    pointer
+                );
+                assert_eq!(buffer.pts(), buffer.dts());
+                seconds(buffer.pts().unwrap())
+            })
+        };
+        let near = |placed: Option<f64>, expected: f64| {
+            placed.is_some_and(|placed| (placed - expected).abs() < 1e-6)
+        };
+        assert!(near(place(0.9), 0.9));
+        assert_eq!(place(1.0), None);
+        assert_eq!(place(1.9), None);
+        assert!(near(place(2.0), 1.0));
+        assert!(near(place(2.9), 1.9));
+        assert_eq!(place(3.2), None);
+        assert!(near(place(4.9), 3.4));
+        assert_eq!(place(5.0), None);
+        assert_eq!(place(7.0), None);
     }
 
     // The queue at the end of an audio source's branch, in front of the
@@ -4251,7 +4972,13 @@ mod tests {
         pipeline.0.add_many([&video, &mux, &sink, &silent]).unwrap();
         mux.link(&sink).unwrap();
         let mut movie = Movie::new(&pipeline.0, &video, &mux, true).unwrap();
-        movie.add_audio("test audio", &silent, &silent, Arc::default());
+        movie.add_audio(
+            "test audio",
+            &silent,
+            &silent,
+            Arc::default(),
+            Arc::default(),
+        );
         let held = pipeline.0.by_name(HELD_QUEUE).unwrap();
         pipeline.0.set_state(gst::State::Playing).unwrap();
         // Large constant-QP frames 10 ms apart reach the byte limit long
