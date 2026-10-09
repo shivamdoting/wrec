@@ -366,6 +366,8 @@ struct Reader {
     source: glib::WeakRef<gst::Element>,
     // Until the stream is ready or failed, where Capture::connect waits.
     connected: Option<Connected>,
+    // Since Capture::start uncorked the stream, as the pipeline played.
+    started: bool,
     closed: bool,
     // Bytes of the stream so far, received or skipped, so the server's
     // index of the next byte.
@@ -506,6 +508,7 @@ impl Reader {
             buffer,
             source: source.downgrade(),
             connected: None,
+            started: false,
             closed: false,
             position: 0,
             stamps: Stamps::default(),
@@ -605,6 +608,7 @@ impl Reader {
         if self.closed || self.stream.is_null() {
             return;
         }
+        self.started = true;
         let operation = (self.library.stream_cork)(self.stream, 0, None, std::ptr::null_mut());
         if !operation.is_null() {
             (self.library.operation_unref)(operation);
@@ -727,7 +731,14 @@ impl Reader {
             }
             let start = self.position;
             self.position += length as i64;
-            // Without running time the source stopped playing.
+            // pipewire-pulse can send audio to a stream that starts corked,
+            // before the pipeline plays. It was captured before the recording
+            // began.
+            if !self.started {
+                (self.library.stream_drop)(self.stream);
+                continue;
+            }
+            // Once started, without running time the source is gone.
             let Some((_, now)) = self.now() else {
                 (self.library.stream_drop)(self.stream);
                 self.close();
@@ -1233,6 +1244,7 @@ mod tests {
         info: Option<Box<TimingInfo>>,
         // Questions the reader asked that the server hasn't answered.
         questions: usize,
+        disconnected: bool,
     }
 
     thread_local! {
@@ -1283,6 +1295,40 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn cork(
+        _: *mut Stream,
+        _: c_int,
+        _: Option<SuccessCallback>,
+        _: *mut c_void,
+    ) -> *mut Operation {
+        std::ptr::null_mut()
+    }
+
+    unsafe extern "C" fn timer(
+        _: *mut Context,
+        _: u64,
+        _: Option<TimeCallback>,
+        _: *mut c_void,
+    ) -> *mut TimeEvent {
+        std::ptr::null_mut()
+    }
+
+    unsafe extern "C" fn set_callback(_: *mut Stream, _: Option<StreamCallback>, _: *mut c_void) {}
+
+    unsafe extern "C" fn set_read_callback(
+        _: *mut Stream,
+        _: Option<ReadCallback>,
+        _: *mut c_void,
+    ) {
+    }
+
+    unsafe extern "C" fn disconnect(_: *mut Stream) -> c_int {
+        SOCKET.with_borrow_mut(|socket| socket.disconnected = true);
+        0
+    }
+
+    unsafe extern "C" fn stream_unref(_: *mut Stream) {}
+
     // Frames that hold their index, in two channels of 15 bits.
     fn pcm(frames: std::ops::Range<u64>) -> Vec<u8> {
         frames
@@ -1313,7 +1359,16 @@ mod tests {
     }
 
     impl Wire {
+        // Playing, with a reader appsrc started.
         fn new() -> Self {
+            let mut wire = Self::unplayed();
+            wire.pipeline.set_state(gst::State::Playing).unwrap();
+            wire.reader.started = true;
+            wire
+        }
+
+        // Before the pipeline plays, with no clock yet.
+        fn unplayed() -> Self {
             gst::init().unwrap();
             SOCKET.set(Socket::default());
             let library = Box::leak(Box::new(Library {
@@ -1324,6 +1379,12 @@ mod tests {
                 operation_unref: unref,
                 context_rttime_restart: restart,
                 rtclock_now,
+                stream_cork: cork,
+                context_rttime_new: timer,
+                stream_set_state_callback: set_callback,
+                stream_set_read_callback: set_read_callback,
+                stream_disconnect: disconnect,
+                stream_unref,
                 ..Library::none()
             }));
             let source = gst::ElementFactory::make("appsrc")
@@ -1358,7 +1419,6 @@ mod tests {
                 sink,
             };
             wire.at(0);
-            wire.pipeline.set_state(gst::State::Playing).unwrap();
             wire
         }
 
@@ -1420,6 +1480,23 @@ mod tests {
         fn tick(&mut self, ms: i64) {
             self.at(ms);
             unsafe { self.reader.ask_again() };
+        }
+
+        // Audio through libpulse's read callback, at whatever running time
+        // there is.
+        fn arrive(&mut self, frames: std::ops::Range<u64>) {
+            let bytes = pcm(frames);
+            let length = bytes.len();
+            SOCKET.with_borrow_mut(|socket| socket.audio.push_back(bytes));
+            let reader = (&mut *self.reader as *mut Reader).cast();
+            unsafe { stream_read(self.reader.stream, length, reader) };
+        }
+
+        // The pipeline plays, and appsrc's first need-data starts the
+        // reader, as Capture::start does.
+        fn play(&mut self) {
+            self.pipeline.set_state(gst::State::Playing).unwrap();
+            unsafe { self.reader.start() };
         }
 
         // Fragments sent as captured, each answering the questions on the
@@ -1711,5 +1788,69 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // A reader libpulse connected, with a stream that starts corked.
+    fn connected() -> Wire {
+        let mut wire = Wire::unplayed();
+        wire.reader.stream = std::ptr::NonNull::dangling().as_ptr();
+        assert!(wire.reader.now().is_none(), "no running time before play");
+        wire
+    }
+
+    // pipewire-pulse can send a fragment to a stream that starts corked,
+    // before the pipeline plays, when there is no running time yet. That
+    // audio was captured before the recording began and goes, and the stream
+    // stays open: the track starts with the audio after it, where it was
+    // captured. A reader that closed the stream on it left the movie without
+    // the track.
+    #[test]
+    fn audio_the_server_sent_before_the_pipeline_played_goes_and_the_track_starts_after_it() {
+        let mut wire = connected();
+        // Frames 0 to 479, captured in the 10 ms before running time 0.
+        wire.arrive(0..480);
+        assert!(SOCKET.with_borrow(|socket| socket.audio.is_empty()));
+        wire.play();
+        for n in 1..300 {
+            let ms = n as i64 * 10;
+            if ms % 100 == 0 {
+                wire.tick(ms);
+            }
+            wire.audio(ms, n * 480..(n + 1) * 480);
+            wire.answer(ms, (n + 1) * 480, (n + 1) * 480);
+        }
+        let sent = wire.sent();
+        assert!(!sent.is_empty(), "the track has no audio");
+        assert_eq!(sent[0].first, 480, "{:?}", sent[0]);
+        // Frame 480 was captured at running time 0.
+        let from_480: Vec<_> = sent
+            .iter()
+            .map(|buffer| Sent {
+                first: buffer.first - 480,
+                last: buffer.last - 480,
+                ..*buffer
+            })
+            .collect();
+        assert_eq!(assert_placed(&from_480), []);
+        assert_eq!(sent.last().unwrap().last, 300 * 480 - 1);
+    }
+
+    // Once the reader started, audio without running time means the source
+    // is gone, as when the pipeline let go of it: the reader takes the audio
+    // and closes the stream at once.
+    #[test]
+    fn audio_after_the_source_went_closes_the_stream() {
+        let mut wire = connected();
+        wire.play();
+        wire.audio(10, 0..480);
+        wire.answer(10, 480, 480);
+        wire.pipeline.set_state(gst::State::Null).unwrap();
+        let source = wire.reader.source.upgrade().unwrap();
+        wire.pipeline.remove(&source).unwrap();
+        drop(source);
+        assert!(wire.reader.now().is_none());
+        wire.arrive(480..960);
+        assert!(wire.reader.closed);
+        assert!(SOCKET.with_borrow(|socket| socket.disconnected && socket.audio.is_empty()));
     }
 }
