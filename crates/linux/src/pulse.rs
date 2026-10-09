@@ -18,6 +18,9 @@ type ContextCallback = unsafe extern "C" fn(*mut Context, *mut c_void);
 type StreamCallback = unsafe extern "C" fn(*mut Stream, *mut c_void);
 type ReadCallback = unsafe extern "C" fn(*mut Stream, usize, *mut c_void);
 type SuccessCallback = unsafe extern "C" fn(*mut Stream, c_int, *mut c_void);
+type TimeEvent = c_void;
+type TimeCallback =
+    unsafe extern "C" fn(*mut c_void, *mut TimeEvent, *const libc::timeval, *mut c_void);
 
 #[repr(C)]
 struct SampleSpec {
@@ -112,6 +115,9 @@ library! {
     stream_disconnect: fn(*mut Stream) -> c_int;
     stream_unref: fn(*mut Stream);
     operation_unref: fn(*mut Operation);
+    context_rttime_new: fn(*mut Context, u64, Option<TimeCallback>, *mut c_void) -> *mut TimeEvent;
+    context_rttime_restart: fn(*mut Context, *mut TimeEvent, u64);
+    rtclock_now: fn() -> u64;
 }
 
 fn library() -> Result<&'static Library> {
@@ -240,7 +246,7 @@ impl Capture {
             stamps: Stamps::default(),
             held: Vec::new(),
             end: None,
-            last_request: None,
+            timer: std::ptr::null_mut(),
             asking: std::collections::VecDeque::new(),
             last_arrival: None,
             resumed: false,
@@ -358,7 +364,8 @@ struct Reader {
     held: Vec<(i64, gst::Buffer)>,
     // Where the last buffer pushed ended.
     end: Option<i64>,
-    last_request: Option<gst::ClockTime>,
+    // Goes off every TIMING_INTERVAL.
+    timer: *mut TimeEvent,
     // Questions on the way, and wall_clock's distance when each was asked.
     asking: std::collections::VecDeque<i64>,
     last_arrival: Option<gst::ClockTime>,
@@ -407,6 +414,15 @@ unsafe extern "C" fn stream_state(stream: *mut Stream, reader: *mut c_void) {
 
 unsafe extern "C" fn stream_read(_: *mut Stream, _: usize, reader: *mut c_void) {
     (*reader.cast::<Reader>()).read();
+}
+
+unsafe extern "C" fn timer_went_off(
+    _: *mut c_void,
+    _: *mut TimeEvent,
+    _: *const libc::timeval,
+    reader: *mut c_void,
+) {
+    (*reader.cast::<Reader>()).ask_again();
 }
 
 unsafe extern "C" fn timing_updated(_: *mut Stream, success: c_int, reader: *mut c_void) {
@@ -531,6 +547,24 @@ impl Reader {
             (self.library.operation_unref)(operation);
         }
         self.request_timing();
+        self.timer = (self.library.context_rttime_new)(
+            self.context,
+            (self.library.rtclock_now)() + TIMING_INTERVAL.useconds(),
+            Some(timer_went_off),
+            (self as *mut Self).cast(),
+        );
+    }
+
+    unsafe fn ask_again(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.request_timing();
+        (self.library.context_rttime_restart)(
+            self.context,
+            self.timer,
+            (self.library.rtclock_now)() + TIMING_INTERVAL.useconds(),
+        );
     }
 
     fn now(&self) -> Option<(gst::ClockTime, gst::ClockTime)> {
@@ -558,7 +592,6 @@ impl Reader {
         }
         (self.library.operation_unref)(operation);
         self.asking.push_back(asked);
-        self.last_request = self.now().map(|(_, running)| running);
     }
 
     // The server's write index, when it captured the audio there, and its
@@ -641,11 +674,7 @@ impl Reader {
                 .is_some_and(|last| now.saturating_sub(last) > FRAGMENT * 4);
             self.last_arrival = Some(now);
             // While holding, each answer about newer audio counts.
-            if self.holding()
-                || self
-                    .last_request
-                    .map_or(true, |last| now.saturating_sub(last) >= TIMING_INTERVAL)
-            {
+            if self.holding() {
                 self.request_timing();
             }
             if self.holding() {
@@ -692,6 +721,17 @@ impl Reader {
     // before the pipeline played is not part of the recording. False once
     // the source takes no more, after which the stream is closed.
     unsafe fn push(&mut self, mut position: i64, mut buffer: gst::Buffer) -> bool {
+        // Audio from a step on moves, so a buffer one falls inside goes in two.
+        if let Some(from) = self.stamps.step_inside(position, buffer.size() as i64) {
+            let at = (from - position) as usize;
+            let rest = buffer
+                .copy_region(gst::BufferCopyFlags::MEMORY, at..)
+                .unwrap();
+            let first = buffer
+                .copy_region(gst::BufferCopyFlags::MEMORY, ..at)
+                .unwrap();
+            return self.push(position, first) && self.push(from, rest);
+        }
         let mut pts = self.stamps.pts(position).unwrap();
         if pts < 0 {
             let early = ((-pts) as u128 * RATE as u128).div_ceil(1_000_000_000) as usize * FRAME;
@@ -728,7 +768,11 @@ impl Reader {
     }
 }
 
-// How often the server is asked when it captured its audio.
+// How often the server is asked when it captured its audio. By the clock,
+// not as audio arrives, so a question waits at a server that stopped.
+// PulseAudio answers it as it resumes, before it reads more of its device,
+// so the answer says how much the device held then, and audio lost
+// meanwhile comes after that.
 const TIMING_INTERVAL: gst::ClockTime = gst::ClockTime::from_mseconds(100);
 
 // The server's account of when it captured the audio at its write index is
@@ -762,11 +806,22 @@ struct Stamps {
     rising: Option<Vec<(i64, i64)>>,
     // The server's account in recent replies, newest last.
     recent: std::collections::VecDeque<i64>,
-    last_write: i64,
+    last_capturing: i64,
     last_reply: i64,
 }
 
 impl Stamps {
+    // The first step that applies from inside the `length` bytes at
+    // `position`, on a frame.
+    fn step_inside(&self, position: i64, length: i64) -> Option<i64> {
+        self.steps
+            .iter()
+            .map(|&(from, _)| from)
+            .filter(|&from| from > position && from < position + length)
+            .filter(|&from| (from - position) % FRAME as i64 == 0)
+            .min()
+    }
+
     fn pts(&mut self, position: i64) -> Option<i64> {
         let offset = self.offset.as_mut()?;
         self.steps.retain(|&(from, amount)| {
@@ -779,19 +834,23 @@ impl Stamps {
     }
 
     // A reply: the server's write index, how long ago it captured the audio
-    // there, when it answered, and now, in running time. Returns whether it
-    // had newer audio than the last one with any.
+    // there, when it answered, and now, in running time. Returns whether the
+    // server had captured more than by the last one that did.
     fn timing(&mut self, write: i64, latency: i64, answered: i64, now: i64) -> bool {
-        if write <= self.last_write {
-            return false;
-        }
-        self.last_write = write;
-        let account = answered - latency - time_of(write);
         // When it answered, the server had captured audio up to here, past
         // its write index by its latency, so audio it lost since is past
-        // that.
-        let capturing =
-            write + (latency as i128 * RATE as i128 / 1_000_000_000) as i64 * FRAME as i64;
+        // that. The latency comes in whole microseconds, less than half a
+        // frame, so the nearest frame is the one the server counted. An
+        // answer about no more audio than the last says nothing new about
+        // when audio was captured, only that it answered later.
+        let capturing = write
+            + ((latency as i128 * RATE as i128 + 500_000_000) / 1_000_000_000) as i64
+                * FRAME as i64;
+        if capturing <= self.last_capturing {
+            return false;
+        }
+        self.last_capturing = capturing;
+        let account = answered - latency - time_of(write);
         let elapsed = now - std::mem::replace(&mut self.last_reply, now);
         let Some(offset) = self.offset.as_mut() else {
             // The account is a little late, never early, the first one most
@@ -927,12 +986,7 @@ mod tests {
         }
         stamps.timing(bytes(20_000 * MS), 0, 20_000 * MS, 20_000 * MS);
         let resumed = 20_800 * MS;
-        stamps.timing(
-            bytes(20_000 * MS) + FRAME as i64,
-            320 * MS,
-            resumed,
-            resumed,
-        );
+        stamps.timing(bytes(20_000 * MS), 320 * MS, resumed, resumed);
         for t in [20_810, 20_820, 20_830] {
             // What the device held, then audio captured since resuming.
             let write = bytes(20_320 * MS) + bytes((t - 20_800) * MS);
@@ -942,6 +996,48 @@ mod tests {
         let mut offset = |position| stamps.pts(position).unwrap() - time_of(position);
         assert_eq!(offset(held - FRAME as i64), 0);
         assert_eq!(offset(held + FRAME as i64), 480 * MS);
+    }
+
+    // As above, but the device held 15361 frames, which the server says as
+    // 320020 µs, a little short of them. The loss is past every one.
+    #[test]
+    fn a_latency_in_whole_microseconds_counts_every_frame_held() {
+        let mut stamps = Stamps::default();
+        for t in (100 * MS..=20_000 * MS).step_by(100 * MS as usize) {
+            stamps.timing(bytes(t), 0, t, t);
+        }
+        let resumed = 20_800 * MS;
+        let held = bytes(20_000 * MS) + 15361 * FRAME as i64;
+        stamps.timing(bytes(20_000 * MS), 320_020_000, resumed, resumed);
+        for t in [20_810, 20_820, 20_830] {
+            stamps.timing(held + bytes((t - 20_800) * MS), 0, t * MS, t * MS);
+        }
+        let mut offset = |position| stamps.pts(position).unwrap() - time_of(position);
+        assert_eq!(offset(held - FRAME as i64), 0);
+        assert!(offset(held) > 479 * MS, "{}", offset(held));
+    }
+
+    // A step from inside a buffer: Reader::push sends the buffer in two
+    // there, so its audio up to the step keeps its place and from it moves.
+    #[test]
+    fn a_step_inside_a_buffer_is_found_on_its_frame() {
+        let frames = |n: i64| n * FRAME as i64;
+        let mut stamps = Stamps {
+            offset: Some(0),
+            steps: vec![(frames(1000), 480 * MS)],
+            ..Stamps::default()
+        };
+        assert_eq!(stamps.step_inside(frames(520), frames(480)), None);
+        assert_eq!(
+            stamps.step_inside(frames(960), frames(480)),
+            Some(frames(1000))
+        );
+        assert_eq!(stamps.step_inside(frames(1000), frames(480)), None);
+        assert_eq!(stamps.pts(frames(960)), Some(time_of(frames(960))));
+        assert_eq!(
+            stamps.pts(frames(1000)),
+            Some(time_of(frames(1000)) + 480 * MS)
+        );
     }
 
     // The first answers are the latest ones, and audio starts at the least of

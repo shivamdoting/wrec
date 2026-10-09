@@ -2675,6 +2675,9 @@ mod tests {
         // When it wrote its first block, and how long each block is.
         start: Instant,
         block: Duration,
+        // For each block it wrote more than a millisecond after it was due,
+        // when it was due and how late it was.
+        behind: Arc<Mutex<Vec<(Instant, Duration)>>>,
     }
 
     impl PipeDevice {
@@ -2706,11 +2709,18 @@ mod tests {
             let stopping = stop.clone();
             let block = Duration::from_nanos((10_000_000_000_000 / (1_000_000 + ppm)) as u64);
             let start = Instant::now();
+            let behind = Arc::new(Mutex::new(Vec::new()));
+            let falling_behind = behind.clone();
             let writer = std::thread::spawn(move || {
                 let mut lost = Vec::new();
                 for n in 0u32.. {
                     if stopping.load(Ordering::Relaxed) {
                         break;
+                    }
+                    let due = start + block * n;
+                    let late = Instant::now().saturating_duration_since(due);
+                    if late > Duration::from_millis(1) {
+                        falling_behind.lock().unwrap().push((due, late));
                     }
                     let bytes: Vec<u8> = (n * 480..n * 480 + 480)
                         .flat_map(|frame| {
@@ -2733,12 +2743,15 @@ mod tests {
                 writer,
                 start,
                 block,
+                behind,
             }
         }
 
-        // Records, for each buffer `source` sends, its pts and how far that is
-        // from when the device wrote its first frame, both in seconds, and
-        // when that was.
+        // Records, for each buffer `source` sends, its pts, how far its first
+        // or its last frame is from when the device was due to write it,
+        // whichever is further, both in seconds, and when the first was due.
+        // A frame's index says which block it was in, and so when that block
+        // was due. A buffer can start before a loss and end after it.
         fn placement(&self, source: &gst::Element) -> Arc<Mutex<Vec<(f64, f64, Instant)>>> {
             let placed = Arc::new(Mutex::new(Vec::new()));
             let (start, block, placing) = (self.start, self.block, placed.clone());
@@ -2760,13 +2773,26 @@ mod tests {
                         (f32::from_le_bytes(map[i * 4..i * 4 + 4].try_into().unwrap()) * 32768.0)
                             .round() as u64
                     };
-                    let frame = sample(0) + sample(1) * 32768;
-                    let written = start + block * (frame / 480) as u32;
-                    let expected = now.nseconds() as f64 / 1e9
-                        - at.saturating_duration_since(written).as_secs_f64()
-                        + written.saturating_duration_since(at).as_secs_f64();
+                    let frame = |i: usize| sample(2 * i) + sample(2 * i + 1) * 32768;
+                    let due = |frame: u64| start + block * (frame / 480) as u32;
+                    // How far `pts` is from when the device was due to
+                    // write `frame`, in running time.
+                    let off = |frame: u64, pts: f64| {
+                        let written = due(frame);
+                        pts - (now.nseconds() as f64 / 1e9
+                            - at.saturating_duration_since(written).as_secs_f64()
+                            + written.saturating_duration_since(at).as_secs_f64())
+                    };
+                    let frames = map.len() / 8;
                     let pts = buffer.pts().unwrap().nseconds() as f64 / 1e9;
-                    placing.lock().unwrap().push((pts, pts - expected, written));
+                    let first = off(frame(0), pts);
+                    let last = off(frame(frames - 1), pts + (frames - 1) as f64 / 48000.0);
+                    let worst = if last.abs() > first.abs() {
+                        last
+                    } else {
+                        first
+                    };
+                    placing.lock().unwrap().push((pts, worst, due(frame(0))));
                     gst::PadProbeReturn::Ok
                 },
             );
@@ -2930,7 +2956,7 @@ mod tests {
             // Before the recording, while the stream connected over the slow
             // link and nothing read the pipe, it may have lost audio.
             if let Some(device) = device {
-                assert_placed(&placed.lock().unwrap(), recorded.began);
+                device.assert_placed(&placed, recorded.began);
                 let lost = device.stop().into_iter().filter(|&at| at >= began.unwrap());
                 assert_eq!(
                     lost.count(),
@@ -2951,12 +2977,46 @@ mod tests {
         }
     }
 
-    // Every buffer of audio written since the recording began, before and
-    // after any loss, starts within 20 ms of when the device wrote its first
-    // frame. The device writes 10 ms at a time, so a frame can wait up to
-    // that long to be written. Its pipe keeps audio from before the stream
-    // started, and a loss before the server's first account of its audio
-    // is one the server never saw.
+    impl PipeDevice {
+        // Every buffer of audio written since the recording began, before and
+        // after any loss, starts within 20 ms of when the device was due to
+        // write its first frame: `placement` measures from the block's
+        // schedule, start plus its index times the block, not from when the
+        // write happened. The device writes 10 ms at a time, so a frame can
+        // wait up to that long to be written. Its pipe keeps audio from
+        // before the stream started, and a loss before the server's first
+        // account of its audio is one the server never saw. The schedule
+        // stands for when audio was captured only while the device keeps
+        // to it. If this machine didn't run the device's thread and it wrote
+        // a block AUDIO_HOLE or more after it was due, the server got that
+        // audio late, as if lost, then all at once, and placement against
+        // the schedule says nothing about wrec, so the test fails on that
+        // instead.
+        fn assert_placed(&self, placed: &Mutex<Vec<(f64, f64, Instant)>>, since: Instant) {
+            let placed = placed.lock().unwrap();
+            let until = placed.iter().map(|entry| entry.2).max().unwrap_or(since);
+            // Let go of the lock before failing, or the device panics on it.
+            let worst = self
+                .behind
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.0 >= since && entry.0 <= until)
+                .max_by_key(|entry| entry.1)
+                .copied();
+            if let Some((at, late)) = worst {
+                assert!(
+                    late.as_nanos() < AUDIO_HOLE.nseconds() as u128,
+                    "the test device wrote audio {:.3} s late {:.2} s into the recording, \
+                     so this machine starved it and placement can't be judged",
+                    late.as_secs_f64(),
+                    at.duration_since(since).as_secs_f64()
+                );
+            }
+            assert_placed(&placed, since);
+        }
+    }
+
     fn assert_placed(placed: &[(f64, f64, Instant)], since: Instant) {
         let placed: Vec<_> = placed.iter().filter(|entry| entry.2 >= since).collect();
         let worst = placed
@@ -2991,7 +3051,7 @@ mod tests {
             stopped = Some(Instant::now());
             meanwhile();
         });
-        assert_placed(&placed.lock().unwrap(), recorded.began);
+        device.assert_placed(&placed, recorded.began);
         let stopped = stopped.unwrap();
         // Before the recording began, while nothing read its pipe, the
         // device can lose audio the recording never had.
@@ -3195,7 +3255,7 @@ mod tests {
                 link.set_delay(Duration::ZERO);
                 std::thread::sleep(Duration::from_secs(3));
             });
-            assert_placed(&placed.lock().unwrap(), recorded.began);
+            device.assert_placed(&placed, recorded.began);
             let lost = device.stop().into_iter().filter(|&at| at >= began.unwrap());
             assert_eq!(
                 lost.count(),
@@ -3264,7 +3324,7 @@ mod tests {
             let source = server.source_from("wrec_pipe", &server.directory.join("native"));
             let placed = device.placement(&source);
             let recorded = record_system_audio(source, || {});
-            assert_placed(&placed.lock().unwrap(), recorded.began);
+            device.assert_placed(&placed, recorded.began);
             assert!(device.stop().is_empty(), "the device lost audio");
             assert!(recorded.whole(), "{ppm} ppm: {recorded:?}");
         }
@@ -3368,11 +3428,9 @@ mod tests {
             device = Some(started);
             std::thread::sleep(Duration::from_secs(4));
         });
-        assert_placed(
-            &placed.lock().unwrap().take().unwrap().lock().unwrap(),
-            recorded.began,
-        );
-        assert!(device.unwrap().stop().is_empty(), "the device lost audio");
+        let device = device.unwrap();
+        device.assert_placed(&placed.lock().unwrap().take().unwrap(), recorded.began);
+        assert!(device.stop().is_empty(), "the device lost audio");
         assert!(recorded.whole(), "{recorded:?}");
     }
 
