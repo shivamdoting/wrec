@@ -18,6 +18,16 @@ type ContextCallback = unsafe extern "C" fn(*mut Context, *mut c_void);
 type StreamCallback = unsafe extern "C" fn(*mut Stream, *mut c_void);
 type ReadCallback = unsafe extern "C" fn(*mut Stream, usize, *mut c_void);
 type SuccessCallback = unsafe extern "C" fn(*mut Stream, c_int, *mut c_void);
+type ServerInfoCallback = unsafe extern "C" fn(*mut Context, *const ServerInfo, *mut c_void);
+
+// The start of pa_server_info.
+#[repr(C)]
+struct ServerInfo {
+    user_name: *const c_char,
+    host_name: *const c_char,
+    server_version: *const c_char,
+    server_name: *const c_char,
+}
 type TimeEvent = c_void;
 type TimeCallback =
     unsafe extern "C" fn(*mut c_void, *mut TimeEvent, *const libc::timeval, *mut c_void);
@@ -80,6 +90,20 @@ macro_rules! library {
                     },)*
                 })
             }
+
+            // For tests to stand in for the functions they use. The others
+            // abort.
+            #[cfg(test)]
+            fn none() -> Self {
+                Self {
+                    $($name: {
+                        unsafe extern "C" fn none($(_: $arg),*) $(-> $ret)? {
+                            std::process::abort()
+                        }
+                        none
+                    },)*
+                }
+            }
         }
     };
 }
@@ -101,6 +125,7 @@ library! {
     context_disconnect: fn(*mut Context);
     context_unref: fn(*mut Context);
     context_errno: fn(*mut Context) -> c_int;
+    context_get_server_info: fn(*mut Context, Option<ServerInfoCallback>, *mut c_void) -> *mut Operation;
     strerror: fn(c_int) -> *const c_char;
     stream_new: fn(*mut Context, *const c_char, *const SampleSpec, *const c_void) -> *mut Stream;
     stream_set_state_callback: fn(*mut Stream, Option<StreamCallback>, *mut c_void);
@@ -234,22 +259,9 @@ impl Capture {
         }
         let connected = Arc::new((Mutex::new(None), Condvar::new()));
         let reader = Box::into_raw(Box::new(Reader {
-            library,
-            context: std::ptr::null_mut(),
-            stream: std::ptr::null_mut(),
             device,
-            buffer,
-            source: source.downgrade(),
             connected: Some(connected.clone()),
-            closed: false,
-            position: 0,
-            stamps: Stamps::default(),
-            held: Vec::new(),
-            end: None,
-            timer: std::ptr::null_mut(),
-            asking: std::collections::VecDeque::new(),
-            last_arrival: None,
-            resumed: false,
+            ..Reader::new(library, source, buffer)
         }));
         let capture = Self {
             library,
@@ -362,6 +374,12 @@ struct Reader {
     // Audio waiting for the server to say when it captured audio, whether
     // it lost any while audio stopped arriving, or where it lost some.
     held: Vec<(i64, gst::Buffer)>,
+    // How many of the last held buffers arrived since the server last
+    // answered.
+    unanswered: usize,
+    // Since audio arrived that could come after a skip, until the server
+    // next answers.
+    late: bool,
     // Where the last buffer pushed ended.
     end: Option<i64>,
     // Goes off every TIMING_INTERVAL.
@@ -372,6 +390,8 @@ struct Reader {
     // Since audio stopped arriving for a while, until the server says
     // whether it lost any meanwhile.
     resumed: bool,
+    // pipewire-pulse, whose latency is audio in its graph, which it can lose.
+    graph_holds: bool,
 }
 
 fn error_text(library: &Library, context: *mut Context) -> String {
@@ -385,7 +405,18 @@ fn error_text(library: &Library, context: *mut Context) -> String {
 unsafe extern "C" fn context_state(context: *mut Context, reader: *mut c_void) {
     let reader = &mut *reader.cast::<Reader>();
     match (reader.library.context_get_state)(context) {
-        CONTEXT_READY => reader.open_stream(),
+        CONTEXT_READY => {
+            // Answered before the stream is, on the same connection.
+            let operation = (reader.library.context_get_server_info)(
+                context,
+                Some(server_info),
+                (reader as *mut Reader).cast(),
+            );
+            if !operation.is_null() {
+                (reader.library.operation_unref)(operation);
+            }
+            reader.open_stream()
+        }
         CONTEXT_FAILED | CONTEXT_TERMINATED => {
             let error = format!(
                 "the audio server connection ended: {}",
@@ -409,6 +440,14 @@ unsafe extern "C" fn stream_state(stream: *mut Stream, reader: *mut c_void) {
             reader.fail(error);
         }
         _ => {}
+    }
+}
+
+unsafe extern "C" fn server_info(_: *mut Context, info: *const ServerInfo, reader: *mut c_void) {
+    let Some(info) = info.as_ref() else { return };
+    if !info.server_name.is_null() {
+        let name = CStr::from_ptr(info.server_name).to_string_lossy();
+        (*reader.cast::<Reader>()).graph_holds = name.contains("PipeWire");
     }
 }
 
@@ -458,6 +497,30 @@ fn wall_clock() -> (i64, i64) {
 const FIRST_ACCOUNT: gst::ClockTime = crate::pipeline::HELD_VIDEO_LIMIT;
 
 impl Reader {
+    fn new(library: &'static Library, source: &gst::Element, buffer: gst::ClockTime) -> Self {
+        Self {
+            library,
+            context: std::ptr::null_mut(),
+            stream: std::ptr::null_mut(),
+            device: None,
+            buffer,
+            source: source.downgrade(),
+            connected: None,
+            closed: false,
+            position: 0,
+            stamps: Stamps::default(),
+            held: Vec::new(),
+            unanswered: 0,
+            late: false,
+            end: None,
+            timer: std::ptr::null_mut(),
+            asking: std::collections::VecDeque::new(),
+            last_arrival: None,
+            resumed: false,
+            graph_holds: false,
+        }
+    }
+
     unsafe fn open_stream(&mut self) {
         let spec = SampleSpec {
             format: SAMPLE_FLOAT32LE,
@@ -597,8 +660,12 @@ impl Reader {
     // The server's write index, when it captured the audio there, and its
     // read index. A read index past the audio received is audio the server
     // skipped, which pipewire-pulse does for a reader that fell a buffer
-    // behind; the reply comes after the audio sent before it. libpulse
-    // already took off what it holds, and read() takes all it holds.
+    // behind, and only says so here. The reply comes after the audio sent
+    // before it, and libpulse already took off what it holds, which read()
+    // takes all of. So the skip is somewhere in the audio that arrived since
+    // the last answer, with no mark where: that audio has no known place, and
+    // is lost with what was skipped. Audio that arrived earlier came before
+    // it, and read() holds all audio that can come after one.
     unsafe fn timing_updated(&mut self, success: bool) {
         let asked = self.asking.pop_front();
         // libpulse can answer after close() let go of the stream.
@@ -609,8 +676,13 @@ impl Reader {
         let (Some(info), Some((_, now))) = (info.as_ref(), self.now()) else {
             return;
         };
-        if success && info.read_index_corrupt == 0 && info.read_index > self.position {
-            self.position = info.read_index;
+        if success && info.read_index_corrupt == 0 {
+            if info.read_index > self.position {
+                self.held.truncate(self.held.len() - self.unanswered);
+                self.position = info.read_index;
+            }
+            self.unanswered = 0;
+            self.late = false;
         }
         // The server says when it answered by its wall clock. libpulse
         // takes that if it falls between when it asked and heard back by
@@ -623,6 +695,7 @@ impl Reader {
         let set = asked.map_or(true, |asked| (offset - asked).abs() > CLOCK_SET);
         let age = wall - info.timestamp.tv_sec * 1_000_000_000 - info.timestamp.tv_usec * 1000;
         let answered = now.nseconds() as i64 - age;
+        let (steps, steady) = (self.stamps.steps.len(), self.stamps.steady);
         if success
             && !set
             && info.write_index_corrupt == 0
@@ -636,6 +709,9 @@ impl Reader {
             )
         {
             self.resumed = false;
+        }
+        if self.graph_holds && self.stamps.steps.len() > steps {
+            self.drop_held_between(steady, self.stamps.steps.last().unwrap().0);
         }
         if !self.holding() {
             self.release();
@@ -673,12 +749,22 @@ impl Reader {
                 .last_arrival
                 .is_some_and(|last| now.saturating_sub(last) > FRAGMENT * 4);
             self.last_arrival = Some(now);
+            // pipewire-pulse skips audio once it holds more than the buffer,
+            // all but its newest fragment, and says so only in its next
+            // answer. Until then audio after a skip seems captured the skip
+            // earlier than it was, more than a buffer before it arrived.
+            // Audio that seems over half a buffer late, which leaves room for
+            // a late account, waits for that answer.
+            self.late |= self.stamps.time(start).is_some_and(|time| {
+                now.nseconds() as i64 - time > self.buffer.nseconds() as i64 / 2
+            });
             // While holding, each answer about newer audio counts.
             if self.holding() {
                 self.request_timing();
             }
             if self.holding() {
                 self.held.push((start, buffer));
+                self.unanswered += 1;
                 // Before the server first answers, as long as video waits
                 // for a track, and afterwards a buffer's worth.
                 let limit = if self.stamps.offset.is_none() {
@@ -696,6 +782,7 @@ impl Reader {
                     .offset
                     .get_or_insert(now.nseconds() as i64 - time_of(self.position));
                 self.resumed = false;
+                self.late = false;
                 if !self.release() {
                     return;
                 }
@@ -707,11 +794,38 @@ impl Reader {
         }
     }
 
+    // Held audio from `from` to `to` has no known place: it goes, and audio
+    // from `to` on stays.
+    fn drop_held_between(&mut self, from: i64, to: i64) {
+        let unanswered = self.held.len() - self.unanswered;
+        let first = self.held.get(unanswered).map_or(i64::MAX, |held| held.0);
+        self.held = std::mem::take(&mut self.held)
+            .into_iter()
+            .filter_map(|(position, buffer)| {
+                let end = position + buffer.size() as i64;
+                if end <= from || position >= to {
+                    return Some((position, buffer));
+                }
+                (end > to).then(|| {
+                    let at = (to - position) as usize;
+                    (
+                        to,
+                        buffer
+                            .copy_region(gst::BufferCopyFlags::MEMORY, at..)
+                            .unwrap(),
+                    )
+                })
+            })
+            .collect();
+        self.unanswered = self.held.iter().filter(|held| held.0 >= first).count();
+    }
+
     fn holding(&self) -> bool {
-        self.stamps.offset.is_none() || self.resumed || self.stamps.rising.is_some()
+        self.stamps.offset.is_none() || self.resumed || self.late || self.stamps.rising.is_some()
     }
 
     unsafe fn release(&mut self) -> bool {
+        self.unanswered = 0;
         std::mem::take(&mut self.held)
             .into_iter()
             .all(|(position, buffer)| self.push(position, buffer))
@@ -808,6 +922,8 @@ struct Stamps {
     recent: std::collections::VecDeque<i64>,
     last_capturing: i64,
     last_reply: i64,
+    // The write index in the last reply that said nothing was lost.
+    steady: i64,
 }
 
 impl Stamps {
@@ -820,6 +936,18 @@ impl Stamps {
             .filter(|&from| from > position && from < position + length)
             .filter(|&from| (from - position) % FRAME as i64 == 0)
             .min()
+    }
+
+    // When the audio at `position` was captured, in running time, as pts
+    // will stamp it.
+    fn time(&self, position: i64) -> Option<i64> {
+        let steps: i64 = self
+            .steps
+            .iter()
+            .filter(|&&(from, _)| position >= from)
+            .map(|&(_, amount)| amount)
+            .sum();
+        Some(time_of(position) + self.offset? + steps)
     }
 
     fn pts(&mut self, position: i64) -> Option<i64> {
@@ -853,6 +981,7 @@ impl Stamps {
         let account = answered - latency - time_of(write);
         let elapsed = now - std::mem::replace(&mut self.last_reply, now);
         let Some(offset) = self.offset.as_mut() else {
+            self.steady = write;
             // The account is a little late, never early, the first one most
             // often, so audio waits for the least of the first few.
             self.recent.push_back(account);
@@ -883,6 +1012,7 @@ impl Stamps {
             return true;
         }
         self.rising = None;
+        self.steady = write;
         self.recent.push_back(account);
         if self.recent.len() > WINDOW {
             self.recent.pop_front();
@@ -1092,5 +1222,418 @@ mod tests {
         assert_eq!(at(10), 0);
         assert!((-51 * MS..=-49 * MS).contains(&at(60)), "{}", at(60));
         assert_eq!(at(200), -100 * MS);
+    }
+
+    // libpulse and the server behind it, for a Reader: audio and answers
+    // arrive in the order the server sends them.
+    #[derive(Default)]
+    struct Socket {
+        audio: std::collections::VecDeque<Vec<u8>>,
+        info: Option<Box<TimingInfo>>,
+        // Questions the reader asked that the server hasn't answered.
+        questions: usize,
+    }
+
+    thread_local! {
+        static SOCKET: std::cell::RefCell<Socket> = std::cell::RefCell::default();
+    }
+
+    unsafe extern "C" fn peek(
+        _: *mut Stream,
+        data: *mut *const c_void,
+        length: *mut usize,
+    ) -> c_int {
+        SOCKET.with_borrow(|socket| {
+            let audio = socket.audio.front();
+            *data = audio.map_or(std::ptr::null(), |audio| audio.as_ptr().cast());
+            *length = audio.map_or(0, Vec::len);
+        });
+        0
+    }
+
+    unsafe extern "C" fn drop_audio(_: *mut Stream) -> c_int {
+        SOCKET.with_borrow_mut(|socket| socket.audio.pop_front());
+        0
+    }
+
+    unsafe extern "C" fn ask(
+        _: *mut Stream,
+        _: Option<SuccessCallback>,
+        _: *mut c_void,
+    ) -> *mut Operation {
+        SOCKET.with_borrow_mut(|socket| socket.questions += 1);
+        std::ptr::NonNull::dangling().as_ptr()
+    }
+
+    unsafe extern "C" fn timing_info(_: *mut Stream) -> *const TimingInfo {
+        SOCKET.with_borrow(|socket| {
+            socket
+                .info
+                .as_deref()
+                .map_or(std::ptr::null(), |info| info as *const TimingInfo)
+        })
+    }
+
+    unsafe extern "C" fn unref(_: *mut Operation) {}
+
+    unsafe extern "C" fn restart(_: *mut Context, _: *mut TimeEvent, _: u64) {}
+
+    unsafe extern "C" fn rtclock_now() -> u64 {
+        0
+    }
+
+    // Frames that hold their index, in two channels of 15 bits.
+    fn pcm(frames: std::ops::Range<u64>) -> Vec<u8> {
+        frames
+            .flat_map(|frame| [frame % 32768, frame / 32768])
+            .flat_map(|sample| (sample as f32 / 32768.0).to_le_bytes())
+            .collect()
+    }
+
+    // A buffer a Reader sent, with its first and last frame.
+    #[derive(Debug, PartialEq)]
+    struct Sent {
+        pts: i64,
+        duration: i64,
+        discont: bool,
+        first: u64,
+        last: u64,
+    }
+
+    // A Reader on a fake libpulse whose server sends fragment n, frames
+    // n * 480 on, at (n + 1) * 10 ms of running time, once it captured it,
+    // and says it captured audio a millisecond before it did. The running
+    // time stands still where the test sets it.
+    struct Wire {
+        reader: Box<Reader>,
+        clock: gst::Clock,
+        pipeline: gst::Pipeline,
+        sink: gst::Element,
+    }
+
+    impl Wire {
+        fn new() -> Self {
+            gst::init().unwrap();
+            SOCKET.set(Socket::default());
+            let library = Box::leak(Box::new(Library {
+                stream_peek: peek,
+                stream_drop: drop_audio,
+                stream_update_timing_info: ask,
+                stream_get_timing_info: timing_info,
+                operation_unref: unref,
+                context_rttime_restart: restart,
+                rtclock_now,
+                ..Library::none()
+            }));
+            let source = gst::ElementFactory::make("appsrc")
+                .property(
+                    "caps",
+                    gst::Caps::builder("audio/x-raw")
+                        .field("format", "F32LE")
+                        .field("rate", RATE as i32)
+                        .field("channels", CHANNELS as i32)
+                        .field("layout", "interleaved")
+                        .build(),
+                )
+                .property("format", gst::Format::Time)
+                .property("is-live", true)
+                .build()
+                .unwrap();
+            let sink = gst::ElementFactory::make("appsink")
+                .property("sync", false)
+                .build()
+                .unwrap();
+            let pipeline = gst::Pipeline::new();
+            pipeline.add_many([&source, &sink]).unwrap();
+            source.link(&sink).unwrap();
+            let clock = glib::Object::new::<gst::SystemClock>().upcast::<gst::Clock>();
+            pipeline.use_clock(Some(&clock));
+            pipeline.set_start_time(gst::ClockTime::NONE);
+            pipeline.set_base_time(gst::ClockTime::ZERO);
+            let wire = Self {
+                reader: Box::new(Reader::new(library, &source, gst::ClockTime::SECOND)),
+                clock,
+                pipeline,
+                sink,
+            };
+            wire.at(0);
+            wire.pipeline.set_state(gst::State::Playing).unwrap();
+            wire
+        }
+
+        fn at(&self, ms: i64) {
+            let time = gst::ClockTime::from_mseconds(ms as u64);
+            self.clock
+                .set_calibration(self.clock.internal_time(), time, 0, 1);
+        }
+
+        fn audio(&mut self, ms: i64, frames: std::ops::Range<u64>) {
+            self.audio_frames(ms, frames.collect());
+        }
+
+        fn audio_frames(&mut self, ms: i64, frames: Vec<u64>) {
+            self.at(ms);
+            let bytes = frames
+                .into_iter()
+                .flat_map(|frame| [frame % 32768, frame / 32768])
+                .flat_map(|sample| (sample as f32 / 32768.0).to_le_bytes())
+                .collect();
+            SOCKET.with_borrow_mut(|socket| socket.audio.push_back(bytes));
+            unsafe { self.reader.read() };
+        }
+
+        // The server answers every question on the way: it captured `write`
+        // frames, and sent or skipped `read`.
+        fn answer(&mut self, ms: i64, write: u64, read: u64) {
+            self.answer_with(ms, write, read, 0);
+        }
+
+        fn answer_with(&mut self, ms: i64, write: u64, read: u64, latency: u64) {
+            self.at(ms);
+            for _ in 0..SOCKET.with_borrow_mut(|socket| std::mem::take(&mut socket.questions)) {
+                let wall = wall_clock().0 + MS;
+                let info = TimingInfo {
+                    timestamp: libc::timeval {
+                        tv_sec: wall / 1_000_000_000,
+                        tv_usec: wall % 1_000_000_000 / 1000,
+                    },
+                    synchronized_clocks: 1,
+                    sink_usec: 0,
+                    source_usec: latency,
+                    transport_usec: 0,
+                    playing: 1,
+                    write_index_corrupt: 0,
+                    write_index: (write * FRAME as u64) as i64,
+                    read_index_corrupt: 0,
+                    read_index: (read * FRAME as u64) as i64,
+                    configured_sink_usec: 0,
+                    configured_source_usec: 0,
+                    since_underrun: 0,
+                };
+                SOCKET.with_borrow_mut(|socket| socket.info = Some(Box::new(info)));
+                unsafe { self.reader.timing_updated(true) };
+            }
+        }
+
+        // The reader's timer.
+        fn tick(&mut self, ms: i64) {
+            self.at(ms);
+            unsafe { self.reader.ask_again() };
+        }
+
+        // Fragments sent as captured, each answering the questions on the
+        // way, with the timer going off every 100 ms.
+        fn steady(&mut self, fragments: std::ops::Range<u64>) {
+            for n in fragments {
+                let ms = (n as i64 + 1) * 10;
+                if ms % 100 == 0 {
+                    self.tick(ms);
+                }
+                self.audio(ms, n * 480..(n + 1) * 480);
+                self.answer(ms, (n + 1) * 480, (n + 1) * 480);
+            }
+        }
+
+        fn sent(self) -> Vec<Sent> {
+            let source = self.reader.source.upgrade().unwrap();
+            let ended = source.emit_by_name::<gst::FlowReturn>("end-of-stream", &[]);
+            assert_eq!(ended, gst::FlowReturn::Ok);
+            let mut sent = Vec::new();
+            while let Some(sample) = self
+                .sink
+                .emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&gst::ClockTime::SECOND])
+            {
+                let buffer = sample.buffer().unwrap();
+                let map = buffer.map_readable().unwrap();
+                let frame = |i: usize| {
+                    let sample = |j: usize| {
+                        (f32::from_le_bytes(map[j * 4..j * 4 + 4].try_into().unwrap()) * 32768.0)
+                            .round() as u64
+                    };
+                    sample(2 * i) + sample(2 * i + 1) * 32768
+                };
+                sent.push(Sent {
+                    pts: buffer.pts().unwrap().nseconds() as i64,
+                    duration: buffer.duration().unwrap().nseconds() as i64,
+                    discont: buffer.flags().contains(gst::BufferFlags::DISCONT),
+                    first: frame(0),
+                    last: frame(map.len() / FRAME - 1),
+                });
+            }
+            self.pipeline.set_state(gst::State::Null).unwrap();
+            sent
+        }
+    }
+
+    fn frame_time(frame: u64) -> i64 {
+        time_of((frame * FRAME as u64) as i64)
+    }
+
+    // Every buffer is stamped when its frames were captured, by the server's
+    // account, and marked discont where frames are missing. Returns
+    // the frames missing between the first and the last buffer, from and to.
+    // The account is a millisecond late, less the time between the test
+    // reading the wall clock for an answer and the reader reading it again:
+    // microseconds, more on a busy machine.
+    fn assert_placed(sent: &[Sent]) -> Vec<(u64, u64)> {
+        let mut missing = Vec::new();
+        for (i, buffer) in sent.iter().enumerate() {
+            let late = buffer.pts - frame_time(buffer.first);
+            assert!(
+                (0..=1_000_000).contains(&late),
+                "{buffer:?} is {late} ns late"
+            );
+            assert_eq!(
+                buffer.duration,
+                frame_time(buffer.last + 1) - frame_time(buffer.first),
+                "{buffer:?}"
+            );
+            let next = sent[..i]
+                .last()
+                .map_or(buffer.first, |before| before.last + 1);
+            if buffer.first != next {
+                assert!(buffer.discont, "{buffer:?}");
+                missing.push((next, buffer.first));
+            }
+        }
+        missing
+    }
+
+    // pipewire-pulse's main thread stops for 1.05 s while its data thread
+    // keeps capturing. Resuming, it skips all but the newest fragment of its
+    // 1 s ring and sends that, then answers the questions asked meanwhile.
+    // The fragment can't be placed: only the answer after it says there was
+    // a skip, not where. Placed after the audio before the skip, it was a
+    // second early.
+    #[test]
+    fn audio_after_a_skip_in_what_arrived_since_the_last_answer_is_lost_with_it() {
+        let mut wire = Wire::new();
+        wire.steady(0..300);
+        for ms in (3100..=4000).step_by(100) {
+            wire.tick(ms);
+        }
+        wire.audio(4050, 404 * 480..405 * 480);
+        wire.answer(4050, 405 * 480, 405 * 480);
+        wire.steady(405..500);
+        let sent = wire.sent();
+        assert_eq!(assert_placed(&sent), [(300 * 480, 405 * 480)]);
+        assert_eq!(sent.last().unwrap().last, 500 * 480 - 1);
+    }
+
+    // The reader stops at 3 s for 2.5 s. Half a second of audio waits in the
+    // socket, and the server's next fragment waits for room there, so the
+    // server holds the rest and overflows. When the reader takes up again,
+    // the server answers after that audio, which keeps its place, then skips
+    // and sends its newest fragment, which arrives promptly but is lost with
+    // the skip. Placed by when it arrived, the audio waiting in the socket
+    // would have looked lost.
+    #[test]
+    fn audio_held_in_the_socket_keeps_its_place_and_audio_after_a_skip_is_lost() {
+        let mut wire = Wire::new();
+        wire.steady(0..300);
+        for n in 300..351 {
+            wire.audio(5500, n * 480..(n + 1) * 480);
+        }
+        wire.answer(5500, 550 * 480, 351 * 480);
+        wire.audio(5505, 549 * 480..550 * 480);
+        wire.answer(5505, 550 * 480, 550 * 480);
+        wire.steady(550..650);
+        let sent = wire.sent();
+        assert_eq!(assert_placed(&sent), [(351 * 480, 550 * 480)]);
+        assert_eq!(sent.last().unwrap().last, 650 * 480 - 1);
+    }
+
+    // The same for 0.6 s, which the server holds: nothing is lost.
+    #[test]
+    fn audio_held_in_the_socket_and_the_server_is_all_kept() {
+        let mut wire = Wire::new();
+        wire.steady(0..300);
+        for n in 300..351 {
+            wire.audio(3600, n * 480..(n + 1) * 480);
+        }
+        wire.answer(3600, 360 * 480, 351 * 480);
+        for n in 351..360 {
+            wire.audio(3605, n * 480..(n + 1) * 480);
+        }
+        wire.steady(360..450);
+        let sent = wire.sent();
+        assert_eq!(assert_placed(&sent), []);
+        assert_eq!(sent.last().unwrap().last, 450 * 480 - 1);
+    }
+
+    // pipewire-pulse stops whole for 300 ms at 3 s; its graph keeps going
+    // and its stream misses 298 ms of cycles. Resuming, it answers first,
+    // with the write index of its last cycle, frame 144000, and 240 frames
+    // still in its graph, of which 96 arrive and the rest are lost. Then it
+    // sends those 96 frames and audio captured 298 ms later in one fragment.
+    // The step goes at the write index plus the latency; the 144 frames
+    // before it that came after the loss have no known place and go with it.
+    #[test]
+    fn audio_pipewire_pulse_took_in_after_a_loss_it_had_not_reported_is_lost_with_it() {
+        let mut wire = Wire::new();
+        wire.reader.graph_holds = true;
+        wire.steady(0..300);
+        for ms in [3100, 3200, 3300] {
+            wire.tick(ms);
+        }
+        wire.answer_with(3300, 300 * 480, 300 * 480, 5000);
+        let lost = 298 * 48;
+        let mut frames: Vec<u64> = (144000..144096).collect();
+        frames.extend((144096..144480).map(|frame| frame + lost));
+        wire.audio_frames(3313, frames);
+        wire.answer_with(3313, 301 * 480, 301 * 480, 5000);
+        for n in 301..400 {
+            let ms = (n as i64 + 1) * 10 + 303;
+            wire.tick(ms);
+            wire.audio_frames(ms, (n * 480 + lost..(n + 1) * 480 + lost).collect());
+            wire.answer_with(ms, (n + 1) * 480, (n + 1) * 480, 5000);
+        }
+        let sent = wire.sent();
+        assert_eq!(assert_placed(&sent), [(144000, 144240 + lost)]);
+    }
+
+    // A buffer a step falls inside goes out in two: its audio up to the step
+    // where it was, and from the step on moved by it, as a discontinuity.
+    #[test]
+    fn a_buffer_with_a_step_inside_is_sent_in_two() {
+        let mut wire = Wire::new();
+        let at = |frame: i64| frame * FRAME as i64;
+        wire.reader.stamps = Stamps {
+            offset: Some(0),
+            steps: vec![(at(1000), 480 * MS)],
+            ..Stamps::default()
+        };
+        for frames in [480..960, 960..1440] {
+            let start = at(frames.start as i64);
+            let buffer = gst::Buffer::from_mut_slice(pcm(frames));
+            assert!(unsafe { wire.reader.push(start, buffer) });
+        }
+        let time = frame_time;
+        assert_eq!(
+            wire.sent(),
+            [
+                Sent {
+                    pts: time(480),
+                    duration: time(960) - time(480),
+                    discont: true,
+                    first: 480,
+                    last: 959,
+                },
+                Sent {
+                    pts: time(960),
+                    duration: time(1000) - time(960),
+                    discont: false,
+                    first: 960,
+                    last: 999,
+                },
+                Sent {
+                    pts: time(1000) + 480 * MS,
+                    duration: time(1440) - time(1000),
+                    discont: true,
+                    first: 1000,
+                    last: 1439,
+                },
+            ]
+        );
     }
 }

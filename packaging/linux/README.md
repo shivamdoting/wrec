@@ -353,19 +353,39 @@ server ten times a second for the capture time of its newest audio and how much
 audio it has captured and sent. Audio that takes longer to arrive, or a recorder
 that stops reading for a moment, leaves that account unchanged, so the audio
 keeps its place and nothing is reported. Audio the server lost leaves a gap of
-the same length where it was lost, and wrec reports it. That covers audio its
-device or graph lost, audio PulseAudio dropped because the recorder fell more
-than both buffers behind, and audio `pipewire-pulse` skipped for the same
-reason. A device clock that runs faster or slower than the system clock moves
-the audio at most 1 ms per second and is not reported.
+the same length, and wrec reports it. That covers audio its device or graph
+lost, audio PulseAudio dropped because the recorder fell more than both buffers
+behind, and audio `pipewire-pulse` skipped for the same reason.
+`pipewire-pulse` skips without marking where and says so only in its next
+timing reply, so the audio that arrived since its previous reply has no known
+place. wrec drops that audio and reports it with the skip as one gap; in the
+controlled tests it was one 10 ms fragment. A device clock that runs faster or
+slower than the system clock moves the audio at most 1 ms per second and is not
+reported.
 
 This has limits. Changes in the server's account of 20 ms or less are never
 reported; the audio moves smoothly instead. A device clock more than 1000 parts
 per million slow builds up until it reads as lost audio, and one that fast
-leaves the audio drifting late. A loss is placed at the newest audio the server
-had captured when it first reported it, so audio captured right after a loss can
-play that much early; in the controlled tests every buffer stayed within 11 ms
-of its capture time. The account is only as good as the server's latency
+leaves the audio drifting late. The length of each gap is reported, but where
+in the audio it falls is not guaranteed, and the job events give the time wrec
+placed it at. wrec places a loss after the newest audio the server had captured
+when it first reported it, counting audio its device still held. PulseAudio
+reports a stall before it reads what its device held, so when the server counts
+that audio, the gap falls where the loss was; in the controlled tests every
+buffer stayed within 11 ms of its capture time. A device holding audio the
+server does not count can put the gap after the loss, and the audio between
+those boundaries can play early by the whole loss. `pipewire-pulse` also
+counts audio still in its graph, which a server stall can lose. When the
+server identifies itself as PipeWire and capture stops arriving, wrec discards
+the held audio whose position is uncertain after a confirmed loss. It reports
+that discard with the loss. This prevented early audio in the controlled
+0.1 and 0.3 s server-stall tests, at the cost of 5 to 13 ms of additional
+audio per loss. It cannot protect audio already sent before the loss was
+known, or a graph loss with no break in arriving audio.
+When PulseAudio drops audio for a recorder that fell more than both buffers
+behind, it drops it in pieces over the following second, and in the controlled
+tests 1280 to 2720 frames (27 to 57 ms) of that second played early, by 9 ms up
+to the whole loss. The account is only as good as the server's latency
 reporting. Clock drift is validated only with a synthetic device 800 parts per
 million fast or slow, not with physical microphones. These are experimental
 support limits; a completed job alone does not establish A/V sync.
@@ -386,8 +406,8 @@ error anywhere else in the audio chain, such as the AAC encoder, still fails the
 job. A
 completed job is not proof of a whole movie. When frames were dropped, audio has
 gaps, or a track ended early or never started, the job finishes `completed` with
-a `media_lost` warning that states what is missing, and the job events record when
-each audio gap happened. `wrec record` prints the warning when it finishes.
+a `media_lost` warning that states what is missing, and the job events record
+where wrec placed each audio gap. `wrec record` prints the warning when it finishes.
 
 On Wayland, a recording watches four things besides its frames: the ScreenCast
 session's `Closed` signal, the D-Bus owner of `org.freedesktop.portal.Desktop`,
