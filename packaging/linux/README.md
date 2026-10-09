@@ -97,13 +97,16 @@ no frame until something on screen changes.
 
 `pipewiresrc` pauses its stream briefly while starting. When that pause
 interrupts a capture, xdg-desktop-portal-wlr sends the unfinished buffer marked
-corrupted, with timestamp 0. GStreamer aligns a live source's timestamps to
-the first buffer it sees. When that buffer is the corrupted one, every real
-frame looks due hours in the future, so the source waits instead of delivering
-frames. This
-was seen with shared GPU buffers on xdg-desktop-portal-wlr 0.8.1 and PipeWire
-1.6.2. wrec stops an attempt whose first frame is marked corrupted before
-anything is encoded and moves on to the next available mode.
+corrupted, with timestamp 0. This was seen with shared GPU buffers on
+xdg-desktop-portal-wlr 0.8.1 and PipeWire 1.6.2. wrec stops an attempt whose
+first frame is marked corrupted before anything is encoded and moves on to
+the next available mode.
+
+KWin can stamp the first frame of an idle screen with the time of its last
+repaint, seconds before capture started. GStreamer then held each new frame
+for that long, so a recording of a still screen froze for seconds once
+something moved. wrec gives `pipewiresrc` no clock, so it passes each frame on
+as it arrives, and stamps every frame with the time it arrived.
 
 wrec sets the movie's output size when the first source caps arrive. Changing
 a capsfilter normally asks every upstream element to renegotiate, and

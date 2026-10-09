@@ -139,6 +139,89 @@ const CAPTURE_QUEUE: &str = "capture-queue";
 // idle screen still sends a frame each keepalive.
 const KEEPALIVE: gst::ClockTime = gst::ClockTime::SECOND;
 
+// Since PipeWire 0.3.70, pipewiresrc gives each frame the compositor's
+// timestamp, and GstBaseSrc holds every frame until that timestamp comes due,
+// counted from the first frame's. KWin stamped the first frame of an idle
+// screen with its last repaint, seconds old, so the next new frame waited that
+// long and capture stopped meanwhile. Without a clock a source passes frames
+// on as they arrive, so the source goes in a bin that keeps the pipeline's
+// clock from it, and each frame is stamped with the running time it left the
+// source.
+fn stamp_on_arrival(source: gst::Element) -> Result<gst::Element> {
+    let bin = arrival::Unclocked::default();
+    bin.add(&source).map_err(backend)?;
+    let pad = source.static_pad("src").unwrap();
+    let stamper = bin.downgrade();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let (Some(bin), Some(gst::PadProbeData::Buffer(buffer))) =
+            (stamper.upgrade(), info.data.as_mut())
+        {
+            let now = bin.running_time();
+            let buffer = buffer.make_mut();
+            buffer.set_pts(now);
+            buffer.set_dts(now);
+        }
+        gst::PadProbeReturn::Ok
+    });
+    let ghost = gst::GhostPad::builder_with_target(&pad)
+        .map_err(backend)?
+        .name("src")
+        .build();
+    bin.add_pad(&ghost).map_err(backend)?;
+    Ok(bin.upcast())
+}
+
+mod arrival {
+    use gstreamer::{self as gst, glib, prelude::*, subclass::prelude::*};
+
+    glib::wrapper! {
+        pub struct Unclocked(ObjectSubclass<imp::Unclocked>)
+            @extends gst::Bin, gst::Element, gst::Object;
+    }
+
+    impl Default for Unclocked {
+        fn default() -> Self {
+            glib::Object::new()
+        }
+    }
+
+    impl Unclocked {
+        // Running time by the clock the pipeline gave this bin.
+        pub(super) fn running_time(&self) -> Option<gst::ClockTime> {
+            let clock = self.imp().clock.lock().unwrap().clone()?;
+            clock.time()?.checked_sub(self.base_time()?)
+        }
+    }
+
+    mod imp {
+        use super::*;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        pub struct Unclocked {
+            pub(super) clock: Mutex<Option<gst::Clock>>,
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for Unclocked {
+            const NAME: &'static str = "WrecUnclockedBin";
+            type Type = super::Unclocked;
+            type ParentType = gst::Bin;
+        }
+
+        impl ObjectImpl for Unclocked {}
+        impl GstObjectImpl for Unclocked {}
+        impl BinImpl for Unclocked {}
+
+        impl ElementImpl for Unclocked {
+            fn set_clock(&self, clock: Option<&gst::Clock>) -> bool {
+                *self.clock.lock().unwrap() = clock.cloned();
+                self.parent_set_clock(None)
+            }
+        }
+    }
+}
+
 fn video_queue() -> Result<gst::Element> {
     let queue = element("queue")?;
     queue.set_property("name", CAPTURE_QUEUE);
@@ -464,7 +547,7 @@ fn record_attempt(
             source.set_property("max-buffers", 8i32);
             source.set_property("keepalive-time", KEEPALIVE.mseconds() as i32);
             source.set_property("resend-last", true);
-            source
+            stamp_on_arrival(source)?
         }
         CaptureInput::X11 { display, xid } => {
             let source = element("ximagesrc")?;
@@ -472,12 +555,18 @@ fn record_attempt(
             source.set_property("xid", *xid);
             source.set_property("show-pointer", settings.include_cursor);
             source.set_property("use-damage", true);
+            source.set_property("do-timestamp", true);
             source
         }
         #[cfg(test)]
-        CaptureInput::Element(source) => source(),
+        CaptureInput::Element(source) => {
+            let source = source();
+            if source.has_property("do-timestamp", None) {
+                source.set_property("do-timestamp", true);
+            }
+            source
+        }
     };
-    source.set_property("do-timestamp", true);
     let input = element("capsfilter")?;
     input.set_property(
         "caps",
@@ -1345,7 +1434,7 @@ fn reject_capture(
     gst::PadProbeReturn::Handled
 }
 
-const UNFINISHED_FIRST_FRAME: &str = "The screen-capture source started with an unfinished frame. Its timestamp would stall capture timing, so this attempt stopped before encoding and another available mode will be tried.";
+const UNFINISHED_FIRST_FRAME: &str = "The screen-capture source started with an unfinished frame, so this attempt stopped before encoding and another available mode will be tried.";
 
 const SOURCE_LOST: &str =
     "The captured X11 window closed, was minimized, or became unavailable; the recording stopped.";
@@ -5336,6 +5425,80 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    // A screen through pipewiresrc since PipeWire 0.3.70, which hands
+    // GstBaseSrc each frame with the compositor's timestamp and has it sync on
+    // that, as this live fakesrc does. KWin stamped the first frame of an idle screen with its last
+    // repaint, seconds old. Each frame after it is new, `every` apart.
+    fn compositor(stale: Duration, every: Duration) -> gst::Element {
+        let compositor = gst::parse::bin_from_description(
+            "fakesrc name=frames is-live=true sync=true format=time signal-handoffs=true sizetype=fixed sizemax=9216 filltype=zero ! capsfilter caps=video/x-raw,format=BGRx,width=64,height=36,pixel-aspect-ratio=1/1,framerate=0/1,max-framerate=30/1",
+            true,
+        )
+        .unwrap();
+        let clock = gst::SystemClock::obtain();
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let frames = compositor.by_name("frames").unwrap();
+        frames.connect("handoff", false, move |values| {
+            let buffer = values[1].get::<&gst::BufferRef>().unwrap();
+            let age = if first.swap(false, Ordering::Relaxed) {
+                stale
+            } else {
+                std::thread::sleep(every);
+                Duration::ZERO
+            };
+            let shown = clock.time().unwrap().nseconds() - age.as_nanos() as u64;
+            // SAFETY: fakesrc hands over the buffer it just made before it
+            // syncs on it, as pipewiresrc's create returns one, and only its
+            // timestamps change.
+            unsafe {
+                let buffer = buffer.as_ptr() as *mut gst::ffi::GstBuffer;
+                (*buffer).pts = shown;
+                (*buffer).dts = shown;
+            }
+            None
+        });
+        compositor.upcast()
+    }
+
+    #[test]
+    fn a_first_frame_stamped_seconds_ago_holds_back_no_later_frame() {
+        gst::init().unwrap();
+        let source = Arc::new(Mutex::new(None::<gst::Element>));
+        let created = source.clone();
+        let capture = CaptureInput::Element(Box::new(move || {
+            let screen = stamp_on_arrival(compositor(
+                Duration::from_secs(3),
+                Duration::from_millis(100),
+            ))
+            .unwrap();
+            *created.lock().unwrap() = Some(screen.clone());
+            screen
+        }));
+        let session = test_session();
+        let (events, _received) = mpsc::channel();
+        let recording = RecordThread::spawn(capture, &session, Codec::H264, events);
+        playing_source(&source, &recording);
+        std::thread::sleep(Duration::from_millis(1500));
+        recording.assert_running();
+        recording.finish().unwrap();
+        let mut times: Vec<f64> = video_packets(&decode_movie(&session.output_path))
+            .into_iter()
+            .map(|(time, _)| time)
+            .collect();
+        let _ = std::fs::remove_file(&session.output_path);
+        times.sort_by(f64::total_cmp);
+        let span = times.last().unwrap() - times[0];
+        let gap = times
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .fold(0.0, f64::max);
+        assert!(
+            span > 1.0 && gap < 0.5,
+            "1.5 s of new frames 0.1 s apart became {} frames over {span:.3} s, the longest gap {gap:.3} s",
+            times.len()
+        );
     }
 
     // Each recording paces real frames through a leaky queue; running two at
