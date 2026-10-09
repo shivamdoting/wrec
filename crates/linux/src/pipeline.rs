@@ -162,9 +162,9 @@ fn stamp_capture_time(
     let pad = source.static_pad("src").unwrap();
     let stamper = bin.downgrade();
     let times = Mutex::new(CaptureTimes::default());
-    let copies = source
+    let frames = source
         .has_property("always-copy", None)
-        .then(|| Mutex::new(MemPtrCopies::new(&source)));
+        .then(|| Mutex::new(SafeFrames::new(&source)));
     pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
         let (Some(bin), Some(gst::PadProbeData::Buffer(buffer))) =
             (stamper.upgrade(), info.data.as_mut())
@@ -177,8 +177,11 @@ fn stamp_capture_time(
         let base = if absolute { bin.base_time() } else { None };
         let mut times = times.lock().unwrap();
         let (stamp, earliest) = times.stamp(buffer, base, now);
-        if let Some(copies) = &copies {
-            copies.lock().unwrap().protect(buffer);
+        if frames
+            .as_ref()
+            .is_some_and(|frames| !frames.lock().unwrap().keep(buffer))
+        {
+            return gst::PadProbeReturn::Drop;
         }
         // Pausing takes out what may have been captured while paused.
         let paused = counters
@@ -264,17 +267,21 @@ impl CaptureTimes {
 // mapping of the producer's memory, which PipeWire unmaps when the producer
 // goes away, even while wrec is still converting the frame or pipewiresrc
 // sends it again as a keepalive. Compositors share MemFd or DMA-BUF memory,
-// which pipewiresrc maps itself. Once a frame turns out to be MemPtr,
-// pipewiresrc copies each later frame while it holds PipeWire's lock, wrec
-// copies that first frame itself, and keepalives repeat wrec's copy instead of
-// pipewiresrc's last frame.
-struct MemPtrCopies {
+// which pipewiresrc maps itself. So a frame goes on only if all its memory is
+// fd memory or pipewiresrc copied it while holding PipeWire's lock. With
+// always-copy it copies each frame it takes from PipeWire, and a copy has no
+// parent buffer meta, which every frame sharing PipeWire's memory has. The
+// first frame sharing other memory turns always-copy on and is dropped
+// unread. After that, such a frame is pipewiresrc sending its last frame
+// again, so it is replaced with the last copied frame, or dropped before
+// there is one.
+struct SafeFrames {
     source: gst::glib::WeakRef<gst::Element>,
     copying: bool,
     last: Option<gst::Buffer>,
 }
 
-impl MemPtrCopies {
+impl SafeFrames {
     fn new(source: &gst::Element) -> Self {
         Self {
             source: source.downgrade(),
@@ -283,28 +290,30 @@ impl MemPtrCopies {
         }
     }
 
-    fn protect(&mut self, buffer: &mut gst::Buffer) {
-        if !self.copying
-            && buffer.n_memory() > 0
-            && !buffer
+    // Whether the frame, possibly replaced, may be passed on.
+    fn keep(&mut self, frame: &mut gst::Buffer) -> bool {
+        let mapped = frame.n_memory() > 0
+            && frame
                 .iter_memories()
-                .any(|memory| memory.is_memory_type::<gstreamer_allocators::FdMemory>())
-        {
+                .all(|memory| memory.is_memory_type::<gstreamer_allocators::FdMemory>());
+        if mapped || frame.meta::<gst::ParentBufferMeta>().is_none() {
+            if self.copying {
+                self.last = Some(frame.clone());
+            }
+            return true;
+        }
+        if !self.copying {
             self.copying = true;
             if let Some(source) = self.source.upgrade() {
                 source.set_property("always-copy", true);
             }
-            if let Ok(copy) = buffer.copy_deep() {
-                *buffer = copy;
+        }
+        match &self.last {
+            Some(last) => {
+                *frame = last.clone();
+                true
             }
-        }
-        if !self.copying {
-            return;
-        }
-        if !is_keepalive(buffer) {
-            self.last = Some(buffer.clone());
-        } else if let Some(last) = &self.last {
-            *buffer = last.clone();
+            None => false,
         }
     }
 }
@@ -386,6 +395,8 @@ struct Counters {
     dimensions: Mutex<Option<CaptureDimensions>>,
     last_pts: Mutex<Option<gst::ClockTime>>,
     timeline: Mutex<Timeline>,
+    // The source went away, so no other mode can record it.
+    source_lost: std::sync::atomic::AtomicBool,
 }
 
 // Pausing takes out of the movie what was captured while paused, judged by
@@ -580,6 +591,7 @@ struct Attempt<'a> {
 fn finished(result: &Result<()>, counters: &Counters) -> bool {
     matches!(result, Ok(()) | Err(RecorderError::Cancelled))
         || counters.frames.load(Ordering::Relaxed) > 0
+        || counters.source_lost.load(Ordering::Relaxed)
 }
 
 fn ends_recording(result: &Result<()>, counters: &Counters, last: bool) -> bool {
@@ -799,6 +811,11 @@ fn record_attempt(
         .create_new(true)
         .open(&session.output_path)
         .map_err(backend)?;
+    let source_lost = || match (&stream, &source_watch) {
+        (Some(stream), _) => stream.lost(),
+        (None, Some(watch)) => watch.lost().then_some(SOURCE_LOST),
+        (None, None) => None,
+    };
     let result = run(
         &mut movie,
         session,
@@ -806,12 +823,12 @@ fn record_attempt(
         commands,
         stop,
         &counters,
-        &|| match (&stream, &source_watch) {
-            (Some(stream), _) => stream.lost(),
-            (None, Some(watch)) => watch.lost().then_some(SOURCE_LOST),
-            (None, None) => None,
-        },
+        &source_lost,
     );
+    // A new pipewiresrc on a removed node can wait 30 s for it to start.
+    counters
+        .source_lost
+        .store(source_lost().is_some(), Ordering::Relaxed);
     let ending = ends_recording(&result, &counters, attempt.last);
     (attempt.stopping)(if result.is_ok() {
         Teardown::Finalized

@@ -116,8 +116,11 @@ that frame is stamped with when it arrived.
 A screen-capture stream can share frames as plain pointers into PipeWire's
 memory (MemPtr) instead of file descriptors (MemFd or DMA-BUF). PipeWire
 unmaps that memory when the producer exits, even while wrec still uses a
-frame, so wrec copies MemPtr frames. KWin, mutter, xdg-desktop-portal-wlr and
-gamescope share MemFd or DMA-BUF, which wrec does not copy.
+frame. So wrec drops the first MemPtr frame without reading it and has
+`pipewiresrc` copy every later frame while it holds PipeWire's lock. A MemPtr
+screen that stays still from the start records no video until it changes.
+KWin, mutter, xdg-desktop-portal-wlr and gamescope share MemFd or DMA-BUF,
+which wrec does not copy.
 
 wrec sets the movie's output size when the first source caps arrive. Changing
 a capsfilter normally asks every upstream element to renegotiate, and
