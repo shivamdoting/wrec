@@ -157,24 +157,27 @@ frame and make the backend exit with "session already has a frame object".
 PipeWire's GStreamer source pauses and resumes during startup, so successful
 recordings on this stack do not establish reliable startup. wrec detects the
 backend loss and fails the job, but does not repair the portal. Stock builds
-remain affected. Separate local patches for portal-wlr 0.8.1 cancel pending
+remain affected. wrec's patches for portal-wlr 0.8.1 cancel pending
 captures when their buffers are returned or removed, leave incomplete image
 buffers empty, and restart capture when new buffers have no image on a static
-output or a cancelled frame may have consumed its damage. These patches are external to
-wrec and require an opt-in build matched to the desktop's libraries.
+output or a cancelled frame may have consumed its damage.
 
 The older wlr-screencopy path also has a static-start limitation. The portal
 shares a screencopy-manager binding across sessions and asks for each new
 session's first frame with damage tracking. The first session consumes the
 binding's initial damage; later sessions on an unchanged output can wait
 without receiving an initial image. This was reproduced with portal-wlr 0.7.0,
-Sway 1.7 and wlroots 0.15.1. Separate local patches for portal-wlr 0.7.1 request
+Sway 1.7 and wlroots 0.15.1. wrec's patches for portal-wlr 0.7.1 request
 a first image without damage tracking, destroy closed streams promptly, and
 limit retries when the consumer holds every buffer. Stock builds remain
 affected; repainting or restarting the portal is not treated as a repair.
-The Linux test report distributes pinned patch series, build instructions,
-checksums and stock-versus-patched evidence. The wrec package does not install
-or replace the desktop portal.
+
+Both patch series, pinned to upstream v0.7.1 and v0.8.1, with checksums, a
+build script, test results, and manual opt-in and undo steps, are in
+[`packaging/linux/xdg-desktop-portal-wlr`](https://github.com/shivamdoting/wrec/tree/main/packaging/linux/xdg-desktop-portal-wlr)
+in the wrec repository. They replace the portal for every app, and the build
+must match the desktop's libraries. The wrec package does not include,
+install, select or load them.
 
 The daemon does not run native capture code. For each recording it starts a
 capture worker, which is the same daemon executable started again with a private

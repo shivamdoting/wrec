@@ -1,0 +1,49 @@
+From bffd83b7ea455ab5ab042d6ad025768c99a60902 Mon Sep 17 00:00:00 2001
+From: Shivam Sharma <shivamhwp@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 17:15:17 +0000
+Subject: [PATCH] screencast: start a new capture session after cancelling a
+ captured frame
+
+GStreamer's pipewiresrc deactivates its stream in READY->PAUSED and
+activates it again in PAUSED->PLAYING, so every recording pauses the
+stream once about 12 ms after the link goes active. When the first
+process event lands in that window, 0001 cancels the capture frame that
+was just requested.
+
+wlroots clears a capture session's damage when it completes a frame. If
+the compositor already copied the cancelled frame, the session's damage
+is empty and its ready event never reaches us, so ext_session.delivered
+stays false. The next capture then reuses that session and waits for the
+output to change, which never happens on a static screen: the consumer
+gets no frame at all, and neither does any later consumer of the same
+stream.
+
+Count a cancelled frame as possibly delivered, so a consumer that still
+has no image gets a new capture session.
+
+Reproduced with wrec on sway 1.11 / wlroots 0.19.2 / PipeWire 1.6.2 and
+a static output: 14 of 25 recordings got no frame within 15 s before,
+25 of 25 recorded after, with the race hit in 20 of them.
+---
+ src/screencast/ext_image_copy.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/screencast/ext_image_copy.c b/src/screencast/ext_image_copy.c
+index 26534db..753c1cd 100644
+--- a/src/screencast/ext_image_copy.c
++++ b/src/screencast/ext_image_copy.c
+@@ -327,6 +327,11 @@ void xdpw_ext_ic_frame_cancel(struct xdpw_screencast_instance *cast) {
+ 	if (cast->ext_session.frame) {
+ 		ext_image_copy_capture_frame_v1_destroy(cast->ext_session.frame);
+ 		cast->ext_session.frame = NULL;
++		// The compositor may already have copied this frame and cleared the
++		// session's damage, and its ready event is now lost. That session
++		// then waits for the output to change, so a consumer still without
++		// an image needs a new session.
++		cast->ext_session.delivered = true;
+ 		logprint(TRACE, "ext: pending frame cancelled");
+ 	}
+ }
+-- 
+2.39.5
+
