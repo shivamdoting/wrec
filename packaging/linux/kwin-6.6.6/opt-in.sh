@@ -26,7 +26,8 @@ plugin=$root/kwin/plugins/screencast.so
 [[ -f $plugin && ! -L $plugin ]] || fail "$plugin is not a regular file"
 # KWin runs whatever this path holds, so nobody else may change it: the
 # plugin and its directories are yours and writable only by you, and no
-# directory above them lets others rename them (sticky ones like /tmp aside).
+# directory above them lets anyone else rename them: none is writable by
+# group or others unless it is sticky, like /tmp.
 for path in "$plugin" "$root/kwin/plugins" "$root/kwin" "$root"; do
   owner=$(stat -c %u "$path")
   [[ $owner == "$(id -u)" || $owner == 0 ]] || fail "$path is owned by uid $owner"
@@ -38,7 +39,7 @@ while [[ $path != / ]]; do
   owner=$(stat -c %u "$path")
   [[ $owner == "$(id -u)" || $owner == 0 ]] || fail "$path is owned by uid $owner"
   mode=0$(stat -c %a "$path")
-  [[ $(( mode & 02 )) == 0 || $(( mode & 01000 )) != 0 ]] || fail "$path is writable by others"
+  [[ $(( mode & 022 )) == 0 || $(( mode & 01000 )) != 0 ]] || fail "$path is writable by group or others"
 done
 [[ $root != *$'\n'* ]] || fail "the path contains a newline"
 [[ $(systemctl --user show "$unit" -p LoadState --value) == loaded ]] || fail "$unit not found: this needs Plasma started by systemd"

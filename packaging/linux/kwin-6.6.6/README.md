@@ -87,8 +87,8 @@ which sets `QT_PLUGIN_PATH` for KWin only. KWin then finds the backported
 
 - any of `libkwin6`, `kwin-common`, `kwin-wayland` is not 4:6.6.6-0ubuntu0.1,
 - the plugin or one of its directories belongs to another user or is writable
-  by group or others, or a directory above them is writable by others (KWin
-  would run whatever is there),
+  by group or others, or a directory above them is writable by group or others
+  without the sticky bit (KWin would run whatever is there),
 - your session or another drop-in already sets `QT_PLUGIN_PATH`, or a file of
   the same name exists that it did not write,
 - Plasma is not started through systemd (`plasma-kwin_wayland.service` missing).
