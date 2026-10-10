@@ -1,0 +1,193 @@
+From d65bce3c295dd987dfc13582b31ededbe7dd1c02 Mon Sep 17 00:00:00 2001
+From: Shivam Sharma <shivamhwp@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 15:30:30 +0000
+Subject: [PATCH 2/3] screencast: get a first frame without waiting for damage
+
+A stream whose consumer has no image yet, because it just started or
+PipeWire just reallocated its buffers, gets nothing from an unchanged
+output:
+
+- wlr-screencopy's copy_with_damage only completes once the output
+  changes, so a second recording started on a static screen never gets
+  its first frame.
+- an ext-image-copy capture session only sends its first frame without
+  waiting; later captures wait for output damage (wlroots 0.19
+  frame_handle_capture). After a renegotiation, or a resume that
+  reallocates buffers, a static screen sends no frame into the new
+  buffers.
+
+Remember when the consumer has no image. wlr-screencopy then uses a
+plain copy, and ext-image-copy starts a new capture session if the
+current one already delivered a frame. Both go back to damage-driven
+captures after the next ready frame, so an idle output still costs
+nothing.
+
+A new capture session repeats the buffer constraints we already use, so
+ignore constraints that did not change instead of renegotiating the
+stream again.
+---
+ include/screencast_common.h          |  6 ++++++
+ src/screencast/ext_image_copy.c      | 17 +++++++++++++++++
+ src/screencast/pipewire_screencast.c |  2 ++
+ src/screencast/screencast_common.c   | 24 ++++++++++++++++++++++++
+ src/screencast/wlr_screencopy.c      |  9 ++++++++-
+ 5 files changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/include/screencast_common.h b/include/screencast_common.h
+index bccedc1..7ba85f1 100644
+--- a/include/screencast_common.h
++++ b/include/screencast_common.h
+@@ -171,6 +171,8 @@ struct xdpw_buffer_constraints {
+ struct xdpw_screencast_ext_session {
+ 	struct ext_image_copy_capture_session_v1 *capture_session;
+ 	struct ext_image_copy_capture_frame_v1 *frame;
++	// capture_session already delivered a frame, so it waits for damage.
++	bool delivered;
+ };
+ 
+ struct xdpw_screencast_wlr_session {
+@@ -188,6 +190,9 @@ struct xdpw_screencast_instance {
+ 	struct xdpw_frame current_frame;
+ 	struct wl_list buffer_list;
+ 	bool avoid_dmabufs;
++	// The consumer has no image yet (new stream or new buffers), so the next
++	// capture must not wait for the output to change.
++	bool need_full_frame;
+ 
+ 	// pipewire
+ 	struct pw_stream *stream;
+@@ -246,6 +251,7 @@ void xdpw_buffer_destroy(struct xdpw_buffer *buffer);
+ void xdpw_buffer_constraints_init(struct xdpw_buffer_constraints *constraints);
+ void xdpw_buffer_constraints_finish(struct xdpw_buffer_constraints *constraints);
+ bool xdpw_buffer_constraints_move(struct xdpw_buffer_constraints *dst, struct xdpw_buffer_constraints *src);
++bool xdpw_buffer_constraints_equal(struct xdpw_buffer_constraints *a, struct xdpw_buffer_constraints *b);
+ uint32_t xdpw_count_dmabuf_modifiers(struct xdpw_screencast_instance *cast, uint32_t drm_format);
+ void xdpw_query_dmabuf_modifiers(struct xdpw_screencast_instance *cast, uint32_t drm_format,
+ 		uint64_t *modifiers, uint32_t num_modifiers);
+diff --git a/src/screencast/ext_image_copy.c b/src/screencast/ext_image_copy.c
+index 2fd369b..26534db 100644
+--- a/src/screencast/ext_image_copy.c
++++ b/src/screencast/ext_image_copy.c
+@@ -130,6 +130,12 @@ static void ext_session_done(void *data,
+ 		fmt->stride = bpp * cast->pending_constraints.width;
+ 	}
+ 
++	if (xdpw_buffer_constraints_equal(&cast->current_constraints, &cast->pending_constraints)) {
++		// A new capture session repeats the constraints we already use.
++		xdpw_buffer_constraints_finish(&cast->pending_constraints);
++		xdpw_buffer_constraints_init(&cast->pending_constraints);
++		return;
++	}
+ 	if (xdpw_buffer_constraints_move(&cast->current_constraints, &cast->pending_constraints)) {
+ 		logprint(DEBUG, "ext: buffer constraints changed");
+ 		xdpw_gbm_device_update(cast);
+@@ -205,6 +211,8 @@ static void ext_frame_ready(void *data,
+ 
+ 	struct xdpw_buffer *buffer = cast->current_frame.xdpw_buffer;
+ 	cast->current_frame.completed = true;
++	cast->ext_session.delivered = true;
++	cast->need_full_frame = false;
+ 	xdpw_pwr_enqueue_buffer(cast);
+ 	if (buffer) {
+ 		// Clear damage for the buffer that was just submitted
+@@ -264,6 +272,7 @@ static void ext_register_session_cb(struct xdpw_screencast_instance *cast) {
+ 	}
+ 	assert(source != NULL);
+ 
++	cast->ext_session.delivered = false;
+ 	cast->ext_session.capture_session = ext_image_copy_capture_manager_v1_create_session(
+ 			cast->ctx->ext_image_copy_capture_manager, source,
+ 			cast->target->with_cursor ? EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS : 0);
+@@ -302,6 +311,14 @@ void xdpw_ext_ic_frame_capture(struct xdpw_screencast_instance *cast) {
+ 		logprint(ERROR, "ext: started frame without buffer");
+ 		return;
+ 	}
++	if (cast->need_full_frame && cast->ext_session.delivered) {
++		// The consumer has no image in its new buffers. A capture session
++		// waits for the output to change after its first frame, so only a
++		// new session gets one from a static output.
++		logprint(DEBUG, "ext: new capture session for a full frame");
++		ext_image_copy_capture_session_v1_destroy(cast->ext_session.capture_session);
++		cast->ext_session.capture_session = NULL;
++	}
+ 
+ 	ext_register_frame_cb(cast);
+ }
+diff --git a/src/screencast/pipewire_screencast.c b/src/screencast/pipewire_screencast.c
+index af7a96b..7bbe442 100644
+--- a/src/screencast/pipewire_screencast.c
++++ b/src/screencast/pipewire_screencast.c
+@@ -505,6 +505,8 @@ static void pwr_handle_stream_add_buffer(void *data, struct pw_buffer *buffer) {
+ 
+ 	logprint(DEBUG, "pipewire: add buffer event handle");
+ 
++	cast->need_full_frame = true;
++
+ 	d = buffer->buffer->datas;
+ 
+ 	// Select buffer type from negotiation result
+diff --git a/src/screencast/screencast_common.c b/src/screencast/screencast_common.c
+index 721da03..f6b99c8 100644
+--- a/src/screencast/screencast_common.c
++++ b/src/screencast/screencast_common.c
+@@ -471,6 +471,30 @@ bool xdpw_buffer_constraints_move(struct xdpw_buffer_constraints *dst, struct xd
+ 	return dirty;
+ }
+ 
++bool xdpw_buffer_constraints_equal(struct xdpw_buffer_constraints *a, struct xdpw_buffer_constraints *b) {
++	if (a->width != b->width || a->height != b->height || a->dmabuf_device != b->dmabuf_device ||
++			a->shm_formats.size != b->shm_formats.size ||
++			a->dmabuf_format_modifier_pairs.size != b->dmabuf_format_modifier_pairs.size) {
++		return false;
++	}
++	// Compare fields, not bytes: the structs have padding.
++	struct xdpw_shm_format *shm_b = b->shm_formats.data, *shm_a;
++	wl_array_for_each(shm_a, &a->shm_formats) {
++		if (shm_a->fourcc != shm_b->fourcc || shm_a->stride != shm_b->stride) {
++			return false;
++		}
++		shm_b++;
++	}
++	struct xdpw_format_modifier_pair *pair_b = b->dmabuf_format_modifier_pairs.data, *pair_a;
++	wl_array_for_each(pair_a, &a->dmabuf_format_modifier_pairs) {
++		if (pair_a->fourcc != pair_b->fourcc || pair_a->modifier != pair_b->modifier) {
++			return false;
++		}
++		pair_b++;
++	}
++	return true;
++}
++
+ uint32_t xdpw_count_dmabuf_modifiers(struct xdpw_screencast_instance *cast, uint32_t drm_format) {
+ 	struct xdpw_buffer_constraints *constraints = &cast->current_constraints;
+ 	uint32_t modifiers = 0;
+diff --git a/src/screencast/wlr_screencopy.c b/src/screencast/wlr_screencopy.c
+index 76c98bc..2c0283d 100644
+--- a/src/screencast/wlr_screencopy.c
++++ b/src/screencast/wlr_screencopy.c
+@@ -156,7 +156,13 @@ static void wlr_frame_buffer_done(void *data,
+ 	struct xdpw_buffer *buffer = cast->current_frame.xdpw_buffer;
+ 	buffer->damage.size = 0;
+ 
+-	zwlr_screencopy_frame_v1_copy_with_damage(frame, cast->current_frame.xdpw_buffer->buffer);
++	if (cast->need_full_frame) {
++		// copy_with_damage waits for the output to change, which never
++		// happens on a static screen.
++		zwlr_screencopy_frame_v1_copy(frame, cast->current_frame.xdpw_buffer->buffer);
++	} else {
++		zwlr_screencopy_frame_v1_copy_with_damage(frame, cast->current_frame.xdpw_buffer->buffer);
++	}
+ 	logprint(TRACE, "wlroots: frame copied");
+ }
+ 
+@@ -198,6 +204,7 @@ static void wlr_frame_ready(void *data, struct zwlr_screencopy_frame_v1 *frame,
+ 	cast->current_frame.tv_sec = ((((uint64_t)tv_sec_hi) << 32) | tv_sec_lo);
+ 	cast->current_frame.tv_nsec = tv_nsec;
+ 	cast->current_frame.completed = true;
++	cast->need_full_frame = false;
+ 	logprint(TRACE, "wlroots: timestamp %"PRIu64":%"PRIu32, cast->current_frame.tv_sec, cast->current_frame.tv_nsec);
+ 
+ 	xdpw_pwr_enqueue_buffer(cast);
+-- 
+2.39.5
+
