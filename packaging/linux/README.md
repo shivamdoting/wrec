@@ -113,6 +113,16 @@ an idle screen is seconds before it rendered the picture. A timestamp no later
 than the previous frame's says nothing about when its picture was made, so
 that frame is stamped with when it arrived.
 
+That stale stamp also moves video on KDE Plasma 6.6 and 6.7: a change that
+follows less than about a second of stillness lands early by the length of the
+stillness, and the first change after a resume can be lost. KWin fixed this
+upstream for Plasma 6.8. Linux support on KDE is experimental, and the only
+validated KDE stack is Ubuntu 26.04's KWin 4:6.6.6-0ubuntu0.1 with that fix
+backported into its screencast plugin. The backport, its source pins, build
+script, opt-in and undo are in
+[`packaging/linux/kwin-6.6.6`](https://github.com/shivamdoting/wrec/tree/main/packaging/linux/kwin-6.6.6)
+in the wrec repository. The wrec package does not include, install or load it.
+
 A screen-capture stream can share frames as plain pointers into PipeWire's
 memory (MemPtr) instead of file descriptors (MemFd or DMA-BUF). PipeWire
 unmaps that memory when the producer exits, even while wrec still uses a
@@ -406,6 +416,12 @@ that discard with the loss. This prevented early audio in the controlled
 0.1 and 0.3 s server-stall tests, at the cost of 5 to 13 ms of additional
 audio per loss. It cannot protect audio already sent before the loss was
 known, or a graph loss with no break in arriving audio.
+In a virtual machine whose host caps its CPU, starting a recording can push the
+guest over the cap, and the host then stops the whole guest for tens of
+milliseconds at a time. The guest's audio graph misses cycles, and that audio
+never reaches wrec, which reports it. On a 2-vCPU KDE VM capped at 150% this
+lost 0.03 to 0.07 s of microphone audio in the first second of 7 of 88
+recordings.
 When PulseAudio drops audio for a recorder that fell more than both buffers
 behind, it drops it in pieces over the following second, and in the controlled
 tests 1280 to 2720 frames (27 to 57 ms) of that second played early, by 9 ms up
