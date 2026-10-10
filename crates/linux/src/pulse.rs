@@ -548,10 +548,11 @@ impl Reader {
 
     // What lost audio the server stopped sending at `now`. A server drops
     // audio for a reader only once it holds a buffer's worth for it, so the
-    // loss is wrec's if the server lately held half that. A machine that
+    // loss is wrec's if the server held half that within the last buffer's
+    // length, which covers the answers that confirm a loss. A machine that
     // froze stops the server with wrec, which leaves it nothing to hold.
     fn lost_by(&self, now: i64) -> gst::BufferFlags {
-        let lately = 2 * self.buffer.nseconds() as i64;
+        let lately = self.buffer.nseconds() as i64;
         if self.backlogged.is_some_and(|at| now - at <= lately) {
             FELL_BEHIND
         } else {
@@ -760,9 +761,15 @@ impl Reader {
         }
         if self.stamps.steps.len() > steps {
             let from = self.stamps.steps.last().unwrap().0;
-            self.losses.push((from, self.lost_by(at)));
-            if self.graph_holds {
-                self.drop_held_between(steady, from);
+            let lost_by = self.lost_by(at);
+            self.losses.push((from, lost_by));
+            // Audio kept after what went can start before the step.
+            if let Some(end) = self
+                .graph_holds
+                .then(|| self.drop_held_between(steady, from))
+                .flatten()
+            {
+                self.losses.push((end, lost_by));
             }
         }
         if !self.holding() {
@@ -856,10 +863,11 @@ impl Reader {
 
     // Held audio from `from` to `to` has no known place: it goes, and audio
     // before `from` and from `to` on stays, also from a buffer either falls
-    // inside.
-    fn drop_held_between(&mut self, from: i64, to: i64) {
+    // inside. Returns where the audio that went ends, if any went.
+    fn drop_held_between(&mut self, from: i64, to: i64) -> Option<i64> {
         let unanswered = self.held.len() - self.unanswered;
         let first = self.held.get(unanswered).map_or(i64::MAX, |held| held.0);
+        let mut dropped = None;
         self.held = std::mem::take(&mut self.held)
             .into_iter()
             .flat_map(|(position, buffer)| {
@@ -867,6 +875,7 @@ impl Reader {
                 if end <= from || position >= to {
                     return [Some((position, buffer)), None];
                 }
+                dropped = dropped.max(Some(end.min(to)));
                 let part = |start: i64, stop: i64| {
                     (start < stop).then(|| {
                         let range = (start - position) as usize..(stop - position) as usize;
@@ -879,6 +888,7 @@ impl Reader {
             .flatten()
             .collect();
         self.unanswered = self.held.iter().filter(|held| held.0 >= first).count();
+        dropped
     }
 
     fn holding(&self) -> bool {
@@ -1851,6 +1861,63 @@ mod tests {
                 "{cuts:?} {answer_first}: {gap} ns, not {missing}"
             );
         }
+    }
+
+    // Every jump in the audio's time, as pipewire-pulse audio after a loss
+    // gets it, comes on a buffer that says what lost the audio before it.
+    fn assert_every_gap_says_why(sent: &[Sent]) -> usize {
+        let mut gaps = 0;
+        for pair in sent.windows(2) {
+            let gap = pair[1].pts - (pair[0].pts + pair[0].duration);
+            if gap > crate::pipeline::AUDIO_HOLE.nseconds() as i64 {
+                assert_eq!(
+                    pair[1].lost_by, SERVER_LOST,
+                    "{:?} after {:?}",
+                    pair[1], pair[0]
+                );
+                gaps += 1;
+            }
+        }
+        gaps
+    }
+
+    // pipewire-pulse stops for 300 ms at 3 s while its graph loses audio.
+    // Resuming, it sends 50 ms in short buffers, then answers the questions
+    // asked meanwhile before it sends the rest. Its answers count 240 frames
+    // still in its graph, so they confirm the loss past the audio that
+    // arrived, which goes. The audio after that starts before the step, so
+    // the gap the discard leaves comes on its first buffer, not the step's.
+    #[test]
+    fn audio_discarded_before_a_pipewire_pulse_step_says_the_server_lost_it() {
+        const LOST: u64 = 300 * 48;
+        const HELD: u64 = 2400;
+        let mut wire = Wire::new();
+        wire.reader.graph_holds = true;
+        wire.steady(0..300);
+        for ms in [3100, 3200, 3300] {
+            wire.tick(ms);
+        }
+        for n in 0..HELD / 96 {
+            let start = 144000 + n * 96;
+            wire.audio(3310, start + LOST..start + 96 + LOST);
+        }
+        for k in 1..=3u64 {
+            let write = 144000 + HELD + k * 96;
+            wire.tick(3311 + k as i64);
+            wire.answer_with(3311 + k as i64, write, 144000 + HELD, 5000);
+        }
+        for n in 0..100u64 {
+            let start = 144000 + HELD + n * 96;
+            wire.audio(3320 + n as i64 * 2, start + LOST..start + 96 + LOST);
+        }
+        let mut ms = 3520;
+        for n in 326..400u64 {
+            ms += 10;
+            wire.tick(ms);
+            wire.audio(ms, n * 480 + LOST..(n + 1) * 480 + LOST);
+            wire.answer_with(ms, (n + 1) * 480, (n + 1) * 480, 5000);
+        }
+        assert_eq!(assert_every_gap_says_why(&wire.sent()), 2);
     }
 
     // A buffer a step falls inside goes out in two: its audio up to the step
