@@ -185,6 +185,22 @@ def main():
                 assert run("daemon", "status", "--json")["pid"] == daemon_pid, "daemon restarted after the captured window was unmapped"
                 print("PASS: unmapping a captured X11 window fails only that recording; the queued job records next in the same daemon")
 
+                held_id = submit("display:0", "h264")
+                wait(held_id, "recording")
+                held_workers = workers(daemon_pid)
+                assert len(held_workers) == 1, held_workers
+                time.sleep(1)
+                os.kill(held_workers[0], signal.SIGSTOP)
+                time.sleep(2)
+                os.kill(held_workers[0], signal.SIGCONT)
+                time.sleep(1)
+                run("job", "stop", str(held_id), "--json")
+                held = wait(held_id, "completed")
+                verify(held, "h264")
+                frozen_warnings = [w["message"] for w in held["warnings"] if w["code"] == "media_lost"]
+                assert any("wrec did not run for 2." in message for message in frozen_warnings), held
+                print("PASS: a capture worker stopped for 2 s finishes its movie and warns that the video may hold one picture there")
+
                 frozen_id = submit("display:0", "h264")
                 wait(frozen_id, "recording")
                 frozen_workers = workers(daemon_pid)

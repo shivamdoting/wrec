@@ -456,6 +456,21 @@ gaps, or a track ended early or never started, the job finishes `completed` with
 a `media_lost` warning that states what is missing, and the job events record
 where wrec placed each audio gap. `wrec record` prints the warning when it finishes.
 
+The warning says what lost each track's audio. "The audio server lost" means
+PulseAudio or `pipewire-pulse` lost it while wrec kept up, as when the machine
+froze; it includes the few milliseconds wrec discards around a PipeWire graph
+loss. "wrec fell behind reading" means the server had lately held at least half
+a second of audio wrec had not read when it dropped audio, as when the movie
+writer or wrec's own process stalled. A gap whose source did not say why is
+reported as such, and an end that had not arrived by the stop separately.
+
+When wrec's process does not run for more than half a second while recording,
+as when it is stopped or the machine freezes, no new picture reaches the movie
+meanwhile and it shows the last one for that long. The warning says when and
+for how long. wrec cannot tell a screen that sent no new frames from a
+compositor that stopped sending them, so a compositor that stalls on its own
+still leaves a held picture without a warning.
+
 On Wayland, a recording watches four things besides its frames: the ScreenCast
 session's `Closed` signal, the D-Bus owner of `org.freedesktop.portal.Desktop`,
 the PipeWire remote socket the portal returned, and the selected PipeWire node.

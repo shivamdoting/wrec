@@ -179,6 +179,21 @@ const FRAGMENT: gst::ClockTime = gst::ClockTime::from_mseconds(10);
 // How long a server can take to accept the connection and the stream.
 const CONNECTING: Duration = Duration::from_secs(10);
 
+// The first buffer after audio went missing says what lost it, in buffer
+// flags GStreamer leaves to applications. The server lost it, or dropped it
+// because wrec fell behind reading.
+pub(crate) const SERVER_LOST: gst::BufferFlags =
+    gst::BufferFlags::from_bits_retain(gst::ffi::GST_BUFFER_FLAG_LAST);
+pub(crate) const FELL_BEHIND: gst::BufferFlags =
+    gst::BufferFlags::from_bits_retain(gst::ffi::GST_BUFFER_FLAG_LAST << 1);
+
+// What lost the audio before `buffer`, if anything. gstreamer-rs leaves out
+// flags it doesn't know when it reads them.
+pub(crate) fn lost_by(buffer: &gst::BufferRef) -> gst::BufferFlags {
+    let flags = unsafe { (*buffer.as_ptr()).mini_object.flags };
+    gst::BufferFlags::from_bits_retain(flags) & (SERVER_LOST | FELL_BEHIND)
+}
+
 fn bytes_of(time: gst::ClockTime) -> u32 {
     (time.nseconds() * RATE as u64 / 1_000_000_000) as u32 * FRAME as u32
 }
@@ -394,6 +409,11 @@ struct Reader {
     resumed: bool,
     // pipewire-pulse, whose latency is audio in its graph, which it can lose.
     graph_holds: bool,
+    // When an answer last said the server held at least half a buffer that
+    // wrec had not read yet, in running time.
+    backlogged: Option<i64>,
+    // Where audio after a loss starts, and what lost it.
+    losses: Vec<(i64, gst::BufferFlags)>,
 }
 
 fn error_text(library: &Library, context: *mut Context) -> String {
@@ -521,6 +541,21 @@ impl Reader {
             last_arrival: None,
             resumed: false,
             graph_holds: false,
+            backlogged: None,
+            losses: Vec::new(),
+        }
+    }
+
+    // What lost audio the server stopped sending at `now`. A server drops
+    // audio for a reader only once it holds a buffer's worth for it, so the
+    // loss is wrec's if the server lately held half that. A machine that
+    // froze stops the server with wrec, which leaves it nothing to hold.
+    fn lost_by(&self, now: i64) -> gst::BufferFlags {
+        let lately = 2 * self.buffer.nseconds() as i64;
+        if self.backlogged.is_some_and(|at| now - at <= lately) {
+            FELL_BEHIND
+        } else {
+            SERVER_LOST
         }
     }
 
@@ -680,10 +715,19 @@ impl Reader {
         let (Some(info), Some((_, now))) = (info.as_ref(), self.now()) else {
             return;
         };
+        let at = now.nseconds() as i64;
+        if success
+            && info.read_index_corrupt == 0
+            && info.write_index_corrupt == 0
+            && info.write_index - info.read_index >= bytes_of(self.buffer) as i64 / 2
+        {
+            self.backlogged = Some(at);
+        }
         if success && info.read_index_corrupt == 0 {
             if info.read_index > self.position {
                 self.held.truncate(self.held.len() - self.unanswered);
                 self.position = info.read_index;
+                self.losses.push((self.position, self.lost_by(at)));
             }
             self.unanswered = 0;
             self.late = false;
@@ -714,8 +758,12 @@ impl Reader {
         {
             self.resumed = false;
         }
-        if self.graph_holds && self.stamps.steps.len() > steps {
-            self.drop_held_between(steady, self.stamps.steps.last().unwrap().0);
+        if self.stamps.steps.len() > steps {
+            let from = self.stamps.steps.last().unwrap().0;
+            self.losses.push((from, self.lost_by(at)));
+            if self.graph_holds {
+                self.drop_held_between(steady, from);
+            }
         }
         if !self.holding() {
             self.release();
@@ -747,6 +795,7 @@ impl Reader {
             // A hole is audio the server skipped.
             if data.is_null() {
                 (self.library.stream_drop)(self.stream);
+                self.losses.push((self.position, SERVER_LOST));
                 continue;
             }
             let mut buffer = gst::Buffer::with_size(length).unwrap();
@@ -871,8 +920,16 @@ impl Reader {
             pts = self.stamps.pts(position).unwrap().max(0);
         }
         let duration = time_of(position + buffer.size() as i64) - time_of(position);
+        let mut lost_by = gst::BufferFlags::empty();
+        self.losses.retain(|&(from, by)| {
+            if from <= position {
+                lost_by |= by;
+            }
+            from > position
+        });
         {
             let buffer = buffer.get_mut().unwrap();
+            buffer.set_flags(lost_by);
             buffer.set_pts(gst::ClockTime::from_nseconds(pts as u64));
             buffer.set_duration(gst::ClockTime::from_nseconds(duration as u64));
             if self.end != Some(pts) {
@@ -1337,7 +1394,8 @@ mod tests {
             .collect()
     }
 
-    // A buffer a Reader sent, with its first and last frame.
+    // A buffer a Reader sent, with its first and last frame, and what lost
+    // the audio before it.
     #[derive(Debug, PartialEq)]
     struct Sent {
         pts: i64,
@@ -1345,6 +1403,7 @@ mod tests {
         discont: bool,
         first: u64,
         last: u64,
+        lost_by: gst::BufferFlags,
     }
 
     // A Reader on a fake libpulse whose server sends fragment n, frames
@@ -1536,6 +1595,7 @@ mod tests {
                     discont: buffer.flags().contains(gst::BufferFlags::DISCONT),
                     first: frame(0),
                     last: frame(map.len() / FRAME - 1),
+                    lost_by: super::lost_by(buffer),
                 });
             }
             self.pipeline.set_state(gst::State::Null).unwrap();
@@ -1572,9 +1632,23 @@ mod tests {
             if buffer.first != next {
                 assert!(buffer.discont, "{buffer:?}");
                 missing.push((next, buffer.first));
+            } else {
+                assert!(
+                    buffer.lost_by.is_empty(),
+                    "{buffer:?} says it follows a loss"
+                );
             }
         }
         missing
+    }
+
+    // What lost the audio before each buffer after a gap.
+    fn lost_by(sent: &[Sent]) -> Vec<gst::BufferFlags> {
+        assert_placed(sent);
+        sent.windows(2)
+            .filter(|pair| pair[1].first != pair[0].last + 1)
+            .map(|pair| pair[1].lost_by)
+            .collect()
     }
 
     // pipewire-pulse's main thread stops for 1.05 s while its data thread
@@ -1596,6 +1670,8 @@ mod tests {
         let sent = wire.sent();
         assert_eq!(assert_placed(&sent), [(300 * 480, 405 * 480)]);
         assert_eq!(sent.last().unwrap().last, 500 * 480 - 1);
+        // The reader kept asking, and the server held nothing for it.
+        assert_eq!(lost_by(&sent), [SERVER_LOST]);
     }
 
     // The reader stops at 3 s for 2.5 s. Half a second of audio waits in the
@@ -1619,6 +1695,7 @@ mod tests {
         let sent = wire.sent();
         assert_eq!(assert_placed(&sent), [(351 * 480, 550 * 480)]);
         assert_eq!(sent.last().unwrap().last, 650 * 480 - 1);
+        assert_eq!(lost_by(&sent), [FELL_BEHIND]);
     }
 
     // The same for 0.6 s, which the server holds: nothing is lost.
@@ -1639,6 +1716,35 @@ mod tests {
         assert_eq!(sent.last().unwrap().last, 450 * 480 - 1);
     }
 
+    // The reader stops at 3 s for 2 s. PulseAudio holds a second of audio
+    // for it and drops what it captures after that, so its write index
+    // stops at frame 192000 until the reader takes up again. When it does,
+    // the socket gives it 0.4 s, and the server says it still holds 0.6 s.
+    // So the reader fell behind.
+    #[test]
+    fn audio_pulseaudio_dropped_for_a_reader_that_stopped_is_wrecs_loss() {
+        const LOST: u64 = 48000;
+        let mut wire = Wire::new();
+        wire.steady(0..300);
+        for n in 300..340 {
+            wire.audio(5000, n * 480..(n + 1) * 480);
+        }
+        wire.tick(5000);
+        wire.answer(5000, 400 * 480, 340 * 480);
+        for n in 340..400 {
+            wire.audio(5001, n * 480..(n + 1) * 480);
+        }
+        for n in 400..500 {
+            let ms = (n as i64 + 1) * 10 + 1000;
+            wire.tick(ms);
+            wire.audio(ms, n * 480 + LOST..(n + 1) * 480 + LOST);
+            wire.answer(ms, (n + 1) * 480, (n + 1) * 480);
+        }
+        let sent = wire.sent();
+        assert_eq!(assert_placed(&sent), [(192000, 192000 + LOST)]);
+        assert_eq!(lost_by(&sent), [FELL_BEHIND]);
+    }
+
     // pipewire-pulse stops whole for 300 ms at 3 s; its graph keeps going
     // and its stream misses 298 ms of cycles. Resuming, it answers first,
     // with the write index of its last cycle, frame 144000, and 240 frames
@@ -1650,6 +1756,7 @@ mod tests {
     fn audio_pipewire_pulse_took_in_after_a_loss_it_had_not_reported_is_lost_with_it() {
         let sent = graph_loss(144000, &[144000], false);
         assert_eq!(assert_placed(&sent), [(144000, 144240 + LOST)]);
+        assert_eq!(lost_by(&sent), [SERVER_LOST]);
     }
 
     // Frames pipewire-pulse lost in its graph in graph_loss.
@@ -1729,6 +1836,7 @@ mod tests {
             let sent = graph_loss(sent, cuts, answer_first);
             let lost = assert_placed(&sent);
             assert_eq!(lost, [(144000, 144240 + LOST)], "{cuts:?} {answer_first}");
+            assert_eq!(lost_by(&sent), [SERVER_LOST], "{cuts:?} {answer_first}");
             let at = sent
                 .iter()
                 .position(|buffer| buffer.first == around[0].0)
@@ -1771,6 +1879,7 @@ mod tests {
                     discont: true,
                     first: 480,
                     last: 959,
+                    lost_by: gst::BufferFlags::empty(),
                 },
                 Sent {
                     pts: time(960),
@@ -1778,6 +1887,7 @@ mod tests {
                     discont: false,
                     first: 960,
                     last: 999,
+                    lost_by: gst::BufferFlags::empty(),
                 },
                 Sent {
                     pts: time(1000) + 480 * MS,
@@ -1785,6 +1895,7 @@ mod tests {
                     discont: true,
                     first: 1000,
                     last: 1439,
+                    lost_by: gst::BufferFlags::empty(),
                 },
             ]
         );

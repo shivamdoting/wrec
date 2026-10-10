@@ -989,8 +989,8 @@ struct AudioTrack {
     pad: gst::Pad,
     probe: Option<gst::PadProbeId>,
     state: Arc<AtomicU8>,
-    // Nanoseconds of audio missing between captured buffers.
-    lost: Arc<AtomicU64>,
+    // Audio missing between captured buffers.
+    lost: Arc<LostAudio>,
     // Where the captured audio ends, in running time.
     end: Arc<Mutex<Option<gst::ClockTime>>>,
     // Where in the movie the track failed, and why.
@@ -1073,7 +1073,7 @@ impl Movie {
         name: &'static str,
         queue: &gst::Element,
         source: &gst::Element,
-        lost: Arc<AtomicU64>,
+        lost: Arc<LostAudio>,
         end: Arc<Mutex<Option<gst::ClockTime>>>,
     ) {
         let pad = queue.static_pad("src").unwrap();
@@ -1207,7 +1207,7 @@ fn add_audio_source(
     counters: &Arc<Counters>,
 ) -> Result<()> {
     // Counted before pausing drops anything.
-    let lost = Arc::new(AtomicU64::new(0));
+    let lost = Arc::new(LostAudio::default());
     let end = Arc::new(Mutex::new(None));
     count_lost_audio(source, lost.clone(), end.clone(), counters.clone());
     attach_audio_timing_probe(source, counters.clone());
@@ -1249,6 +1249,55 @@ fn add_audio_source(
 // skipped audio, so a longer jump is lost audio.
 pub(crate) const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 
+// Nanoseconds of audio missing between captured buffers, by what lost it, as
+// the first buffer after each gap says.
+#[derive(Default)]
+struct LostAudio {
+    // The audio server lost it while wrec kept up.
+    by_server: AtomicU64,
+    // The server dropped it because wrec fell behind reading.
+    by_wrec: AtomicU64,
+    // The source didn't say.
+    unexplained: AtomicU64,
+}
+
+impl LostAudio {
+    fn add(&self, missing: gst::ClockTime, flags: gst::BufferFlags) {
+        let counter = if flags.contains(crate::pulse::FELL_BEHIND) {
+            &self.by_wrec
+        } else if flags.contains(crate::pulse::SERVER_LOST) {
+            &self.by_server
+        } else {
+            &self.unexplained
+        };
+        counter.fetch_add(missing.nseconds(), Ordering::Relaxed);
+    }
+
+    // By the server, by wrec, unexplained.
+    fn amounts(&self) -> [u64; 3] {
+        [&self.by_server, &self.by_wrec, &self.unexplained]
+            .map(|counter| counter.load(Ordering::Relaxed))
+    }
+}
+
+// What lost these amounts, such as "the audio server lost 0.20 s". The
+// server's share includes the few milliseconds pulse.rs discards around a
+// PipeWire graph loss because their place is unknown.
+fn loss_causes(amounts: [u64; 3]) -> String {
+    let causes = [
+        "the audio server lost {} s",
+        "wrec fell behind reading and the audio server dropped {} s",
+        "{} s went missing without its source saying why",
+    ];
+    amounts
+        .into_iter()
+        .zip(causes)
+        .filter(|&(amount, _)| amount > 0)
+        .map(|(amount, cause)| cause.replace("{}", &format!("{:.2}", amount as f64 / 1e9)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // Counts audio missing between consecutive captured buffers, before pausing
 // drops any. Audio a source's server lost leaves the next buffer stamped
 // where capture actually resumed. Sources keep capturing while paused, so a
@@ -1257,7 +1306,7 @@ pub(crate) const AUDIO_HOLE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 // `next` is where the next buffer should start.
 fn count_lost_audio(
     source: &gst::Element,
-    lost: Arc<AtomicU64>,
+    lost: Arc<LostAudio>,
     next: Arc<Mutex<Option<gst::ClockTime>>>,
     counters: Arc<Counters>,
 ) {
@@ -1265,12 +1314,18 @@ fn count_lost_audio(
         .static_pad("src")
         .unwrap()
         .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-            let Some((pts, duration)) = info
-                .buffer()
-                .and_then(|buffer| buffer.pts().zip(buffer.duration()))
-            else {
+            let Some(buffer) = info.buffer_mut() else {
                 return gst::PadProbeReturn::Ok;
             };
+            let Some((pts, duration)) = buffer.pts().zip(buffer.duration()) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            // Flags past GST_BUFFER_FLAG_LAST mean other things to video
+            // elements, so they stop here.
+            let lost_by = crate::pulse::lost_by(buffer);
+            if !lost_by.is_empty() {
+                buffer.make_mut().unset_flags(lost_by);
+            }
             let mut next = next.lock().unwrap();
             if let Some(expected) = next.filter(|&expected| pts > expected) {
                 let paused = counters
@@ -1280,7 +1335,7 @@ fn count_lost_audio(
                     .paused_between(expected, pts);
                 let missing = pts.saturating_sub(expected).saturating_sub(paused);
                 if missing > AUDIO_HOLE {
-                    lost.fetch_add(missing.nseconds(), Ordering::Relaxed);
+                    lost.add(missing, lost_by);
                 }
             }
             *next = Some(pts + duration);
@@ -1626,9 +1681,11 @@ fn run(
     let mut stopping = None;
     let mut last_metrics = Instant::now();
     let mut omitted = Vec::new();
-    let mut logged_lost = vec![0; movie.audio.len()];
+    let mut logged_lost = vec![[0; 3]; movie.audio.len()];
     let mut most_buffered = 0;
     let mut video_cut = false;
+    // Where in the movie wrec was frozen, and for how long.
+    let mut frozen = Vec::new();
     let log = |message: String| {
         let _ = events.send(RecorderEvent::Log {
             session_id: Some(session.id),
@@ -1675,7 +1732,25 @@ fn run(
             };
             let _ = reply.send(result);
         }
-        if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
+        let waiting = Instant::now();
+        let popped = bus.timed_pop(gst::ClockTime::from_nseconds(POLL.as_nanos() as u64));
+        if let (true, None, Some(now)) = (started, stopping, pipeline.current_running_time()) {
+            let froze = waiting.elapsed().saturating_sub(POLL);
+            let froze = gst::ClockTime::from_nseconds(froze.as_nanos() as u64);
+            let timeline = counters.timeline.lock().unwrap();
+            let recorded =
+                froze.saturating_sub(timeline.paused_between(now.saturating_sub(froze), now));
+            if recorded > FROZEN {
+                let at = timeline.position(now).saturating_sub(recorded);
+                log(format!(
+                    "capture-engine: wrec did not run for {:.1} s from {:.1} s; the video may show one picture held there",
+                    seconds(recorded),
+                    seconds(at)
+                ));
+                frozen.push((at, recorded));
+            }
+        }
+        if let Some(message) = popped {
             match message.view() {
                 gst::MessageView::Error(error) => {
                     // A failed audio source, such as one whose server went
@@ -1730,6 +1805,7 @@ fn run(
                         &omitted,
                         dropped_frames(pipeline, counters),
                         video_cut,
+                        &frozen,
                         &counters.timeline.lock().unwrap(),
                     ) {
                         let _ = events.send(RecorderEvent::MediaLost {
@@ -1799,13 +1875,15 @@ fn run(
                 .unwrap()
                 .position(pipeline.current_running_time().unwrap_or_default());
             for (track, logged) in movie.audio.iter().zip(&mut logged_lost) {
-                let lost = track.lost.load(Ordering::Relaxed);
-                if lost > *logged {
+                let lost = track.lost.amounts();
+                let new = std::array::from_fn(|i| lost[i] - logged[i]);
+                if new.iter().any(|&amount| amount > 0) {
                     log(format!(
-                        "capture-engine: {} lost {:.2} s of audio before {:.1} s; the movie has a gap there",
+                        "capture-engine: {} lost {:.2} s of audio before {:.1} s ({}); the movie has a gap there",
                         track.name,
-                        (lost - *logged) as f64 / 1e9,
-                        seconds(position)
+                        new.iter().sum::<u64>() as f64 / 1e9,
+                        seconds(position),
+                        loss_causes(new)
                     ));
                     *logged = lost;
                 }
@@ -1822,6 +1900,17 @@ fn run(
         }
     }
 }
+
+// How long the run loop waits for a message on each pass.
+const POLL: Duration = Duration::from_millis(100);
+
+// The run loop waits on the bus most of the time, so a wait that ran this
+// much past POLL means wrec's process did not run meanwhile, as when it was
+// stopped or the machine froze. Nothing captured a picture then, so the movie
+// shows the one before for that long. A moving screen seen half a second
+// late shows. Waiting covers only the bus, not the loop's own work, which
+// can wait on the disk while capture goes on.
+const FROZEN: gst::ClockTime = gst::ClockTime::from_mseconds(500);
 
 // How long finalization may take before a stuck video track is ended at the
 // muxer, which then has half as long again.
@@ -1879,9 +1968,23 @@ fn media_lost(
     omitted: &[&str],
     dropped_frames: u64,
     video_cut: bool,
+    frozen: &[(gst::ClockTime, gst::ClockTime)],
     timeline: &Timeline,
 ) -> Option<String> {
     let mut lost = Vec::new();
+    match frozen {
+        [] => {}
+        [(at, length)] => lost.push(format!(
+            "wrec did not run for {:.1} s from {:.1} s, so the video may show one picture held there",
+            seconds(*length),
+            seconds(*at)
+        )),
+        _ => lost.push(format!(
+            "wrec did not run {} times, for {:.1} s in all, so the video may show one picture held each time",
+            frozen.len(),
+            frozen.iter().map(|&(_, length)| seconds(length)).sum::<f64>()
+        )),
+    }
     if video_cut {
         lost.push(format!(
             "video did not finish within {} s of stop, so the video ends early",
@@ -1892,15 +1995,26 @@ fn media_lost(
         lost.push(format!("{dropped_frames} video frames were dropped"));
     }
     for track in &movie.audio {
-        let mut missing = track.lost.load(Ordering::Relaxed);
+        let gaps = track.lost.amounts();
+        let mut causes = vec![loss_causes(gaps)];
+        let mut missing = gaps.iter().sum::<u64>();
         if track.failed.is_none() && !omitted.contains(&track.name) {
-            missing += missing_end(timeline, *track.end.lock().unwrap()).nseconds();
+            let end = missing_end(timeline, *track.end.lock().unwrap()).nseconds();
+            if end > 0 {
+                causes.push(format!(
+                    "its last {:.2} s before the stop had not arrived",
+                    end as f64 / 1e9
+                ));
+            }
+            missing += end;
         }
+        causes.retain(|cause| !cause.is_empty());
         if missing > 0 {
             lost.push(format!(
-                "{} is missing {:.2} s of audio",
+                "{} is missing {:.2} s of audio ({})",
                 track.name,
-                missing as f64 / 1e9
+                missing as f64 / 1e9,
+                causes.join(", ")
             ));
         }
         if let Some((position, reason)) = &track.failed {
@@ -3460,9 +3574,23 @@ mod tests {
         stopped: Option<String>,
         // When the recording had started.
         began: Instant,
+        // What the recording said its movie lost.
+        lost: String,
     }
 
     impl Recorded {
+        // Whether the recording said each of `causes`, and no other cause,
+        // lost audio.
+        fn lost_by(&self, causes: &[&str]) -> bool {
+            [
+                "the audio server lost",
+                "wrec fell behind",
+                "without its source saying why",
+            ]
+            .iter()
+            .all(|cause| self.lost.contains(cause) == causes.contains(cause))
+        }
+
         fn whole(&self) -> bool {
             self.hole == 0.0 && self.reported == 0.0 && self.after_video.abs() < 0.05
         }
@@ -3509,6 +3637,7 @@ mod tests {
                 .split_once("system audio stopped at ")
                 .map(|(_, rest)| rest.to_string()),
             began,
+            lost,
         }
     }
 
@@ -3740,6 +3869,7 @@ mod tests {
             recorded.after_video.abs() < 0.05,
             "{lost} s lost: {recorded:?}"
         );
+        assert!(recorded.lost_by(&["the audio server lost"]), "{recorded:?}");
     }
 
     // The same while the server's audio takes 250 ms longer to arrive: only
@@ -3766,6 +3896,7 @@ mod tests {
             recorded.after_video.abs() < 0.05,
             "{lost} s lost: {recorded:?}"
         );
+        assert!(recorded.lost_by(&["the audio server lost"]), "{recorded:?}");
     }
 
     // The wall clock of this process and of the audio servers it starts,
@@ -3939,6 +4070,7 @@ mod tests {
             recorded.after_video.abs() < 0.05,
             "{lost} s lost: {recorded:?}"
         );
+        assert!(recorded.lost_by(&["the audio server lost"]), "{recorded:?}");
     }
 
     // When downstream stops taking audio for 3.5 s, the source holds a
@@ -3962,6 +4094,7 @@ mod tests {
             "{recorded:?}"
         );
         assert!(recorded.after_video.abs() < 0.05, "{recorded:?}");
+        assert!(recorded.lost_by(&["wrec fell behind"]), "{recorded:?}");
     }
 
     // Records the pipe device as system audio while `during` runs, and
@@ -4514,7 +4647,7 @@ mod tests {
         sink.set_property("sync", false);
         pipeline.0.add_many([&source, &sink]).unwrap();
         source.link(&sink).unwrap();
-        let lost = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(LostAudio::default());
         count_lost_audio(&source, lost.clone(), Default::default(), counters);
         pipeline.0.set_state(gst::State::Playing).unwrap();
         for &(start, end) in buffers {
@@ -4533,7 +4666,7 @@ mod tests {
             &[gst::MessageType::Eos, gst::MessageType::Error],
         );
         assert!(ended.is_some_and(|message| message.type_() == gst::MessageType::Eos));
-        lost.load(Ordering::Relaxed) as f64 / 1e9
+        lost.amounts().iter().sum::<u64>() as f64 / 1e9
     }
 
     // Capture timestamps decide, not when buffers arrive: a source that
