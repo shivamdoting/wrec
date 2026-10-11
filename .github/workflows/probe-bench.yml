@@ -1,0 +1,107 @@
+name: Probe bench on Blacksmith
+
+on:
+  push:
+    branches:
+      - probe/blacksmith-bench
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe ${{ matrix.run }}
+    runs-on: blacksmith-6vcpu-macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Machine
+        continue-on-error: true
+        run: |
+          set -x
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.model hw.ncpu hw.memsize
+          sysctl kern.hv_vmm_present || true
+          csrutil status || true
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+          pmset -g batt; pmset -g therm
+          uptime
+          top -l 6 -n 0 -s 1 | grep "CPU usage"
+          whoami; ps -o pid,ppid,comm -p $$ -p $PPID
+          ps -axo pid,ppid,%cpu,rss,comm | sort -k3 -nr | head -15
+
+      - name: TCC state
+        continue-on-error: true
+        run: |
+          set -x
+          sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select service,client,client_type,auth_value from access where service like '%Screen%' or service like '%PostEvent%' or service like '%Accessib%';" || true
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select service,client,client_type,auth_value from access where service like '%Screen%';" || true
+          sudo touch "/Library/Application Support/com.apple.TCC/probe-write" && echo SYSTEM_TCC_WRITABLE || echo SYSTEM_TCC_NOT_WRITABLE
+          sudo rm -f "/Library/Application Support/com.apple.TCC/probe-write"
+
+      - name: VideoToolbox and display
+        continue-on-error: true
+        run: |
+          swiftc -O .github/probe/vt.swift -o /tmp/vt
+          /tmp/vt
+
+      - name: Build wrec
+        run: cargo build --release -p cli -p daemon
+
+      - name: Smoke bench (as-is)
+        id: smoke
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          bun run bench --wrec target/release/wrec 2>&1 | tee /tmp/smoke1.log
+
+      - name: Grant Screen Recording via TCC and retry
+        id: smoke2
+        if: steps.smoke.outcome != 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -x
+          for c in "$PWD/target/release/daemon" "$PWD/target/release/wrec" /bin/bash /bin/zsh /usr/local/bin/bun "$(command -v bun)" "$(command -v node || true)"; do
+            [ -n "$c" ] || continue
+            for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "/Library/Application Support/com.apple.TCC/TCC.db"; do
+              sudo sqlite3 "$db" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$c',1,2,4,1,'UNUSED',0,$(date +%s));" || echo "insert failed for $c into $db"
+            done
+          done
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select service,client,auth_value from access where service='kTCCServiceScreenCapture';" || true
+          /tmp/vt | grep CGPreflight || true
+          set -o pipefail
+          bun run bench --wrec target/release/wrec 2>&1 | tee /tmp/smoke2.log
+
+      - name: A/A release bench (same binary twice)
+        if: steps.smoke.outcome == 'success' || steps.smoke2.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          mkdir -p /tmp/wrec-ref
+          cp target/release/wrec target/release/daemon /tmp/wrec-ref/
+          set -o pipefail
+          bun run bench release --wrec target/release/wrec --against /tmp/wrec-ref/wrec --allow-battery 2>&1 | tee /tmp/release.log
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.run }}
+          path: |
+            /tmp/*.log
+            benchmarks/runs/
+            benchmarks/results/
+          if-no-files-found: ignore
