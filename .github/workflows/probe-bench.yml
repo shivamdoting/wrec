@@ -75,7 +75,7 @@ jobs:
           cp target/release/wrec target/release/daemon /tmp/wrec-ref/
           cp "$engine" /tmp/wrec-ref/capture-engine
           now=$(date +%s)
-          for c in "$PWD/target/release/daemon" "$PWD/target/release/wrec" "$engine" /tmp/wrec-ref/wrec /tmp/wrec-ref/daemon /tmp/wrec-ref/capture-engine "$(command -v bun)"; do
+          for c in "$PWD/target/release/daemon" "$PWD/target/release/wrec" "$engine" /tmp/wrec-ref/wrec /tmp/wrec-ref/daemon /tmp/wrec-ref/capture-engine "$(command -v bun)" "$HOME/bin/Runner.Listener" "$HOME/bin/Runner.Worker"; do
             for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "/Library/Application Support/com.apple.TCC/TCC.db"; do
               sudo sqlite3 "$db" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$c',1,2,4,1,'UNUSED',0,$now);"
             done
@@ -89,6 +89,7 @@ jobs:
         run: |
           export WREC_HOME=/tmp/wh2 WREC_DATA_DIR=/tmp/wd2 WREC_HEADLESS=1
           target/release/wrec targets --json 2>&1 | tee /tmp/targets-after.log | head -c 3000
+          tail -40 /tmp/wh2/daemon.log || true
           target/release/wrec daemon stop --json || true
 
       - name: Smoke bench
