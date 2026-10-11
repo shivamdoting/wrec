@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  evaluateCiGates,
   evaluateProfileGates,
   type ProfileSpec,
   type RunResult,
@@ -158,5 +159,59 @@ describe("release gate hardening", () => {
     expect(status("observed_fps")).toBe("pass");
     expect(status("capture_completeness")).toBe("pass");
     expect(status("regression_observed_fps")).toBe("pass");
+  });
+});
+
+describe("ci gates", () => {
+  const mb = 1024 * 1024;
+  const withRss = (
+    rep: number,
+    variant: "candidate" | "reference",
+    rssBytes: number,
+  ) => {
+    const base = run(rep, 500, 100);
+    return {
+      ...base,
+      id: `${variant}-${rep}`,
+      variant,
+      processSummary: { ...base.processSummary, maxTotalRssBytes: rssBytes },
+    } satisfies RunResult;
+  };
+  const reference = [1, 2, 3].map((rep) => withRss(rep, "reference", 46 * mb));
+  const status = (gates: ReturnType<typeof evaluateCiGates>, name: string) =>
+    gates.find((gate) => gate.name === name)?.status;
+
+  test("passes memory within VM noise and fails a real increase", () => {
+    const same = [1, 2, 3].map((rep) => withRss(rep, "candidate", 46.1 * mb));
+    const grown = [1, 2, 3].map((rep) => withRss(rep, "candidate", 48 * mb));
+    const dims = { width: 1920, height: 1080 };
+
+    expect(
+      status(
+        evaluateCiGates(profile, dims, same, reference),
+        "regression_max_rss",
+      ),
+    ).toBe("pass");
+    expect(
+      status(
+        evaluateCiGates(profile, dims, grown, reference),
+        "regression_max_rss",
+      ),
+    ).toBe("fail");
+  });
+
+  test("fails a recording with the wrong codec", () => {
+    const h264 = [1, 2, 3].map((rep) => {
+      const base = withRss(rep, "candidate", 46 * mb);
+      return { ...base, decode: { ...base.decode!, codec: "h264" } };
+    });
+    const gates = evaluateCiGates(
+      profile,
+      { width: 1920, height: 1080 },
+      h264,
+      reference,
+    );
+
+    expect(status(gates, "codec_match")).toBe("fail");
   });
 });

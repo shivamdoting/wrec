@@ -10,7 +10,9 @@ import {
 import os from "node:os";
 import path from "node:path";
 import {
+  ciProfiles,
   combineStatuses,
+  evaluateCiGates,
   evaluateProfileGates,
   expectedOutputDimensions,
   releaseProfiles,
@@ -294,6 +296,9 @@ const main = async () => {
   const summaryPath =
     options.suite === "release" ? await writeSummary(resultsDir, result) : null;
 
+  if (result.suite === "ci") {
+    printGates(result.profiles);
+  }
   console.log(`status: ${result.status}`);
   console.log(`results: ${resultPath}`);
   if (summaryPath) {
@@ -319,7 +324,7 @@ const parseArgs = (args: string[]): CliOptions => {
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === "smoke" || arg === "release") {
+    if (arg === "smoke" || arg === "release" || arg === "ci") {
       suite = arg;
       continue;
     }
@@ -384,9 +389,10 @@ Usage (from the repo root):
   bun run bench                        # smoke: one ungated 5s recording
   bun run bench release                # gated release profiles
   bun run bench release --against /path/to/reference/wrec
+  bun run bench ci --against /path/to/reference/wrec   # PR check: output + memory
 
 Options:
-  smoke | release             suite to run (default: smoke); --suite <name> also works
+  smoke | release | ci        suite to run (default: smoke); --suite <name> also works
   --duration <time>           override profile duration, e.g. 5s, 15s, 1m
   --wrec <path>               candidate binary (default: target/release/wrec, built automatically)
   --against <path>            reference wrec binary for interleaved A/B regression gates
@@ -397,10 +403,10 @@ Options:
 };
 
 const parseSuite = (value: string): SuiteName => {
-  if (value === "smoke" || value === "release") {
+  if (value === "smoke" || value === "release" || value === "ci") {
     return value;
   }
-  throw new Error("--suite expects smoke or release");
+  throw new Error("--suite expects smoke, release, or ci");
 };
 
 const requireValue = (flag: string, value?: string) => {
@@ -588,7 +594,11 @@ const runSuite = async (
   envTrusted: boolean,
 ) => {
   const profiles =
-    options.suite === "release" ? releaseProfiles : [smokeProfile];
+    options.suite === "release"
+      ? releaseProfiles
+      : options.suite === "ci"
+        ? ciProfiles
+        : [smokeProfile];
   const candidate = context.binaries.find(
     (binary) => binary.variant === "candidate",
   )!;
@@ -705,14 +715,22 @@ const runSuite = async (
     const referenceAggregate = reference
       ? summarizeRuns(referenceRuns)
       : undefined;
-    const gates = evaluateProfileGates(
-      profile,
-      options.durationMs,
-      expectedDimensions,
-      candidateRuns,
-      reference ? referenceRuns : undefined,
-      envTrusted,
-    );
+    const gates =
+      options.suite === "ci"
+        ? evaluateCiGates(
+            profile,
+            expectedDimensions,
+            candidateRuns,
+            reference ? referenceRuns : undefined,
+          )
+        : evaluateProfileGates(
+            profile,
+            options.durationMs,
+            expectedDimensions,
+            candidateRuns,
+            reference ? referenceRuns : undefined,
+            envTrusted,
+          );
     const status = statusFromGates(gates, [...candidateRuns, ...referenceRuns]);
     results.push({
       name: profile.name,
@@ -744,6 +762,37 @@ const runSuite = async (
 
   return results;
 };
+
+const printGates = (profiles: ProfileResult[]) => {
+  for (const profile of profiles) {
+    console.log(`${profile.name}: ${profile.status}`);
+    const failedRun = [
+      ...profile.measured.candidate,
+      ...(profile.measured.reference ?? []),
+    ].find((run) => run.exitCode !== 0 || run.error);
+    if (failedRun) {
+      console.log(
+        `  ${failedRun.id} failed: ${failedRun.error ?? `exit ${failedRun.exitCode}`}`,
+      );
+    }
+    for (const gate of profile.gates) {
+      const delta =
+        isFiniteNumber(gate.delta) && gate.name === "regression_max_rss"
+          ? ` (${formatMb(gate.delta, true)}, ${gate.deltaPercent?.toFixed(2)}%)`
+          : "";
+      const measured =
+        gate.name === "regression_max_rss" && isFiniteNumber(gate.measured)
+          ? formatMb(gate.measured)
+          : gate.measured;
+      console.log(
+        `  ${gate.status.padEnd(12)} ${gate.name}: ${measured}${delta}${gate.details ? ` [${gate.details}]` : ""}`,
+      );
+    }
+  }
+};
+
+const formatMb = (bytes: number, signed = false) =>
+  `${signed && bytes >= 0 ? "+" : ""}${(bytes / 1024 / 1024).toFixed(2)} MB`;
 
 const runStableCapture = async (options: Parameters<typeof runCapture>[0]) => {
   let lastRun: RunResult | undefined;
