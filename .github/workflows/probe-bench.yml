@@ -116,7 +116,7 @@ jobs:
 
       - name: FPS ceiling probe
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 8
         run: |
           set +e
           export WREC_HOME=/tmp/wh3 WREC_DATA_DIR=/tmp/wd3 WREC_HEADLESS=1
@@ -128,15 +128,17 @@ jobs:
           win=$(python3 -c "import json;t=json.load(open('/tmp/targets.json'));print([x['id'] for x in t if 'wrec-probe-full' in str(x.get('name',''))][0])")
           disp=1
           rec() { target/release/wrec record start --target "window:$win" --no-system-audio --no-mic --duration "$1" --out "/tmp/rec-$2" --json --no-queue "${@:3}" > /tmp/rec-$2.jsonl 2>&1; echo "### $2 exit=$?"; grep -o '"frames":[0-9]*,"dropped_frames":[0-9]*' /tmp/rec-$2.jsonl | tail -1; grep -o 'capture-engine: [^"]*' /tmp/rec-$2.jsonl | head -1; grep '"error"' /tmp/rec-$2.jsonl | head -2; }
-          rec 5s warm1 --fps 30 --codec hevc
-          rec 5s warm2 --fps 30 --codec hevc
-          rec 10s w30 --fps 30 --codec hevc
-          rec 10s w60 --fps 60 --codec hevc --quality high --resolution native
-          rec 10s w30h264 --fps 30 --codec h264
-          ( for i in $(seq 1 12); do ps -axo %cpu,rss,comm | grep -E "capture-engine|WindowServer" | grep -v grep; sleep 1; done ) > /tmp/ps-during.log &
-          rec 10s w30b --fps 30 --codec hevc
-          wait
-          cat /tmp/ps-during.log
+          rec 6s full30 --fps 30 --codec hevc
+          tail -25 /tmp/wh3/daemon.log
+          pkill fullwin
+          swiftc -O benchmarks/native/stimulus.swift -framework AppKit -framework QuartzCore -o /tmp/stim
+          /tmp/stim > /tmp/stim.log 2>&1 &
+          sleep 4; head -3 /tmp/stim.log
+          target/release/wrec targets --json > /tmp/targets2.json
+          win=$(python3 -c "import json;t=json.load(open('/tmp/targets2.json'));print([x['id'] for x in t if 'wrec-bench-stimulus' in str(x.get('name',''))][0])")
+          rec 6s stimA --fps 30 --codec hevc
+          rec 10s stim30 --fps 30 --codec hevc
+          rec 10s stim60 --fps 60 --codec hevc --quality high --resolution native
           ls -la /tmp/rec-* || true
 
       - name: Upload
