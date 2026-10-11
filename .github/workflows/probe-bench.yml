@@ -126,13 +126,16 @@ jobs:
           python3 -c "import json;t=json.load(open('/tmp/targets.json'));[print(x) for x in t if x.get('kind')=='display' or 'probe' in str(x.get('name',''))]"
           win=$(python3 -c "import json;t=json.load(open('/tmp/targets.json'));print([x['id'] for x in t if 'wrec-probe-full' in str(x.get('name',''))][0])")
           disp=1
-          for t in "window:$win" "display:$disp"; do
-            for f in 30 60; do
-              echo "### target=$t fps=$f"
-              target/release/wrec record start --target "$t" --fps $f --codec hevc --no-system-audio --no-mic --duration 10s --out "/tmp/rec-${t%%:*}-$f" --json --no-queue 2>&1 | tail -3
-              ps -axo %cpu,rss,comm | grep -E "daemon|capture-engine|WindowServer" | grep -v grep
-            done
-          done
+          rec() { target/release/wrec record start --target "window:$win" --no-system-audio --no-mic --duration "$1" --out "/tmp/rec-$2" --json --no-queue "${@:3}" > /tmp/rec-$2.jsonl 2>&1; echo "### $2 exit=$?"; grep -o '"frames":[0-9]*,"dropped_frames":[0-9]*' /tmp/rec-$2.jsonl | tail -1; grep -o 'capture-engine: [^"]*' /tmp/rec-$2.jsonl | head -1; grep '"error"' /tmp/rec-$2.jsonl | head -2; }
+          rec 5s warm1 --fps 30 --codec hevc
+          rec 5s warm2 --fps 30 --codec hevc
+          rec 10s w30 --fps 30 --codec hevc
+          rec 10s w60 --fps 60 --codec hevc --quality high --resolution native
+          rec 10s w30h264 --fps 30 --codec h264
+          ( for i in $(seq 1 12); do ps -axo %cpu,rss,comm | grep -E "capture-engine|WindowServer" | grep -v grep; sleep 1; done ) > /tmp/ps-during.log &
+          rec 10s w30b --fps 30 --codec hevc
+          wait
+          cat /tmp/ps-during.log
           ls -la /tmp/rec-* || true
 
       - name: Upload
