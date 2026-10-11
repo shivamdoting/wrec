@@ -59,41 +59,57 @@ jobs:
       - name: Build wrec
         run: cargo build --release -p cli -p daemon
 
-      - name: Smoke bench (as-is)
+      - name: Targets before grant
+        continue-on-error: true
+        run: |
+          export WREC_HOME=/tmp/wh WREC_DATA_DIR=/tmp/wd WREC_HEADLESS=1
+          target/release/wrec targets --json 2>&1 | tee /tmp/targets-before.log | head -c 2000
+          target/release/wrec daemon stop --json || true
+
+      - name: Grant Screen Recording via TCC
+        run: |
+          set -x
+          mkdir -p /tmp/wrec-ref
+          engine=$(find "$PWD/target/release/build" -name capture-engine -type f | head -1)
+          echo "engine=$engine"
+          cp target/release/wrec target/release/daemon /tmp/wrec-ref/
+          cp "$engine" /tmp/wrec-ref/capture-engine
+          now=$(date +%s)
+          for c in "$PWD/target/release/daemon" "$PWD/target/release/wrec" "$engine" /tmp/wrec-ref/wrec /tmp/wrec-ref/daemon /tmp/wrec-ref/capture-engine "$(command -v bun)"; do
+            for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "/Library/Application Support/com.apple.TCC/TCC.db"; do
+              sudo sqlite3 "$db" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$c',1,2,4,1,'UNUSED',0,$now);"
+            done
+          done
+          sudo killall tccd || true
+          sleep 2
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select client,auth_value from access where service='kTCCServiceScreenCapture';"
+
+      - name: Targets after grant
+        continue-on-error: true
+        run: |
+          export WREC_HOME=/tmp/wh2 WREC_DATA_DIR=/tmp/wd2 WREC_HEADLESS=1
+          target/release/wrec targets --json 2>&1 | tee /tmp/targets-after.log | head -c 3000
+          target/release/wrec daemon stop --json || true
+
+      - name: Smoke bench
         id: smoke
         continue-on-error: true
         timeout-minutes: 10
         run: |
-          set -o pipefail
-          bun run bench --wrec target/release/wrec 2>&1 | tee /tmp/smoke1.log
+          bun run bench --wrec target/release/wrec 2>&1 | tee /tmp/smoke.log
+          grep -q "status: pass" /tmp/smoke.log
 
-      - name: Grant Screen Recording via TCC and retry
-        id: smoke2
-        if: steps.smoke.outcome != 'success'
+      - name: CPU idle trace (60 s)
         continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          set -x
-          for c in "$PWD/target/release/daemon" "$PWD/target/release/wrec" /bin/bash /bin/zsh /usr/local/bin/bun "$(command -v bun)" "$(command -v node || true)"; do
-            [ -n "$c" ] || continue
-            for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "/Library/Application Support/com.apple.TCC/TCC.db"; do
-              sudo sqlite3 "$db" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$c',1,2,4,1,'UNUSED',0,$(date +%s));" || echo "insert failed for $c into $db"
-            done
-          done
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select service,client,auth_value from access where service='kTCCServiceScreenCapture';" || true
-          /tmp/vt | grep CGPreflight || true
-          set -o pipefail
-          bun run bench --wrec target/release/wrec 2>&1 | tee /tmp/smoke2.log
+        run: top -l 60 -n 0 -s 1 | grep "CPU usage" | tee /tmp/idle.log
 
       - name: A/A release bench (same binary twice)
-        if: steps.smoke.outcome == 'success' || steps.smoke2.outcome == 'success'
+        if: steps.smoke.outcome == 'success'
         continue-on-error: true
-        timeout-minutes: 40
+        timeout-minutes: 45
         run: |
-          mkdir -p /tmp/wrec-ref
-          cp target/release/wrec target/release/daemon /tmp/wrec-ref/
-          set -o pipefail
-          bun run bench release --wrec target/release/wrec --against /tmp/wrec-ref/wrec --allow-battery 2>&1 | tee /tmp/release.log
+          bun run bench release --wrec target/release/wrec --against /tmp/wrec-ref/wrec 2>&1 | tee /tmp/release.log
+          grep -q "status: pass" /tmp/release.log
 
       - name: Upload
         if: always()
