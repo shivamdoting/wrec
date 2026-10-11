@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        run: [1, 2]
+        run: [1]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,6 +93,7 @@ jobs:
           target/release/wrec daemon stop --json || true
 
       - name: Smoke bench
+        if: false
         id: smoke
         continue-on-error: true
         timeout-minutes: 10
@@ -101,16 +102,38 @@ jobs:
           grep -q "status: pass" /tmp/smoke.log
 
       - name: CPU idle trace (60 s)
+        if: false
         continue-on-error: true
         run: top -l 60 -n 0 -s 1 | grep "CPU usage" | tee /tmp/idle.log
 
       - name: A/A release bench (same binary twice)
-        if: steps.smoke.outcome == 'success'
+        if: false
         continue-on-error: true
         timeout-minutes: 45
         run: |
           bun run bench release --wrec target/release/wrec --against /tmp/wrec-ref/wrec 2>&1 | tee /tmp/release.log
           grep -q "status: pass" /tmp/release.log
+
+      - name: FPS ceiling probe
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          export WREC_HOME=/tmp/wh3 WREC_DATA_DIR=/tmp/wd3 WREC_HEADLESS=1
+          swiftc -O .github/probe/fullwin.swift -o /tmp/fullwin
+          /tmp/fullwin > /tmp/fullwin.log 2>&1 &
+          sleep 4
+          target/release/wrec targets --json > /tmp/targets.json
+          python3 -c "import json;t=json.load(open('/tmp/targets.json'));[print(x) for x in t if x.get('kind')=='display' or 'probe' in str(x.get('name',''))]"
+          win=$(python3 -c "import json;t=json.load(open('/tmp/targets.json'));print([x['id'] for x in t if 'wrec-probe-full' in str(x.get('name',''))][0])")
+          disp=$(python3 -c "import json;t=json.load(open('/tmp/targets.json'));print([x['id'] for x in t if x.get('kind')=='display'][0])")
+          for t in "window:$win" "display:$disp"; do
+            for f in 30 60; do
+              echo "### target=$t fps=$f"
+              target/release/wrec record start --target "$t" --fps $f --codec hevc --no-system-audio --no-mic --duration 10s --out "/tmp/rec-${t%%:*}-$f" --json --no-queue 2>&1 | tail -3
+              ps -axo %cpu,rss,comm | grep -E "daemon|capture-engine|WindowServer" | grep -v grep
+            done
+          done
+          ls -la /tmp/rec-* || true
 
       - name: Upload
         if: always()
@@ -119,6 +142,8 @@ jobs:
           name: probe-${{ matrix.run }}
           path: |
             /tmp/*.log
+            /tmp/targets.json
+            /tmp/rec-*
             benchmarks/runs/
             benchmarks/results/
           if-no-files-found: ignore
