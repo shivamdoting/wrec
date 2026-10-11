@@ -497,7 +497,7 @@ fn parse_fps(value: &str) -> Result<FrameRate, String> {
 fn parse_codec(value: &str) -> Result<Codec, String> {
     match value {
         "hevc" => Ok(Codec::Hevc),
-        "h264" => Ok(Codec::H264),
+        "h264" => Ok(Codec::Hevc),
         other => Err(format!("invalid --codec `{other}` (expected hevc or h264)")),
     }
 }
