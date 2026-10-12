@@ -606,6 +606,9 @@ const runSuite = async (
     (binary) => binary.variant === "reference",
   );
   const results: ProfileResult[] = [];
+  // A stimulus below 50 fps skews fps and completeness. The ci suite gates
+  // neither, and the CI VM sometimes draws just under 50, so it doesn't retry.
+  const requireSmoothStimulus = options.suite !== "ci";
 
   for (const profile of profiles) {
     const expectedDimensions = expectedOutputDimensions(
@@ -613,19 +616,22 @@ const runSuite = async (
       profile.resolution,
     );
     if (options.suite === "smoke") {
-      const run = await runStableCapture({
-        context,
-        binary: candidate,
-        allBinaries: context.binaries,
-        profile,
-        duration: options.duration,
-        durationMs: options.durationMs,
-        expectedDimensions,
-        sampleIntervalMs: options.sampleIntervalMs,
-        rep: 1,
-        warmup: false,
-        stimulus,
-      });
+      const run = await runStableCapture(
+        {
+          context,
+          binary: candidate,
+          allBinaries: context.binaries,
+          profile,
+          duration: options.duration,
+          durationMs: options.durationMs,
+          expectedDimensions,
+          sampleIntervalMs: options.sampleIntervalMs,
+          rep: 1,
+          warmup: false,
+          stimulus,
+        },
+        requireSmoothStimulus,
+      );
       const aggregate = summarizeRuns([run]);
       results.push({
         name: profile.name,
@@ -652,25 +658,10 @@ const runSuite = async (
     }
 
     const warmups = [
-      await runStableCapture({
-        context,
-        binary: candidate,
-        allBinaries: context.binaries,
-        profile,
-        duration: warmupDuration,
-        durationMs: warmupDurationMs,
-        expectedDimensions,
-        sampleIntervalMs: options.sampleIntervalMs,
-        rep: 0,
-        warmup: true,
-        stimulus,
-      }),
-    ];
-    if (reference) {
-      warmups.push(
-        await runStableCapture({
+      await runStableCapture(
+        {
           context,
-          binary: reference,
+          binary: candidate,
           allBinaries: context.binaries,
           profile,
           duration: warmupDuration,
@@ -680,7 +671,28 @@ const runSuite = async (
           rep: 0,
           warmup: true,
           stimulus,
-        }),
+        },
+        requireSmoothStimulus,
+      ),
+    ];
+    if (reference) {
+      warmups.push(
+        await runStableCapture(
+          {
+            context,
+            binary: reference,
+            allBinaries: context.binaries,
+            profile,
+            duration: warmupDuration,
+            durationMs: warmupDurationMs,
+            expectedDimensions,
+            sampleIntervalMs: options.sampleIntervalMs,
+            rep: 0,
+            warmup: true,
+            stimulus,
+          },
+          requireSmoothStimulus,
+        ),
       );
     }
 
@@ -692,19 +704,22 @@ const runSuite = async (
           ? [reference, candidate]
           : [candidate, reference].filter(isPresent);
       for (const binary of order) {
-        const run = await runStableCapture({
-          context,
-          binary,
-          allBinaries: context.binaries,
-          profile,
-          duration: options.duration,
-          durationMs: options.durationMs,
-          expectedDimensions,
-          sampleIntervalMs: options.sampleIntervalMs,
-          rep,
-          warmup: false,
-          stimulus,
-        });
+        const run = await runStableCapture(
+          {
+            context,
+            binary,
+            allBinaries: context.binaries,
+            profile,
+            duration: options.duration,
+            durationMs: options.durationMs,
+            expectedDimensions,
+            sampleIntervalMs: options.sampleIntervalMs,
+            rep,
+            warmup: false,
+            stimulus,
+          },
+          requireSmoothStimulus,
+        );
         (binary.variant === "candidate" ? candidateRuns : referenceRuns).push(
           run,
         );
@@ -794,14 +809,17 @@ const printGates = (profiles: ProfileResult[]) => {
 const formatMb = (bytes: number, signed = false) =>
   `${signed && bytes >= 0 ? "+" : ""}${(bytes / 1024 / 1024).toFixed(2)} MB`;
 
-const runStableCapture = async (options: Parameters<typeof runCapture>[0]) => {
+const runStableCapture = async (
+  options: Parameters<typeof runCapture>[0],
+  requireSmoothStimulus: boolean,
+) => {
   let lastRun: RunResult | undefined;
   let lastProblem = "";
 
   for (let attempt = 1; attempt <= captureAttempts; attempt += 1) {
     await Bun.sleep(captureCooldownMs);
     const run = await runCapture(options);
-    const problem = unstableMeasurement(run);
+    const problem = unstableMeasurement(run, requireSmoothStimulus);
     if (!problem) return run;
 
     lastRun = run;
@@ -821,12 +839,16 @@ const runStableCapture = async (options: Parameters<typeof runCapture>[0]) => {
   };
 };
 
-const unstableMeasurement = (run: RunResult) => {
+const unstableMeasurement = (
+  run: RunResult,
+  requireSmoothStimulus: boolean,
+) => {
   if (run.exitCode !== 0) return `recorder exited ${run.exitCode}`;
   if (run.error) return run.error;
   if (run.decoderError) return run.decoderError;
   if (!run.observed) return "decoded observation unavailable";
   if (
+    requireSmoothStimulus &&
     isFiniteNumber(run.observed.stimulusAchievedFps) &&
     run.observed.stimulusAchievedFps < minimumStimulusFps
   ) {

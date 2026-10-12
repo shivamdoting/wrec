@@ -9,8 +9,10 @@ on:
 permissions:
   contents: read
 
+# The label name is in the group so adding some other label to the PR can't
+# cancel a running bench.
 concurrency:
-  group: bench-${{ github.event.pull_request.number }}
+  group: bench-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:

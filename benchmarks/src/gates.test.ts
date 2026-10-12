@@ -214,4 +214,19 @@ describe("ci gates", () => {
 
     expect(status(gates, "codec_match")).toBe("fail");
   });
+
+  test("fails a recording with no frames", () => {
+    const empty = [1, 2, 3].map((rep) => {
+      const base = withRss(rep, "candidate", 46 * mb);
+      return { ...base, decode: { ...base.decode!, frames: [] } };
+    });
+    const gates = evaluateCiGates(
+      profile,
+      { width: 1920, height: 1080 },
+      empty,
+      reference,
+    );
+
+    expect(status(gates, "frames_decoded")).toBe("fail");
+  });
 });

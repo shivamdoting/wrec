@@ -522,6 +522,14 @@ export const evaluateCiGates = (
   referenceRuns?: RunResult[],
 ): Gate[] => [
   ...outputGates(profile, expectedDimensions, candidateRuns),
+  {
+    name: "frames_decoded",
+    threshold: "> 0 in every run",
+    measured: summarizeRuns(candidateRuns).observed.decodedFrames,
+    status: candidateRuns.every((run) => (run.decode?.frames.length ?? 0) > 0)
+      ? "pass"
+      : "fail",
+  },
   regressionGate(
     "regression_max_rss",
     "bytes",
