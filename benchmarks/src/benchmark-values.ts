@@ -9,4 +9,4 @@ export const nullableNumber = (value: unknown) => {
 };
 
 export const benchmarkExitCode = (suite: SuiteName, status: OverallStatus) =>
-  suite === "release" && status !== "pass" ? 1 : 0;
+  suite !== "smoke" && status !== "pass" ? 1 : 0;

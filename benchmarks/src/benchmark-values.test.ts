@@ -21,6 +21,11 @@ describe("benchmarkExitCode", () => {
     expect(benchmarkExitCode("release", "inconclusive")).toBe(1);
   });
 
+  test("fails the PR check when it does not pass", () => {
+    expect(benchmarkExitCode("ci", "pass")).toBe(0);
+    expect(benchmarkExitCode("ci", "fail")).toBe(1);
+  });
+
   test("keeps smoke runs informational", () => {
     expect(benchmarkExitCode("smoke", "pass")).toBe(0);
     expect(benchmarkExitCode("smoke", "fail")).toBe(0);

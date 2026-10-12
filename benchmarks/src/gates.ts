@@ -1,4 +1,4 @@
-export type SuiteName = "smoke" | "release";
+export type SuiteName = "smoke" | "release" | "ci";
 export type VariantName = "candidate" | "reference";
 export type Quality = "efficient" | "balanced" | "high";
 export type Codec = "hevc" | "h264";
@@ -223,10 +223,22 @@ export const releaseProfiles: ProfileSpec[] = [
   },
 ];
 
+// The PR check runs on a CI VM, where capture fps and CPU only measure the VM.
+// It keeps the gates a VM can't distort: output correctness and memory.
+export const ciProfiles: ProfileSpec[] = releaseProfiles.filter(
+  (profile) =>
+    profile.name === "balanced-1080p30-hevc" ||
+    profile.name === "balanced-1080p30-h264",
+);
+
 const cpuNoiseFloor = 3;
 const rssNoiseFloor = 20 * 1024 * 1024;
 const startLatencyNoiseFloor = 500;
 const finalizeLatencyNoiseFloor = 150;
+// Max RSS moved under 0.25% between two copies of one binary on the CI VM,
+// so the PR check can flag a memory change far smaller than the release gate.
+const ciRssNoiseFloor = 1024 * 1024;
+const ciRssPercentTolerance = 2;
 
 export const expectedOutputDimensions = (
   native: Dimensions,
@@ -442,32 +454,7 @@ export const evaluateProfileGates = (
       ),
     }),
   );
-  gates.push({
-    name: "pts_monotonic",
-    threshold: "true",
-    measured: candidate.observed.ptsMonotonic,
-    status: candidate.observed.ptsMonotonic ? "pass" : "fail",
-  });
-  gates.push({
-    name: "codec_match",
-    threshold: profile.codec,
-    measured: candidate.observed.codec,
-    status: candidateRuns.every((run) => run.decode?.codec === profile.codec)
-      ? "pass"
-      : "fail",
-  });
-  gates.push({
-    name: "dimensions_match_request",
-    threshold: `${expectedDimensions.width}x${expectedDimensions.height}`,
-    measured: candidate.observed.dimensions
-      ? `${candidate.observed.dimensions.width}x${candidate.observed.dimensions.height}`
-      : null,
-    status: candidateRuns.every((run) =>
-      dimensionsEqual(run.decode?.dimensions, expectedDimensions),
-    )
-      ? "pass"
-      : "fail",
-  });
+  gates.push(...outputGates(profile, expectedDimensions, candidateRuns));
   gates.push(
     numericBudgetGate({
       name: "self_report_disagreement",
@@ -526,6 +513,68 @@ export const evaluateProfileGates = (
         }
       : gate,
   );
+};
+
+export const evaluateCiGates = (
+  profile: ProfileSpec,
+  expectedDimensions: Dimensions,
+  candidateRuns: RunResult[],
+  referenceRuns?: RunResult[],
+): Gate[] => [
+  ...outputGates(profile, expectedDimensions, candidateRuns),
+  {
+    name: "frames_decoded",
+    threshold: "> 0 in every run",
+    measured: summarizeRuns(candidateRuns).observed.decodedFrames,
+    status: candidateRuns.every((run) => (run.decode?.frames.length ?? 0) > 0)
+      ? "pass"
+      : "fail",
+  },
+  regressionGate(
+    "regression_max_rss",
+    "bytes",
+    candidateRuns,
+    referenceRuns,
+    (run) => run.processSummary.maxTotalRssBytes,
+    ciRssNoiseFloor,
+    ciRssPercentTolerance,
+  ),
+];
+
+const outputGates = (
+  profile: ProfileSpec,
+  expectedDimensions: Dimensions,
+  candidateRuns: RunResult[],
+): Gate[] => {
+  const candidate = summarizeRuns(candidateRuns);
+  return [
+    {
+      name: "pts_monotonic",
+      threshold: "true",
+      measured: candidate.observed.ptsMonotonic,
+      status: candidate.observed.ptsMonotonic ? "pass" : "fail",
+    },
+    {
+      name: "codec_match",
+      threshold: profile.codec,
+      measured: candidate.observed.codec,
+      status: candidateRuns.every((run) => run.decode?.codec === profile.codec)
+        ? "pass"
+        : "fail",
+    },
+    {
+      name: "dimensions_match_request",
+      threshold: `${expectedDimensions.width}x${expectedDimensions.height}`,
+      measured: candidate.observed.dimensions
+        ? `${candidate.observed.dimensions.width}x${candidate.observed.dimensions.height}`
+        : null,
+      status: candidateRuns.every((run) =>
+        dimensionsEqual(run.decode?.dimensions, expectedDimensions),
+      )
+        ? "pass"
+        : "fail",
+    },
+  ];
 };
 
 export const statusFromGates = (

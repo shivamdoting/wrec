@@ -43,6 +43,22 @@ cd docs && bun run dev   # then open localhost:4321/benchmarks
 The smoke suite runs one balanced HEVC recording against the stimulus window and
 does not apply release gates. It is meant for local sanity checks and CI plumbing.
 
+## PR Check
+
+Add the `bench` label to a PR to run `.github/workflows/bench.yml`. It builds
+the PR and its base branch on a Blacksmith macOS runner and runs:
+
+```sh
+bun run bench ci --wrec target/release/wrec --against /path/to/base/wrec
+```
+
+The `ci` suite records balanced 1080p HEVC and H.264 for 5 s, three times per
+build. It fails if a recording breaks (exit code, decode, codec, dimensions,
+timestamp order) or if peak memory grows more than 2% and 1 MB over the base.
+It skips fps, CPU, and latency gates, because the runner is a VM and those
+numbers only measure the VM. To run it again after new commits, remove the
+label and add it back.
+
 ## Release Gate
 
 Before creating a version tag, run the local release check from a clean checkout

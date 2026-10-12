@@ -1,0 +1,98 @@
+name: Bench
+
+# Runs only when a maintainer adds the `bench` label to a PR. Remove and re-add
+# the label to run it again after new commits.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+# The label name is in the group so adding some other label to the PR can't
+# cancel a running bench.
+concurrency:
+  group: bench-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: Output and memory check
+    if: github.event.label.name == 'bench'
+    runs-on: blacksmith-6vcpu-macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Check out the base branch
+        run: |
+          echo "BASE_DIR=$RUNNER_TEMP/wrec-base" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/wrec-base" "${{ github.event.pull_request.base.sha }}"
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ${{ env.BASE_DIR }}/target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Build base
+        working-directory: ${{ env.BASE_DIR }}
+        run: cargo build --release -p cli -p daemon
+
+      - name: Build PR
+        run: cargo build --release -p cli -p daemon
+
+      # The VM has SIP off, so TCC.db is writable. macOS checks the runner
+      # process that launched the recorder, so the runner itself needs the grant.
+      - name: Grant Screen Recording
+        run: |
+          now=$(date +%s)
+          for c in \
+            "$PWD/target/release/wrec" "$PWD/target/release/daemon" \
+            "$BASE_DIR/target/release/wrec" "$BASE_DIR/target/release/daemon" \
+            $(find "$PWD/target/release/build" "$BASE_DIR/target/release/build" -name capture-engine -type f) \
+            "$(command -v bun)" "$HOME/bin/Runner.Listener" "$HOME/bin/Runner.Worker"; do
+            for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "/Library/Application Support/com.apple.TCC/TCC.db"; do
+              sudo sqlite3 "$db" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$c',1,2,4,1,'UNUSED',0,$now);"
+            done
+          done
+          sudo killall tccd || true
+          sleep 2
+
+      - name: Bench PR against base
+        run: |
+          set -o pipefail
+          bun run bench ci --wrec target/release/wrec --against "$BASE_DIR/target/release/wrec" 2>&1 | tee /tmp/bench.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```'
+            sed -n '/^[a-z0-9-]*: \(pass\|fail\|inconclusive\)$/,$p' /tmp/bench.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.event.pull_request.number }}
+          path: benchmarks/runs/
+          if-no-files-found: ignore
