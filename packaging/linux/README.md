@@ -162,6 +162,14 @@ captures when their buffers are returned or removed, leave incomplete image
 buffers empty, and restart capture when new buffers have no image on a static
 output or a cancelled frame may have consumed its damage.
 
+Stock 0.8.4, the newest release, still fails on a still screen. On native
+Sway, with a still screen and the same wrec build, it sent no first frame
+within 15 seconds, and when wrec retried in another capture mode it exited
+with "session already has a frame object", so every later recording in the
+run failed. Both runs broke at the first or second of 16 recordings. The patched 0.8.1 passed all 21 cases on the same still screen,
+and stock 0.8.4 passed all 21 on a moving one. When nothing reaches the
+encoder, wrec says the source sent no picture rather than blaming the GPU.
+
 The older wlr-screencopy path also has a static-start limitation. The portal
 shares a screencopy-manager binding across sessions and asks for each new
 session's first frame with damage tracking. The first session consumes the

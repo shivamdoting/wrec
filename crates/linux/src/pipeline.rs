@@ -1669,6 +1669,9 @@ fn reject_capture(
 
 const UNFINISHED_FIRST_FRAME: &str = "The screen-capture source started with an unfinished frame, so this attempt stopped before encoding and another available mode will be tried.";
 
+// Nothing reached the encoder, so its driver is not what failed.
+const NO_PICTURE: &str = "The screen-capture source sent no picture within 15s. Some portals send nothing until the screen changes: xdg-desktop-portal-wlr through at least 0.8.4 does on a still screen, and can then exit when capture is retried. See packaging/linux/README.md for its patches.";
+
 const SOURCE_LOST: &str =
     "The captured X11 window closed, was minimized, or became unavailable; the recording stopped.";
 
@@ -1853,6 +1856,9 @@ fn run(
             });
         }
         if !started && launched.elapsed() > Duration::from_secs(15) {
+            if counters.queued.load(Ordering::Relaxed) == 0 {
+                return Err(backend(NO_PICTURE));
+            }
             return Err(backend("No encoded frame arrived within 15s. Check DMA-BUF support, VA-API driver access, and audio devices."));
         }
         if stopping.is_some_and(|at| at.elapsed() > FINALIZING) {
@@ -5650,6 +5656,44 @@ mod tests {
         }
         expected.push((Teardown::Recording, false));
         assert_eq!(signals.into_inner().unwrap(), expected);
+    }
+
+    // A source that never sends a picture, as xdg-desktop-portal-wlr does on
+    // a still screen, is named as the cause, not the GPU or its driver.
+    #[test]
+    fn a_source_that_sends_no_picture_is_named_as_the_cause() {
+        gst::init().unwrap();
+        let settings = silent_settings(Codec::H264);
+        let capture = CaptureInput::Element(Box::new(|| {
+            let source = element("videotestsrc").unwrap();
+            source.set_property("is-live", true);
+            source
+                .static_pad("src")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, |_, _| gst::PadProbeReturn::Drop);
+            source
+        }));
+        let attempt = Attempt {
+            mode: encoding::modes(settings.codec, false)[0],
+            counters: Arc::new(Counters::default()),
+            last: true,
+            stopping: &|_| {},
+        };
+        let (events, _received) = mpsc::channel();
+        let (_commands, receiver) = mpsc::sync_channel(1);
+        let (_stop, stopped) = watch::channel(false);
+        let error = record_attempt(
+            &capture,
+            &test_session(),
+            &settings,
+            &events,
+            &receiver,
+            &stopped,
+            &attempt,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(NO_PICTURE), "{error}");
     }
 
     fn variable_rate(rate: i32) -> gst::Caps {
