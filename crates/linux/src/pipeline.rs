@@ -1257,36 +1257,48 @@ struct LostAudio {
     by_server: AtomicU64,
     // The server dropped it because wrec fell behind reading.
     by_wrec: AtomicU64,
+    // Gaps the server and wrec each caused part of, which reached wrec as
+    // one gap, so their shares are unknown.
+    by_both: AtomicU64,
     // The source didn't say.
     unexplained: AtomicU64,
 }
 
 impl LostAudio {
     fn add(&self, missing: gst::ClockTime, flags: gst::BufferFlags) {
-        let counter = if flags.contains(crate::pulse::FELL_BEHIND) {
-            &self.by_wrec
-        } else if flags.contains(crate::pulse::SERVER_LOST) {
-            &self.by_server
-        } else {
-            &self.unexplained
+        let (server, wrec) = (
+            flags.contains(crate::pulse::SERVER_LOST),
+            flags.contains(crate::pulse::FELL_BEHIND),
+        );
+        let counter = match (server, wrec) {
+            (true, true) => &self.by_both,
+            (false, true) => &self.by_wrec,
+            (true, false) => &self.by_server,
+            (false, false) => &self.unexplained,
         };
         counter.fetch_add(missing.nseconds(), Ordering::Relaxed);
     }
 
-    // By the server, by wrec, unexplained.
-    fn amounts(&self) -> [u64; 3] {
-        [&self.by_server, &self.by_wrec, &self.unexplained]
-            .map(|counter| counter.load(Ordering::Relaxed))
+    // By the server, by wrec, by both, unexplained.
+    fn amounts(&self) -> [u64; 4] {
+        [
+            &self.by_server,
+            &self.by_wrec,
+            &self.by_both,
+            &self.unexplained,
+        ]
+        .map(|counter| counter.load(Ordering::Relaxed))
     }
 }
 
 // What lost these amounts, such as "the audio server lost 0.20 s". The
 // server's share includes the few milliseconds pulse.rs discards around a
 // PipeWire graph loss because their place is unknown.
-fn loss_causes(amounts: [u64; 3]) -> String {
+fn loss_causes(amounts: [u64; 4]) -> String {
     let causes = [
         "the audio server lost {} s",
         "wrec fell behind reading and the audio server dropped {} s",
+        "the audio server lost and dropped {} s while wrec also fell behind",
         "{} s went missing without its source saying why",
     ];
     amounts
@@ -1681,7 +1693,7 @@ fn run(
     let mut stopping = None;
     let mut last_metrics = Instant::now();
     let mut omitted = Vec::new();
-    let mut logged_lost = vec![[0; 3]; movie.audio.len()];
+    let mut logged_lost = vec![[0; 4]; movie.audio.len()];
     let mut most_buffered = 0;
     let mut video_cut = false;
     // Where in the movie wrec was frozen, and for how long.
@@ -4621,6 +4633,26 @@ mod tests {
             (reported - hole).abs() < 0.05,
             "reported {reported}s, the movie misses {hole}s"
         );
+    }
+
+    // A gap is counted by what its first buffer says lost it, and one
+    // that two causes made is reported as both, not given to either.
+    #[test]
+    fn lost_audio_is_reported_by_cause() {
+        let lost = LostAudio::default();
+        let ms = gst::ClockTime::from_mseconds;
+        lost.add(ms(200), crate::pulse::SERVER_LOST);
+        lost.add(ms(300), crate::pulse::FELL_BEHIND);
+        lost.add(
+            ms(50),
+            crate::pulse::SERVER_LOST | crate::pulse::FELL_BEHIND,
+        );
+        lost.add(ms(40), gst::BufferFlags::empty());
+        assert_eq!(
+            loss_causes(lost.amounts()),
+            "the audio server lost 0.20 s, wrec fell behind reading and the audio server dropped 0.30 s, the audio server lost and dropped 0.05 s while wrec also fell behind, 0.04 s went missing without its source saying why"
+        );
+        assert_eq!(loss_causes(LostAudio::default().amounts()), "");
     }
 
     // Audio lost between buffers with these capture times, in seconds, with

@@ -461,8 +461,9 @@ PulseAudio or `pipewire-pulse` lost it while wrec kept up, as when the machine
 froze; it includes the few milliseconds wrec discards around a PipeWire graph
 loss. "wrec fell behind reading" means the server had lately held at least half
 a second of audio wrec had not read when it dropped audio, as when the movie
-writer or wrec's own process stalled. A gap whose source did not say why is
-reported as such, and an end that had not arrived by the stop separately.
+writer or wrec's own process stalled. When one gap had both causes, the warning
+says so without splitting it. A gap whose source did not say why is reported
+as such, and an end that had not arrived by the stop separately.
 
 When wrec's process does not run for more than half a second while recording,
 as when it is stopped or the machine freezes, no new picture reaches the movie
