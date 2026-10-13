@@ -1,0 +1,7 @@
+3097b6466ba4ee03457c51a24b816b8da7670bc8666cd6f991239f16182c554a  patches/v0.7.1/0001-screencast-copy-the-first-frame-without-waiting-for-.patch
+c8226073d00e5f4902fc2ce8701e3262d5cc4f1cc7aa2ee0fdf62610594b3173  patches/v0.7.1/0002-screencast-destroy-a-closed-stream-without-waiting-f.patch
+41f9df241bc0dade4e98552e303b75b559d26f6ed22ba4a1cbd3adbdbaa5c7a9  patches/v0.7.1/0003-screencast-wait-a-frame-when-the-consumer-holds-ever.patch
+1cbd3c7cb839f908c3f09ead7c4b0ada09a1bfc128335eab37b4a0658dde543c  patches/v0.8.1/0001-screencast-cancel-the-pending-capture-when-its-buffe.patch
+ab9c86ef358c972ad7bdf7027a24ceea0799ed0194e162d88b9557312de96711  patches/v0.8.1/0002-screencast-get-a-first-frame-without-waiting-for-dam.patch
+22fa93d1dd471bdcb3b296ed32c454c8a820c93b40c9cf64a89a4d05d8817389  patches/v0.8.1/0003-pipewire-send-buffers-without-a-complete-image-as-em.patch
+24aad38e662e5274b54b97ea9cdb212957165f64208b499261356f506b6ef70f  patches/v0.8.1/0004-screencast-start-a-new-capture-session-after-cancell.patch

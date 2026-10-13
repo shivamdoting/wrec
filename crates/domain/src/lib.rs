@@ -257,7 +257,7 @@ pub struct CaptureDimensions {
     pub output_height: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecorderEvent {
     Starting {
         session_id: u64,
@@ -277,6 +277,11 @@ pub enum RecorderEvent {
         session_id: u64,
         metrics: RecorderMetrics,
     },
+    /// The recording finished, but its movie is missing video frames or audio.
+    MediaLost {
+        session_id: u64,
+        message: String,
+    },
     Failed {
         session_id: Option<u64>,
         message: String,
@@ -286,10 +291,16 @@ pub enum RecorderEvent {
         success: bool,
         status: String,
     },
+    Cancelled {
+        session_id: u64,
+    },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum RecorderError {
+    #[error("recording cancelled before capture started")]
+    Cancelled,
+
     #[error("screen recording permission is not granted")]
     MissingScreenRecordingPermission,
 

@@ -1,6 +1,6 @@
 use crate::{
     coordinator::{lock_state, Coordinator, SharedCoordinator},
-    runtime::{MacosRuntime, RecordingRuntime},
+    runtime::{PlatformRuntime, RecordingRuntime},
 };
 use control::{
     daemon_log_path, response_error, socket_path, wrec_home, AgentError, IpcRequest, IpcResponse,
@@ -73,7 +73,7 @@ pub fn serve_forever() -> Result<(), String> {
     listener
         .set_nonblocking(true)
         .map_err(|err| format!("failed to configure {}: {err}", socket.display()))?;
-    let state = Arc::new(Mutex::new(Coordinator::new(MacosRuntime)));
+    let state = Arc::new(Mutex::new(Coordinator::new(PlatformRuntime)));
 
     while !TERMINATED.load(Ordering::SeqCst) && !Coordinator::shutdown_requested(&state) {
         match listener.accept() {
@@ -88,12 +88,23 @@ pub fn serve_forever() -> Result<(), String> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        Coordinator::stop_for_shutdown(&state);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while Coordinator::capture_active(&state) && std::time::Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        if Coordinator::capture_active(&state) {
+            tracing::error!("capture did not finalize within 15s during daemon shutdown");
+        }
+    }
     tracing::info!("daemon stopped");
     let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 
-fn handle_client(stream: UnixStream, state: SharedCoordinator<MacosRuntime>) {
+fn handle_client(stream: UnixStream, state: SharedCoordinator<PlatformRuntime>) {
     if let Err(err) = stream.set_nonblocking(false) {
         tracing::warn!("client blocking mode failed: {err}");
     }

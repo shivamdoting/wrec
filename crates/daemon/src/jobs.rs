@@ -95,7 +95,7 @@ impl<E> JobRecord<E> {
             self.status = JobStatus::Cancelled;
             self.finished_at_ms = Some(now_ms());
             self.control = None;
-            self.push_event(EventLevel::Warning, "queued job cancelled");
+            self.push_event(EventLevel::Warning, "job cancelled");
         }
     }
 
