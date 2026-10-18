@@ -65,12 +65,12 @@ stream's maximum rate. Missing rate information uses the requested ceiling.
 
 The movie writer uses frame timestamps for playback timing. Refresh-rate
 changes can also change the encoder's parameter sets. The movie keeps its
-initial track description and carries those parameter sets with each keyframe,
-using `avc3` for H.264 and `hev1` for HEVC. This avoids changing the sample
+initial track description, which holds the first parameter sets, and carries
+the current ones with each keyframe. This avoids changing the sample
 description in a fragmented movie, which can make older versions of
-GStreamer's movie muxer write unplayable fragments. Playback requires a reader
-that supports these sample entries; FFmpeg playback is covered by the recording
-tests.
+GStreamer's movie muxer write unplayable fragments. The description uses `avc1`
+for H.264 and `hvc1` for HEVC, because QuickTime and Safari refuse `avc3` and
+`hev1`.
 When an encoder omits a frame's duration, wrec supplies one frame at the
 current capture rate, falling back to the requested rate when the encoded caps
 have no rate. The last frame then has a nonzero duration in the finalized movie.

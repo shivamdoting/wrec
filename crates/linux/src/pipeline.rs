@@ -1500,14 +1500,16 @@ fn match_keyframes_to_capture(encoder: &gst::Element, fps: u32) {
 // A capture rate change reconfigures the encoder, which writes new parameter
 // sets. mp4mux stores those as an extra sample description, which a fragmented
 // movie cannot reference, so the movie keeps its first description and every
-// keyframe carries its own parameter sets (avc3/hev1).
+// keyframe carries its own parameter sets. The description holds the first
+// parameter sets (avc1/hvc1): Apple's players refuse avc3 and hev1, and an
+// avc3 description from h264parse holds none.
 fn movie_format(codec: Codec, fps: u32) -> Result<gst::Element> {
     let format = element("capsfilter")?;
     format.set_property(
         "caps",
         match codec {
-            Codec::H264 => gst::Caps::builder("video/x-h264").field("stream-format", "avc3"),
-            Codec::Hevc => gst::Caps::builder("video/x-h265").field("stream-format", "hev1"),
+            Codec::H264 => gst::Caps::builder("video/x-h264").field("stream-format", "avc"),
+            Codec::Hevc => gst::Caps::builder("video/x-h265").field("stream-format", "hvc1"),
         }
         .field("alignment", "au")
         .build(),
@@ -5385,7 +5387,7 @@ mod tests {
         video.set_property(
             "caps",
             gst::Caps::builder("video/x-h264")
-                .field("stream-format", "avc3")
+                .field("stream-format", "avc")
                 .field("alignment", "au")
                 .field("width", 320i32)
                 .field("height", 180i32)
@@ -6331,12 +6333,25 @@ mod tests {
         for probe in [&probe, &probe_movie(&recording.partial)] {
             assert_eq!(
                 probe["streams"][0]["codec_tag_string"],
-                if name == "h264" { "avc3" } else { "hev1" }
+                if name == "h264" { "avc1" } else { "hvc1" }
             );
             assert!(
                 !probe.to_string().contains("New Extradata"),
                 "the movie switches sample descriptions"
             );
+        }
+        // Apple's decoders start from the parameter sets in the description.
+        for movie in [movie, &recording.partial] {
+            let boxes = video_boxes(movie);
+            let parameter_sets = match boxes
+                .iter()
+                .find(|(name, _)| name == "avcC" || name == "hvcC")
+            {
+                Some((name, config)) if name == "avcC" => config[5] & 0x1f,
+                Some((_, config)) => config[22],
+                None => 0,
+            };
+            assert!(parameter_sets > 0, "{movie:?} describes no parameter sets");
         }
         let partial = probe_movie(&recording.partial);
         let partial_packets = video_packets(&partial);
@@ -6765,7 +6780,7 @@ mod tests {
 
     #[test]
     fn frames_without_a_duration_last_one_frame_at_the_capture_rate() {
-        let encoded = "video/x-h264, stream-format=avc3, alignment=au, width=320, height=180";
+        let encoded = "video/x-h264, stream-format=avc, alignment=au, width=320, height=180";
         let rated = |rate: &str| format!("{encoded}, framerate=0/1, max-framerate={rate}");
         let frame = |rate: u64| Some(gst::ClockTime::SECOND / rate);
         assert_eq!(
