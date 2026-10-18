@@ -1,0 +1,58 @@
+From a9155888c1a45a08fda1e2018177511d61790130 Mon Sep 17 00:00:00 2001
+From: Shivam Sharma <shivamhwp@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 15:18:30 +0000
+Subject: [PATCH 3/3] screencast: wait a frame when the consumer holds every
+ buffer
+
+When no PipeWire buffer is free, the frame is finished and the next one
+is requested right away. Until the consumer returns a buffer, xdpw and
+the compositor run that loop as fast as they can: one consumer that kept
+its buffers after a pause made xdpw use 18 s of CPU in 15 s, logging
+"out of buffers" 328541 times.
+
+Retry one frame interval later instead. Also cancel the pending frame
+when the stream pauses, since its buffer goes back to PipeWire and a
+resume starts a fresh capture anyway.
+---
+ src/screencast/pipewire_screencast.c | 3 +++
+ src/screencast/wlr_screencast.c      | 9 ++++++++-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/screencast/pipewire_screencast.c b/src/screencast/pipewire_screencast.c
+index a193bd2..abf0bf2 100644
+--- a/src/screencast/pipewire_screencast.c
++++ b/src/screencast/pipewire_screencast.c
+@@ -187,6 +187,9 @@ static void pwr_handle_stream_state_changed(void *data,
+ 		break;
+ 	case PW_STREAM_STATE_PAUSED:
+ 		if (old == PW_STREAM_STATE_STREAMING) {
++			// The buffer goes back to PipeWire, so nothing may still be
++			// capturing into it. Resuming starts a fresh capture.
++			xdpw_wlr_frame_cancel(cast);
+ 			xdpw_pwr_enqueue_buffer(cast);
+ 		}
+ 		// fall through
+diff --git a/src/screencast/wlr_screencast.c b/src/screencast/wlr_screencast.c
+index 32b213e..88bb484 100644
+--- a/src/screencast/wlr_screencast.c
++++ b/src/screencast/wlr_screencast.c
+@@ -173,8 +173,15 @@ static void wlr_frame_buffer_done(void *data,
+ 	}
+ 
+ 	if (!cast->current_frame.xdpw_buffer) {
++		// The consumer holds every buffer. Asking for the next frame right
++		// away spins xdpw and the compositor until one comes back, so try
++		// again one frame later.
+ 		logprint(WARN, "wlroots: no current buffer");
+-		xdpw_wlr_frame_finish(cast);
++		wlr_frame_free(cast);
++		cast->frame_state = XDPW_FRAME_STATE_FAILED;
++		uint32_t rate = cast->framerate > 0 ? cast->framerate : 60;
++		xdpw_add_timer(cast->ctx->state, 1000000000ull / rate,
++			(xdpw_event_loop_timer_func_t) xdpw_wlr_frame_start, cast);
+ 		return;
+ 	}
+ 
+-- 
+2.39.5
+

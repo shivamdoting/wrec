@@ -1,0 +1,175 @@
+diff -ru a/src/plugins/screencast/outputscreencastsource.cpp b/src/plugins/screencast/outputscreencastsource.cpp
+--- a/src/plugins/screencast/outputscreencastsource.cpp	2026-10-09 22:54:58.506481127 +0000
++++ b/src/plugins/screencast/outputscreencastsource.cpp	2026-10-09 22:54:58.808739381 +0000
+@@ -11,8 +11,6 @@
+ 
+ #include "compositor.h"
+ #include "core/output.h"
+-#include "core/renderbackend.h"
+-#include "core/renderloop.h"
+ #include "cursor.h"
+ #include "opengl/eglbackend.h"
+ #include "opengl/egldisplay.h"
+@@ -103,11 +101,6 @@
+     return bufferDamage;
+ }
+ 
+-std::chrono::nanoseconds OutputScreenCastSource::clock() const
+-{
+-    return m_output->backendOutput()->renderLoop()->lastPresentationTimestamp();
+-}
+-
+ uint OutputScreenCastSource::refreshRate() const
+ {
+     return m_output->refreshRate();
+diff -ru a/src/plugins/screencast/outputscreencastsource.h b/src/plugins/screencast/outputscreencastsource.h
+--- a/src/plugins/screencast/outputscreencastsource.h	2026-10-09 22:54:58.506526856 +0000
++++ b/src/plugins/screencast/outputscreencastsource.h	2026-10-09 22:54:58.808848724 +0000
+@@ -34,7 +34,6 @@
+     void setRenderCursor(bool enable) override;
+     Region render(GLFramebuffer *target, const Region &bufferRepair) override;
+     Region render(QImage *target, const Region &bufferRepair) override;
+-    std::chrono::nanoseconds clock() const override;
+ 
+     void resume() override;
+     void pause() override;
+diff -ru a/src/plugins/screencast/regionscreencastsource.cpp b/src/plugins/screencast/regionscreencastsource.cpp
+--- a/src/plugins/screencast/regionscreencastsource.cpp	2026-10-09 22:54:58.506665596 +0000
++++ b/src/plugins/screencast/regionscreencastsource.cpp	2026-10-09 22:54:58.808966684 +0000
+@@ -57,11 +57,6 @@
+     return DRM_FORMAT_ARGB8888;
+ }
+ 
+-std::chrono::nanoseconds RegionScreenCastSource::clock() const
+-{
+-    return m_last;
+-}
+-
+ void RegionScreenCastSource::setRenderCursor(bool enable)
+ {
+     m_renderCursor = enable;
+@@ -72,7 +67,6 @@
+ 
+ Region RegionScreenCastSource::render(GLFramebuffer *target, const Region &bufferRepair)
+ {
+-    m_last = std::chrono::steady_clock::now().time_since_epoch();
+     m_layer->setFramebuffer(target, bufferRepair & Rect(QPoint(), target->size()));
+     if (!m_layer->preparePresentationTest()) {
+         return Region{};
+diff -ru a/src/plugins/screencast/regionscreencastsource.h b/src/plugins/screencast/regionscreencastsource.h
+--- a/src/plugins/screencast/regionscreencastsource.h	2026-10-09 22:54:58.506713219 +0000
++++ b/src/plugins/screencast/regionscreencastsource.h	2026-10-09 22:54:58.809071439 +0000
+@@ -33,7 +33,6 @@
+     void setRenderCursor(bool enable) override;
+     Region render(GLFramebuffer *target, const Region &bufferRepair) override;
+     Region render(QImage *target, const Region &bufferRepair) override;
+-    std::chrono::nanoseconds clock() const override;
+ 
+     void close();
+     void pause() override;
+@@ -48,7 +47,6 @@
+     const Rect m_region;
+     const qreal m_scale;
+     const std::optional<pid_t> m_pidToHide;
+-    std::chrono::nanoseconds m_last{0};
+     bool m_closed = false;
+     bool m_active = false;
+     bool m_renderCursor = false;
+diff -ru a/src/plugins/screencast/screencastsource.h b/src/plugins/screencast/screencastsource.h
+--- a/src/plugins/screencast/screencastsource.h	2026-10-09 22:54:58.507056869 +0000
++++ b/src/plugins/screencast/screencastsource.h	2026-10-09 22:54:58.809158959 +0000
+@@ -34,7 +34,6 @@
+     virtual void setRenderCursor(bool enable) = 0;
+     virtual Region render(GLFramebuffer *target, const Region &bufferRepair) = 0;
+     virtual Region render(QImage *target, const Region &bufferRepair) = 0;
+-    virtual std::chrono::nanoseconds clock() const = 0;
+ 
+     virtual void resume() = 0;
+     virtual void pause() = 0;
+diff -ru a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
+--- a/src/plugins/screencast/screencaststream.cpp	2026-10-09 22:54:58.507100314 +0000
++++ b/src/plugins/screencast/screencaststream.cpp	2026-10-09 22:54:58.809280817 +0000
+@@ -607,6 +607,10 @@
+ 
+     spa_meta_sync_timeline *synctmeta = nullptr;
+ 
++    // Use one timestamp for this record operation. Sample it before video
++    // rendering, readback and buffer synchronization add latency.
++    const auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch());
+     Region damage;
+     if (effectiveContents & Content::Video) {
+         if (auto memfd = dynamic_cast<MemFdScreenCastBuffer *>(buffer)) {
+@@ -650,7 +654,7 @@
+     }
+ 
+     addDamage(spa_buffer, damage);
+-    addHeader(spa_buffer);
++    addHeader(spa_buffer, timestamp);
+ 
+     if (effectiveContents & Content::Video) {
+         spa_data->chunk->flags = SPA_CHUNK_FLAG_NONE;
+@@ -688,14 +692,14 @@
+     pw_stream_update_params(m_pwStream, params.data(), params.count());
+ }
+ 
+-void ScreenCastStream::addHeader(spa_buffer *spaBuffer)
++void ScreenCastStream::addHeader(spa_buffer *spaBuffer, std::chrono::nanoseconds timestamp)
+ {
+     spa_meta_header *spaHeader = (spa_meta_header *)spa_buffer_find_meta_data(spaBuffer, SPA_META_Header, sizeof(spa_meta_header));
+     if (spaHeader) {
+         spaHeader->flags = 0;
+         spaHeader->dts_offset = 0;
+         spaHeader->seq = m_sequential++;
+-        spaHeader->pts = m_source->clock().count();
++        spaHeader->pts = timestamp.count();
+     }
+ }
+ 
+diff -ru a/src/plugins/screencast/screencaststream.h b/src/plugins/screencast/screencaststream.h
+--- a/src/plugins/screencast/screencaststream.h	2026-10-09 22:54:58.507152596 +0000
++++ b/src/plugins/screencast/screencaststream.h	2026-10-09 22:54:58.809434847 +0000
+@@ -90,7 +90,7 @@
+     void resize(const QSize &resolution);
+     void coreFailed(const QString &errorMessage);
+     void addCursorMetadata(spa_buffer *spaBuffer, Cursor *cursor);
+-    void addHeader(spa_buffer *spaBuffer);
++    void addHeader(spa_buffer *spaBuffer, std::chrono::nanoseconds timestamp);
+     void corruptHeader(spa_buffer *spaBuffer);
+     void addDamage(spa_buffer *spaBuffer, const Region &damagedRegion);
+     void newStreamParams();
+diff -ru a/src/plugins/screencast/windowscreencastsource.cpp b/src/plugins/screencast/windowscreencastsource.cpp
+--- a/src/plugins/screencast/windowscreencastsource.cpp	2026-10-09 22:54:58.507244515 +0000
++++ b/src/plugins/screencast/windowscreencastsource.cpp	2026-10-09 22:54:58.809523520 +0000
+@@ -9,8 +9,6 @@
+ #include "screencastutils.h"
+ 
+ #include "compositor.h"
+-#include "core/backendoutput.h"
+-#include "core/renderloop.h"
+ #include "core/rendertarget.h"
+ #include "core/renderviewport.h"
+ #include "effect/effect.h"
+@@ -142,11 +140,6 @@
+     return Rect(QPoint(), target->size());
+ }
+ 
+-std::chrono::nanoseconds WindowScreenCastSource::clock() const
+-{
+-    return m_windows[0]->output()->backendOutput()->renderLoop()->lastPresentationTimestamp();
+-}
+-
+ uint WindowScreenCastSource::refreshRate() const
+ {
+     return m_windows[0]->output()->refreshRate();
+diff -ru a/src/plugins/screencast/windowscreencastsource.h b/src/plugins/screencast/windowscreencastsource.h
+--- a/src/plugins/screencast/windowscreencastsource.h	2026-10-09 22:54:58.507290424 +0000
++++ b/src/plugins/screencast/windowscreencastsource.h	2026-10-09 22:54:58.809617002 +0000
+@@ -31,7 +31,6 @@
+     void setRenderCursor(bool enable) override;
+     Region render(GLFramebuffer *target, const Region &bufferDamage) override;
+     Region render(QImage *target, const Region &bufferDamage) override;
+-    std::chrono::nanoseconds clock() const override;
+ 
+     void resume() override;
+     void pause() override;

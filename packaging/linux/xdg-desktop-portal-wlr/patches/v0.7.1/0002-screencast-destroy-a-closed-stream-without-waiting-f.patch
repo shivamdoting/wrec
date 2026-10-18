@@ -1,0 +1,99 @@
+From f4978446229c6c2739830b02578fa97d7baca74e Mon Sep 17 00:00:00 2001
+From: Shivam Sharma <shivamhwp@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 14:56:09 +0000
+Subject: [PATCH 2/3] screencast: destroy a closed stream without waiting for
+ its frame
+
+When the last session of a stream closes while a frame is pending, the
+instance was only marked to quit and destroyed once that frame finished.
+copy_with_damage on an unchanged output never finishes, so every
+recording stopped on a static screen leaked its PipeWire stream, its
+buffers and about 20 file descriptors.
+
+Cancel the pending frame and any frame-limiter timer and destroy the
+instance right away, the same way output removal already does. 0.8.0
+made the same change in "screencast: Simplify shutdown/error flow".
+---
+ include/wlr_screencast.h        |  1 +
+ src/core/session.c              | 16 ++++++----------
+ src/screencast/wlr_screencast.c | 18 ++++++++++++++++++
+ 3 files changed, 25 insertions(+), 10 deletions(-)
+
+diff --git a/include/wlr_screencast.h b/include/wlr_screencast.h
+index d3599b6..abc0f80 100644
+--- a/include/wlr_screencast.h
++++ b/include/wlr_screencast.h
+@@ -27,6 +27,7 @@ bool xdpw_wlr_target_from_data(struct xdpw_screencast_context *ctx, struct xdpw_
+ 
+ void xdpw_wlr_frame_finish(struct xdpw_screencast_instance *cast);
+ void xdpw_wlr_frame_start(struct xdpw_screencast_instance *cast);
++void xdpw_wlr_frame_cancel(struct xdpw_screencast_instance *cast);
+ void xdpw_wlr_register_cb(struct xdpw_screencast_instance *cast);
+ 
+ #endif
+diff --git a/src/core/session.c b/src/core/session.c
+index de41717..6a103cc 100644
+--- a/src/core/session.c
++++ b/src/core/session.c
+@@ -5,6 +5,7 @@
+ #include <assert.h>
+ #include "xdpw.h"
+ #include "screencast.h"
++#include "wlr_screencast.h"
+ #include "logger.h"
+ 
+ static const char interface_name[] = "org.freedesktop.impl.portal.Session";
+@@ -68,16 +69,11 @@ void xdpw_session_destroy(struct xdpw_session *sess) {
+ 		logprint(DEBUG, "xdpw: screencast instance %p now has %d references",
+ 			cast, cast->refcount);
+ 		if (cast->refcount < 1) {
+-			if (cast->frame_state == XDPW_FRAME_STATE_NONE) {
+-				logprint(TRACE, "xdpw: screencast instance not streaming, destroy it");
+-				xdpw_screencast_instance_destroy(cast);
+-			} else if (cast->teardown) {
+-				logprint(TRACE, "xdpw: screencast instance marked for teardown, destroy it");
+-				xdpw_screencast_instance_destroy(cast);
+-			} else {
+-				logprint(TRACE, "xdpw: screencast instance still streaming, set quit flag");
+-				cast->quit = true;
+-			}
++			// Don't wait for a pending frame to finish: copy_with_damage on
++			// an unchanged output never does, and the instance would leak.
++			logprint(TRACE, "xdpw: destroying screencast instance");
++			xdpw_wlr_frame_cancel(cast);
++			xdpw_screencast_instance_destroy(cast);
+ 		}
+ 	}
+ 
+diff --git a/src/screencast/wlr_screencast.c b/src/screencast/wlr_screencast.c
+index 56f8d76..32b213e 100644
+--- a/src/screencast/wlr_screencast.c
++++ b/src/screencast/wlr_screencast.c
+@@ -32,6 +32,24 @@ void wlr_frame_free(struct xdpw_screencast_instance *cast) {
+ 	logprint(TRACE, "wlroots: frame destroyed");
+ }
+ 
++void xdpw_wlr_frame_cancel(struct xdpw_screencast_instance *cast) {
++	if (cast->frame_state == XDPW_FRAME_STATE_STARTED) {
++		// frame_callback is the pending frame; wlr_frame is the same object
++		// once its buffer event arrived.
++		zwlr_screencopy_frame_v1_destroy(cast->frame_callback);
++		cast->wlr_frame = NULL;
++		logprint(TRACE, "wlroots: pending frame cancelled");
++	}
++	// the instance might be waiting for wakeup by the frame limiter
++	struct xdpw_timer *timer, *ttmp;
++	wl_list_for_each_safe(timer, ttmp, &cast->ctx->state->timers, link) {
++		if (timer->user_data == cast) {
++			xdpw_destroy_timer(timer);
++		}
++	}
++	cast->frame_state = XDPW_FRAME_STATE_NONE;
++}
++
+ void xdpw_wlr_frame_finish(struct xdpw_screencast_instance *cast) {
+ 	logprint(TRACE, "wlroots: finish screencopy");
+ 
+-- 
+2.39.5
+
